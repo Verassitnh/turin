@@ -15,6 +15,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use turin_contracts::base_schemas::js_trim;
 use turin_contracts::{
     NodeId, ProviderThreadId, ProviderTurnId, RunId, ThreadId, TrimmedNonEmptyString, TurnItemId,
     UtcDateTime,
@@ -203,7 +204,7 @@ pub fn update_selection(
     effort: Option<Option<&str>>,
     tier: Option<Option<&str>>,
 ) -> Vec<ProviderAdapterV2Event> {
-    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+    let Some(model) = model.map(js_trim).filter(|model| !model.is_empty()) else {
         return vec![];
     };
     let previous_options = state
@@ -226,7 +227,7 @@ pub fn update_selection(
             ("reasoningEffort", effort.flatten()),
             ("serviceTier", tier.flatten()),
         ] {
-            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(value) = value.map(js_trim).filter(|value| !value.is_empty()) {
                 kept.push(json!({"id": id, "value": value}));
             }
         }
@@ -293,7 +294,7 @@ pub fn settings_updated(
 /// Upstream `subagentThreadTitle`.
 fn thread_title(parent_title: &str, title: Option<&str>, prompt: &str, ordinal: usize) -> String {
     let trimmed = |text: &str| {
-        let text = text.trim();
+        let text = js_trim(text);
         (!text.is_empty()).then(|| text.to_owned())
     };
     match title.and_then(trimmed).or_else(|| trimmed(prompt)) {
@@ -1048,7 +1049,7 @@ pub fn child_user_message(
         .filter_map(|part| part.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("\n");
-    let text = text.trim();
+    let text = js_trim(&text);
     if text.is_empty() {
         return vec![];
     }

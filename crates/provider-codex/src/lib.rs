@@ -27,6 +27,7 @@ pub mod driver;
 #[cfg(test)]
 mod driver_tests;
 pub mod goal;
+pub mod interrupt;
 pub mod items;
 pub mod orchestration_adapter;
 pub mod params;

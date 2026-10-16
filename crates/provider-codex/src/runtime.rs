@@ -9,24 +9,7 @@ use std::{
 };
 use turin_codex_app_server::{client::Client, errors::AppServerError};
 use turin_contracts::provider_setup::ProviderSetupError;
-
-// Kept byte-for-byte in behavior with provider-core's `expand_home_path` until
-// its in-progress crate compiles against the contracts used by this branch.
-fn expand_home_path(value: &str, home: &str) -> String {
-    if value == "~" {
-        return home.to_owned();
-    }
-    if let Some(tail) = value
-        .strip_prefix("~/")
-        .or_else(|| value.strip_prefix("~\\"))
-    {
-        if tail.is_empty() {
-            return home.to_owned();
-        }
-        return Path::new(home).join(tail).to_string_lossy().into_owned();
-    }
-    value.to_owned()
-}
+use turin_provider_core::path_expansion::expand_home_path;
 
 #[derive(Debug, Clone)]
 pub struct CodexRuntimeConfig {

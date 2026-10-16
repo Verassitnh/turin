@@ -47,6 +47,8 @@ struct McpElicitationMetadata {
     allow_persistent_approval: Option<bool>,
     persist: Option<McpElicitationPersist>,
     target: Option<McpElicitationTarget>,
+    /// The wire key is `tool_params`, not the camelCase `toolParams`.
+    #[serde(rename = "tool_params")]
     tool_params: Option<McpElicitationToolParams>,
 }
 
@@ -359,6 +361,21 @@ mod tests {
             "srv",
         );
         assert_eq!(name, "srv");
+    }
+
+    #[test]
+    fn app_name_reads_the_snake_case_tool_params_key() {
+        let (name, _) = describe_mcp_elicitation(
+            &json!({"serverName": "srv", "message": "m",
+                    "_meta": {"tool_params": {"app_name": "Calendar"}}}),
+            "srv",
+        );
+        assert_eq!(name, "Calendar");
+        let (name, _) = describe_mcp_elicitation(
+            &json!({"serverName": "srv", "message": "m", "_meta": {"tool_params": {"app": "Docs"}}}),
+            "srv",
+        );
+        assert_eq!(name, "Docs");
     }
 
     #[test]

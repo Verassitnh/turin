@@ -7,7 +7,7 @@ use crate::{
     codex_mcp_elicitation::describe_mcp_elicitation,
     codex_usage_limits::{CodexRateLimitSnapshot, codex_rate_limits_to_update},
     goal::{self, GoalCommand},
-    items,
+    interrupt, items,
     params::{RuntimePolicy, TurnContext},
     projection::{self, RuntimeState, TurnState},
     runtime::{CodexRuntimeConfig, CodexRuntimeResolver},
@@ -454,6 +454,18 @@ fn ingest(
         .turn()
         .is_some_and(|turn| parked.iter().any(|p| p.turn() == Some(turn)));
     if behind_parked || !admitted(&item, state) {
+        // A frame for a turn that already ended will never be admitted. Parking it would
+        // only grow the queue every later arrival scans.
+        if !behind_parked
+            && item
+                .turn()
+                .is_some_and(|turn| state.finished.contains(turn))
+        {
+            if let Parked::Request(request) = &item {
+                reject_unanswered(state, request);
+            }
+            return vec![];
+        }
         if parked.len() >= PARKED_LIMIT {
             parked.pop_front();
         }
@@ -508,46 +520,69 @@ async fn project_pump(
         // Reap finished tasks so the set does not grow.
         while background.try_join_next().is_some() {}
         let flush = projection::next_flush(&state.lock());
-        let mut batch = tokio::select! {
+        let wake = tokio::select! {
             raw = recv_raw(&mut events) => match raw {
-                Some(raw) => {
-                    if let Some(sink) = &usage_sink {
-                        push_usage_limits(sink, &raw);
-                    }
-                    // The callback must not wait on the injection's response, which this
-                    // pump reads.
-                    if raw.method == "item/completed"
-                        && raw.params.pointer("/item/type").and_then(Value::as_str)
-                            == Some("contextCompaction")
-                        && let Some(thread) = raw.params.get("threadId").and_then(Value::as_str)
-                    {
-                        let session = session.clone();
-                        let thread = thread.to_owned();
-                        background.spawn(async move {
-                            session.restore_additional_context(&thread).await;
-                        });
-                    }
-                    ingest(&mut parked, Parked::Event(raw), &mut state.lock(), &session_id)
-                }
+                Some(raw) => Wake::Event(raw),
                 None => return,
             },
-            request = recv_request(&mut requests) => {
-                ingest(&mut parked, Parked::Request(request), &mut state.lock(), &session_id)
-            }
-            _ = registered.notified() => vec![],
+            request = recv_request(&mut requests) => Wake::Request(request),
+            _ = registered.notified() => Wake::Idle,
             _ = async {
                 match flush {
                     Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
-            } => projection::flush_due(&mut state.lock(), tokio::time::Instant::now()),
+            } => Wake::Flush,
         };
-        batch.extend(drain_parked(&mut parked, &mut state.lock(), &session_id));
-        let unanswered = std::mem::take(&mut state.lock().unanswered);
+        if let Wake::Event(raw) = &wake {
+            if let Some(sink) = &usage_sink {
+                push_usage_limits(sink, raw);
+            }
+            // The callback must not wait on the injection's response, which this
+            // pump reads.
+            if raw.method == "item/completed"
+                && raw.params.pointer("/item/type").and_then(Value::as_str)
+                    == Some("contextCompaction")
+                && let Some(thread) = raw.params.get("threadId").and_then(Value::as_str)
+            {
+                let session = session.clone();
+                let thread = thread.to_owned();
+                background.spawn(async move {
+                    session.restore_additional_context(&thread).await;
+                });
+            }
+        }
+        // One guard from computing the events to sending them: a command's events, which are
+        // sent under the same lock, can neither overtake these nor trail them.
+        let (unanswered, interrupts) = {
+            let mut guard = state.lock();
+            let mut batch = match wake {
+                Wake::Event(raw) => {
+                    ingest(&mut parked, Parked::Event(raw), &mut guard, &session_id)
+                }
+                Wake::Request(request) => ingest(
+                    &mut parked,
+                    Parked::Request(request),
+                    &mut guard,
+                    &session_id,
+                ),
+                Wake::Idle => vec![],
+                Wake::Flush => projection::flush_due(&mut guard, tokio::time::Instant::now()),
+            };
+            batch.extend(drain_parked(&mut parked, &mut guard, &session_id));
+            for event in batch {
+                if out.send(event).is_err() {
+                    return;
+                }
+            }
+            (
+                std::mem::take(&mut guard.unanswered),
+                std::mem::take(&mut guard.interrupts),
+            )
+        };
         for (id, decision) in unanswered {
             session.broker.reply(id, decision);
         }
-        let interrupts = std::mem::take(&mut state.lock().interrupts);
         for (thread, turn) in interrupts {
             // Upstream interrupts a late child turn and does not wait on it: the
             // interrupt is bounded by a timeout, and its failure is only logged.
@@ -567,12 +602,15 @@ async fn project_pump(
                 }
             });
         }
-        for event in batch {
-            if out.send(event).is_err() {
-                return;
-            }
-        }
     }
+}
+
+/// What woke the pump.
+enum Wake {
+    Event(CodexEvent),
+    Request(PendingRequest),
+    Idle,
+    Flush,
 }
 
 fn thread_from(
@@ -751,6 +789,252 @@ fn snapshot(
 }
 
 impl CodexProviderRuntime {
+    /// The active turns in the lineage of `roots` (the roots included).
+    fn active_lineage(&self, roots: &[String]) -> Vec<interrupt::Target> {
+        let state = self.state.lock();
+        let mut found: Vec<interrupt::Target> = state
+            .turns
+            .values()
+            .filter(|turn| interrupt::in_lineage(&state, turn, roots))
+            .filter_map(|turn| {
+                projection::turn_native_thread(turn).map(|thread| interrupt::Target {
+                    native_turn: turn.native_turn.clone(),
+                    thread,
+                    active: true,
+                })
+            })
+            .collect();
+        found.sort_by(|left, right| left.native_turn.cmp(&right.native_turn));
+        found
+    }
+
+    /// `turn/interrupt` for each target, all at once, bounded to 10 s.
+    async fn interrupt_all(&self, targets: &[interrupt::Target]) -> Result<(), String> {
+        let requests = targets.iter().map(|target| {
+            self.session
+                .interrupt_turn(&target.thread, &target.native_turn)
+        });
+        match tokio::time::timeout(Duration::from_secs(10), futures::future::join_all(requests))
+            .await
+        {
+            Ok(results) => results
+                .into_iter()
+                .find_map(Result::err)
+                .map_or(Ok(()), |cause| Err(cause.to_string())),
+            Err(_) => {
+                tracing::warn!(
+                    turns = ?targets.iter().map(|t| t.native_turn.as_str()).collect::<Vec<_>>(),
+                    "Codex interrupt timed out"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Adds the lineage turns that started after the Stop began to the tracked set,
+    /// marking them interrupting. Returns them.
+    fn track_new_lineage(
+        &self,
+        roots: &[String],
+        tracked: &mut Vec<String>,
+        include_roots: bool,
+    ) -> Vec<interrupt::Target> {
+        let lineage = self.active_lineage(roots);
+        let mut state = self.state.lock();
+        let mut added = vec![];
+        for target in lineage {
+            if tracked.contains(&target.native_turn)
+                || (!include_roots && roots.contains(&target.native_turn))
+            {
+                continue;
+            }
+            tracked.push(target.native_turn.clone());
+            state.interrupting.insert(target.native_turn.clone());
+            added.push(target);
+        }
+        added
+    }
+
+    /// `finalizeRemainingInterruptLineage`: whatever of the lineage is still active after the
+    /// waits is interrupted and ended as interrupted, so a Stop never leaves a turn running.
+    async fn finalize_remaining(&self, roots: &[String], tracked: &mut Vec<String>) {
+        for _ in 0..100 {
+            let lineage = self.active_lineage(roots);
+            if lineage.is_empty() {
+                return;
+            }
+            let newly = self.track_new_lineage(roots, tracked, true);
+            if !newly.is_empty()
+                && let Err(cause) = self.interrupt_all(&newly).await
+            {
+                tracing::warn!(%cause, "orchestration-v2.codex-remaining-lineage-interrupt-failed");
+            }
+            let now = UtcDateTime::now();
+            self.apply(|state| {
+                let mut events = vec![];
+                for target in &lineage {
+                    events.extend(projection::project_event(
+                        CodexEvent::from_notification(
+                            "turn/completed".to_owned(),
+                            json!({
+                                "threadId": target.thread,
+                                "turn": {
+                                    "id": target.native_turn,
+                                    "status": "interrupted",
+                                    "completedAt": now.as_datetime().timestamp(),
+                                },
+                            }),
+                        ),
+                        state,
+                    ));
+                }
+                events
+            });
+        }
+    }
+
+    /// Terminates each terminal not yet contained. Every one is attempted, and the first
+    /// failure is reported afterwards.
+    async fn terminate_terminals(
+        &self,
+        terminals: &[(String, String)],
+        contained: &mut std::collections::HashSet<(String, String)>,
+    ) -> Result<(), String> {
+        let mut first_failure = None;
+        for terminal in terminals {
+            if contained.contains(terminal) {
+                continue;
+            }
+            match interrupt::terminate_background_terminal(
+                self.session.client(),
+                &terminal.0,
+                &terminal.1,
+            )
+            .await
+            {
+                Ok(()) => {
+                    contained.insert(terminal.clone());
+                }
+                Err(cause) => {
+                    first_failure.get_or_insert(cause);
+                }
+            }
+        }
+        first_failure.map_or(Ok(()), Err)
+    }
+
+    /// Waits up to 10 s for the active targets to end.
+    async fn wait_for_targets(&self, targets: &[String]) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let state = self.state.lock();
+                if !targets
+                    .iter()
+                    .any(|native| state.turns.contains_key(native))
+                {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn run_interrupt(
+        &self,
+        plan: &interrupt::Plan,
+        terminals: Vec<(String, String)>,
+        tracked: &mut Vec<String>,
+    ) -> Result<(), String> {
+        // Interrupt each target Codex still runs.
+        for target in &plan.targets {
+            let running =
+                target.active && self.state.lock().turns.contains_key(&target.native_turn);
+            if !running {
+                continue;
+            }
+            if let Err(cause) = self
+                .session
+                .interrupt_turn(&target.thread, &target.native_turn)
+                .await
+            {
+                self.finalize_remaining(&plan.roots, tracked).await;
+                return Err(cause.to_string());
+            }
+        }
+        let mut contained = std::collections::HashSet::new();
+        let active: Vec<String> = plan
+            .targets
+            .iter()
+            .filter(|target| target.active)
+            .map(|target| target.native_turn.clone())
+            .collect();
+        // Terminals are stopped while the turns wind down.
+        let (_, completed) = tokio::join!(
+            self.terminate_terminals(&terminals, &mut contained),
+            self.wait_for_targets(&active)
+        );
+        if !completed {
+            tracing::warn!(
+                turns = ?active,
+                "orchestration-v2.codex-interrupt-timeout"
+            );
+        }
+        // Turns that started under the lineage since the Stop began.
+        let late = self.track_new_lineage(&plan.roots, tracked, false);
+        if !late.is_empty()
+            && let Err(cause) = self.interrupt_all(&late).await
+        {
+            self.finalize_remaining(&plan.roots, tracked).await;
+            return Err(cause);
+        }
+        self.finalize_remaining(&plan.roots, tracked).await;
+        // Everything attempted again, with what the lineage still holds.
+        let mut all = terminals;
+        {
+            let state = self.state.lock();
+            let targets: Vec<interrupt::Target> = tracked
+                .iter()
+                .filter_map(|native| {
+                    state
+                        .turns
+                        .get(native)
+                        .or_else(|| state.settled.get(native))
+                        .and_then(|turn| {
+                            projection::turn_native_thread(turn).map(|thread| interrupt::Target {
+                                native_turn: native.clone(),
+                                thread,
+                                active: true,
+                            })
+                        })
+                })
+                .collect();
+            for terminal in interrupt::terminals(&state, &targets) {
+                if !all.contains(&terminal) {
+                    all.push(terminal);
+                }
+            }
+        }
+        self.terminate_terminals(&all, &mut contained).await?;
+        // Stop the retained items without rewriting the completed root turn.
+        let now = UtcDateTime::now();
+        self.apply(|state| {
+            let mut events = vec![];
+            for target in &plan.targets {
+                events.extend(projection::stop_settled_work(
+                    state,
+                    &target.native_turn,
+                    now,
+                ));
+            }
+            events
+        });
+        Ok(())
+    }
+
     /// `toCodexInput`.
     async fn codex_input(
         &self,
@@ -774,6 +1058,14 @@ impl CodexProviderRuntime {
             },
             cause,
         )
+    }
+
+    /// Runs `change` on the state and sends the events it returns before the lock is released,
+    /// so the pump (which sends under the same lock) cannot interleave a newer event.
+    fn apply(&self, change: impl FnOnce(&mut RuntimeState) -> Vec<ProviderAdapterV2Event>) {
+        let mut state = self.state.lock();
+        let events = change(&mut state);
+        self.send(events);
     }
 
     fn send(&self, events: Vec<ProviderAdapterV2Event>) {
@@ -822,8 +1114,7 @@ impl CodexProviderRuntime {
                 .await
                 .map_err(fail)?,
         );
-        let events = goal::set_goal(&mut self.state.lock(), &thread, current.clone());
-        self.send(events);
+        self.apply(|state| goal::set_goal(state, &thread, current.clone()));
 
         match &command {
             GoalCommand::Show => {
@@ -843,8 +1134,7 @@ impl CodexProviderRuntime {
                     .and_then(|response| response.get("cleared"))
                     .and_then(Value::as_bool)
                     == Some(true);
-                let events = goal::set_goal(&mut self.state.lock(), &thread, None);
-                self.send(events);
+                self.apply(|state| goal::set_goal(state, &thread, None));
                 let reply = if cleared {
                     "Goal cleared."
                 } else {
@@ -869,8 +1159,7 @@ impl CodexProviderRuntime {
                     )
                     .await
                     .map_err(fail)?;
-                let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
-                self.send(events);
+                self.apply(|state| goal::set_goal(state, &thread, goal_of(response)));
                 self.send(goal::reply_events(
                     &input,
                     "Goal paused. Send /goal resume to continue.",
@@ -900,8 +1189,7 @@ impl CodexProviderRuntime {
                 )
                 .await
                 .map_err(fail)?;
-            let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
-            self.send(events);
+            self.apply(|state| goal::set_goal(state, &thread, goal_of(response)));
         }
         // Until the goal is active, a fast first turn holds the run.
         self.state.lock().goal_activations.insert(thread.clone());
@@ -930,19 +1218,19 @@ impl CodexProviderRuntime {
             Ok::<_, ProviderAdapterV2Error>(goal_of(response))
         }
         .await;
-        let mut state = self.state.lock();
-        state.goal_activations.remove(&thread);
-        let active = goal::is_active(&state, &thread);
-        let mut events = match &outcome {
-            Ok(goal) => goal::set_goal(&mut state, &thread, goal.clone()),
-            Err(_) => vec![],
-        };
-        // A run held for an activation that did not happen settles now.
-        if !goal::is_active(&state, &thread) || !active {
-            events.extend(goal::release_hold(&mut state, &thread));
-        }
-        drop(state);
-        self.send(events);
+        self.apply(|state| {
+            state.goal_activations.remove(&thread);
+            let active = goal::is_active(state, &thread);
+            let mut events = match &outcome {
+                Ok(goal) => goal::set_goal(state, &thread, goal.clone()),
+                Err(_) => vec![],
+            };
+            // A run held for an activation that did not happen settles now.
+            if !goal::is_active(state, &thread) || !active {
+                events.extend(goal::release_hold(state, &thread));
+            }
+            events
+        });
         outcome.map(|_| ())
     }
     /// Starts a native Codex turn for this run's configuration. Upstream `startNativeTurn`.
@@ -1338,61 +1626,58 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
                 )
             })
     }
+    /// Upstream `interruptTurn`: Stop reaches the active turn, every turn running under it
+    /// (subagents), and the settled turns of that lineage that still hold commands or tools.
     async fn interrupt_turn(
         &self,
         input: ProviderAdapterV2InterruptInput,
     ) -> Result<(), ProviderAdapterV2Error> {
-        let thread = native_id(&input.provider_thread)?.to_owned();
-        let native_turn = self
-            .state
-            .lock()
-            .turns
-            .iter()
-            .find(|(id, _)| derive::provider_turn(&self.driver, id) == input.provider_turn_id)
-            .map(|(id, _)| id.clone())
-            .unwrap_or_else(|| input.provider_turn_id.as_str().to_owned());
-        let interrupt_error = |e| {
+        let interrupt_error = |cause: &dyn std::fmt::Display| {
             error(
                 ProviderAdapterErrorKind::Interrupt {
                     driver: self.driver.clone(),
                     provider_thread_id: input.provider_thread.id.clone(),
                     provider_turn_id: input.provider_turn_id.clone(),
                 },
-                e,
+                cause,
             )
         };
-        self.session
-            .interrupt_turn(&thread, &native_turn)
-            .await
-            .map_err(interrupt_error)?;
-        // Commands still running under this turn keep their background terminal
-        // alive after the turn stops, so Codex needs an explicit terminate.
-        let processes: Vec<String> = self
-            .state
-            .lock()
-            .turns
-            .get(&native_turn)
-            .map(|turn| {
-                turn.running_commands
-                    .iter()
-                    .filter_map(|command| command.process_id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        for process_id in processes {
-            // Upstream calls this through the raw client: the method is not in the
-            // pinned typed surface.
-            self.session
-                .client()
-                .raw
-                .request(
-                    "thread/backgroundTerminals/terminate",
-                    Some(json!({"threadId": thread, "processId": process_id})),
-                )
-                .await
-                .map_err(interrupt_error)?;
+        let restart = input.request_runtime_restart == Some(true);
+        let plan = interrupt::plan(
+            &self.state.lock(),
+            &input.provider_turn_id,
+            &input.provider_thread.id,
+            restart,
+        );
+        let Some(plan) = plan else {
+            // Stop on a settled turn this process retains nothing for.
+            if restart {
+                return Ok(());
+            }
+            return Err(interrupt_error(&format!(
+                "Provider turn {} is not active and cannot be interrupted.",
+                input.provider_turn_id
+            )));
+        };
+        let mut tracked: Vec<String> = plan
+            .targets
+            .iter()
+            .map(|target| target.native_turn.clone())
+            .collect();
+        // Read the terminals before anything ends: ending a stopped turn forgets its commands.
+        let terminals = {
+            let mut state = self.state.lock();
+            state.interrupting.extend(tracked.iter().cloned());
+            interrupt::terminals(&state, &plan.targets)
+        };
+        let outcome = self.run_interrupt(&plan, terminals, &mut tracked).await;
+        {
+            let mut state = self.state.lock();
+            for native in &tracked {
+                state.interrupting.remove(native);
+            }
         }
-        Ok(())
+        outcome.map_err(|detail| interrupt_error(&detail))
     }
     async fn respond_to_runtime_request(
         &self,
@@ -1984,5 +2269,40 @@ mod tests {
             ),
             Some(ProviderRequestKind::FileRead)
         );
+    }
+
+    /// A late frame for a turn that ended is dropped, not parked until the queue cap.
+    #[test]
+    fn frames_for_a_finished_turn_are_not_parked() {
+        let mut state = RuntimeState::default();
+        state.finished.insert("done-turn".to_owned());
+        let mut parked = VecDeque::new();
+        let session = ProviderSessionId::new("session-1").unwrap();
+
+        let delta = CodexEvent::from_notification(
+            "item/agentMessage/delta".to_owned(),
+            json!({"threadId": "t", "turnId": "done-turn", "itemId": "i", "delta": "late"}),
+        );
+        assert!(ingest(&mut parked, Parked::Event(delta), &mut state, &session).is_empty());
+        assert!(parked.is_empty());
+
+        // A request for it is answered, not left waiting.
+        let request = PendingRequest {
+            id: 7,
+            method: "item/commandExecution/requestApproval".to_owned(),
+            params: json!({"threadId": "t", "turnId": "done-turn", "itemId": "i"}),
+        };
+        assert!(ingest(&mut parked, Parked::Request(request), &mut state, &session).is_empty());
+        assert!(parked.is_empty());
+        assert_eq!(state.unanswered.len(), 1);
+        assert_eq!(state.unanswered[0].0, 7);
+
+        // A turn that has not registered yet still parks.
+        let early = CodexEvent::from_notification(
+            "item/agentMessage/delta".to_owned(),
+            json!({"threadId": "t", "turnId": "future-turn", "itemId": "i", "delta": "early"}),
+        );
+        assert!(ingest(&mut parked, Parked::Event(early), &mut state, &session).is_empty());
+        assert_eq!(parked.len(), 1);
     }
 }

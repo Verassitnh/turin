@@ -6,6 +6,7 @@ use crate::{items, orchestration_adapter::driver, projection::TurnState};
 use regex::Regex;
 use serde_json::Value;
 use std::sync::OnceLock;
+use turin_contracts::base_schemas::js_trim;
 use turin_contracts::{
     PositiveInt, UtcDateTime,
     orchestration_v2::{
@@ -100,7 +101,7 @@ pub fn error(
     let message = text(Some(error), "message").unwrap_or_default();
     let code = error_info_code(error.get("codexErrorInfo"));
     let details = text(Some(error), "additionalDetails")
-        .map(|details| details.trim().to_owned())
+        .map(|details| js_trim(&details).to_owned())
         .filter(|details| !details.is_empty());
     if params.get("willRetry").and_then(Value::as_bool) != Some(true) {
         let failure = make_provider_failure(ProviderFailureInput {

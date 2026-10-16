@@ -43,11 +43,26 @@ impl Counts {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Accumulator {
     counts: Counts,
     observed: bool,
     has_subagents: bool,
+}
+
+impl Default for Accumulator {
+    /// Upstream starts `cacheCreationTokens` at 0. It stays reported until an update
+    /// arrives without the cache-write counter.
+    fn default() -> Self {
+        Self {
+            counts: Counts {
+                written: Some(0),
+                ..Counts::default()
+            },
+            observed: false,
+            has_subagents: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -58,9 +73,13 @@ pub struct CodexTurnTokenUsageState {
 }
 
 impl CodexTurnTokenUsageState {
+    /// `beginTurnTokenUsage`: a new active turn drops what the previous one left behind.
     pub fn begin(&mut self, turn_id: &str) {
-        self.active_turn_id = Some(turn_id.into());
-        self.by_turn_id.entry(turn_id.into()).or_default();
+        if self.active_turn_id.as_deref() != Some(turn_id) {
+            self.by_turn_id.clear();
+            self.active_turn_id = Some(turn_id.into());
+            self.by_turn_id.entry(turn_id.into()).or_default();
+        }
     }
     pub fn mark_subagent(&mut self, turn_id: &str) {
         self.by_turn_id
@@ -130,5 +149,104 @@ mod tests {
             serde_json::to_value(s.complete("two", false)).unwrap()["inputTokens"],
             1
         );
+    }
+
+    /// `TurnTokenUsage.test.ts` "billable native turn usage".
+    fn breakdown(input: u64, cached: u64, output: u64) -> Value {
+        json!({"totalTokens": input + output, "inputTokens": input, "cachedInputTokens": cached,
+               "outputTokens": output, "reasoningOutputTokens": 0})
+    }
+
+    fn update(total: Value, last: Option<Value>) -> Value {
+        json!({"last": last.unwrap_or_else(|| total.clone()), "total": total, "modelContextWindow": 200_000})
+    }
+
+    fn active(turn: &str) -> CodexTurnTokenUsageState {
+        CodexTurnTokenUsageState {
+            active_turn_id: Some(turn.into()),
+            ..CodexTurnTokenUsageState::default()
+        }
+    }
+
+    #[test]
+    fn adds_each_codex_response_once_and_excludes_the_prior_resumed_history() {
+        let mut state = active("turn");
+        let first = update(breakdown(1010, 505, 102), Some(breakdown(10, 5, 2)));
+        state.accumulate("turn", &first);
+        state.accumulate("turn", &first);
+        state.accumulate(
+            "turn",
+            &update(breakdown(1030, 515, 108), Some(breakdown(20, 10, 6))),
+        );
+        assert_eq!(
+            serde_json::to_value(state.complete("turn", true)).unwrap(),
+            json!({"usageStatus": "complete", "usageScope": "main_agent", "hasSubagents": false,
+                   "inputTokens": 30, "cachedInputTokens": 15, "outputTokens": 8, "reasoningTokens": 0})
+        );
+    }
+
+    #[test]
+    fn keeps_previous_responses_when_compaction_resets_codex_cumulative_counters() {
+        let mut state = active("turn");
+        state.accumulate("turn", &update(breakdown(100, 40, 20), None));
+        state.accumulate("turn", &update(breakdown(20, 5, 3), None));
+        state.mark_subagent("turn");
+        let usage = serde_json::to_value(state.complete("turn", false)).unwrap();
+        assert_eq!(usage["usageStatus"], "partial");
+        assert_eq!(usage["hasSubagents"], true);
+        assert_eq!(usage["inputTokens"], 120);
+        assert_eq!(usage["cachedInputTokens"], 45);
+        assert_eq!(usage["outputTokens"], 23);
+    }
+
+    #[test]
+    fn does_not_bill_late_codex_updates_against_the_next_active_turn() {
+        let mut state = active("next");
+        state.accumulate("previous", &update(breakdown(100, 10, 20), None));
+        state.accumulate(
+            "next",
+            &update(breakdown(104, 12, 21), Some(breakdown(4, 2, 1))),
+        );
+        let usage = serde_json::to_value(state.complete("next", true)).unwrap();
+        assert_eq!(usage["inputTokens"], 4);
+        assert_eq!(usage["outputTokens"], 1);
+        assert_eq!(
+            serde_json::to_value(state.complete("missing", false)).unwrap()["usageStatus"],
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn reports_cache_creation_tokens_while_every_update_carries_the_counter() {
+        let mut state = CodexTurnTokenUsageState::default();
+        state.begin("turn");
+        let with_write = |input, written| {
+            json!({"total": {"inputTokens": input, "cachedInputTokens": 0, "outputTokens": 1,
+                             "reasoningOutputTokens": 0, "cacheWriteInputTokens": written},
+                   "last": {"inputTokens": input, "cachedInputTokens": 0, "outputTokens": 1,
+                            "reasoningOutputTokens": 0, "cacheWriteInputTokens": written}})
+        };
+        state.accumulate("turn", &with_write(10, 4));
+        state.accumulate("turn", &with_write(30, 9));
+        let usage = serde_json::to_value(state.complete("turn", true)).unwrap();
+        // The first update is the baseline's own `last`; the second adds the growth of 5.
+        assert_eq!(usage["cacheCreationTokens"], 9);
+
+        // An update that drops the counter drops it for the whole turn.
+        state.begin("two");
+        state.accumulate("two", &with_write(10, 4));
+        state.accumulate("two", &update(breakdown(20, 0, 2), None));
+        let usage = serde_json::to_value(state.complete("two", true)).unwrap();
+        assert!(usage.get("cacheCreationTokens").is_none());
+    }
+
+    #[test]
+    fn a_new_active_turn_clears_what_the_previous_one_left_behind() {
+        let mut state = CodexTurnTokenUsageState::default();
+        state.begin("one");
+        state.accumulate("one", &update(breakdown(10, 0, 1), None));
+        state.begin("two");
+        assert!(!state.by_turn_id.contains_key("one"));
+        assert!(state.by_turn_id.contains_key("two"));
     }
 }

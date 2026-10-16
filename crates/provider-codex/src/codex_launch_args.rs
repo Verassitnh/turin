@@ -1,4 +1,5 @@
 //! Port of upstream/apps/server/src/provider/codexLaunchArgs.ts.
+use turin_contracts::base_schemas::js_trim;
 use turin_shared::cli_args::tokenize_cli_args;
 
 const T3CODE_CODEX_LAUNCH_ARGS_ENV: &str = "T3CODE_CODEX_LAUNCH_ARGS";
@@ -12,10 +13,10 @@ pub fn resolve_codex_launch_args(
     env: impl Fn(&str) -> Option<String>,
 ) -> String {
     let from_env = env(T3CODE_CODEX_LAUNCH_ARGS_ENV)
-        .map(|value| value.trim().to_owned())
+        .map(|value| js_trim(&value).to_owned())
         .filter(|value| !value.is_empty());
     from_env
-        .or_else(|| launch_args.map(|value| value.trim().to_owned()))
+        .or_else(|| launch_args.map(|value| js_trim(value).to_owned()))
         .unwrap_or_default()
 }
 

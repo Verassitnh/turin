@@ -1611,6 +1611,274 @@ async fn an_mcp_elicitation_without_a_turn_is_declined() {
     replay.driver.verify_complete().unwrap();
 }
 
+fn running_command(id: &str, process: &str) -> Value {
+    json!({
+        "type": "commandExecution", "id": id, "command": "sleep 60", "cwd": "/w",
+        "processId": process, "status": "inProgress", "commandActions": [], "source": "agent",
+        "aggregatedOutput": null, "exitCode": null, "durationMs": null
+    })
+}
+
+fn provider_turn_for(native_turn: &str) -> turin_contracts::ProviderTurnId {
+    turin_provider_core::id_allocator::derive::provider_turn(
+        &crate::orchestration_adapter::driver(),
+        native_turn,
+    )
+}
+
+/// A Stop on a turn that ended cleanly with a command still running reaches the settled
+/// turn: its terminal is read first, and its item ends as interrupted.
+#[test]
+fn a_stop_reaches_the_settled_turn_and_stops_its_retained_command() {
+    use crate::interrupt;
+    let mut state = RuntimeState::default();
+    let mut turn = detached_turn("native-turn-1");
+    turn.input.provider_thread.native_thread_ref =
+        Some(crate::orchestration_adapter::native_ref("thread-1"));
+    let provider_thread = turn.input.provider_thread.id.clone();
+    state.turns.insert("native-turn-1".into(), turn);
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": running_command("cmd-1", "p1")}),
+    );
+    notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(state.settled.contains_key("native-turn-1"));
+
+    // The turn is no longer active: only a runtime restart request reaches it.
+    let provider_turn = provider_turn_for("native-turn-1");
+    assert_eq!(
+        interrupt::plan(&state, &provider_turn, &provider_thread, false),
+        None
+    );
+    let plan = interrupt::plan(&state, &provider_turn, &provider_thread, true).expect("plan");
+    assert_eq!(plan.targets.len(), 1);
+    assert!(!plan.targets[0].active);
+    let terminals = interrupt::terminals(&state, &plan.targets);
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].1, "p1");
+
+    let events = crate::projection::stop_settled_work(
+        &mut state,
+        "native-turn-1",
+        turin_contracts::UtcDateTime::now(),
+    );
+    assert!(
+        !state.settled.contains_key("native-turn-1"),
+        "the turn is released"
+    );
+    assert!(turn_items(&events).iter().any(|item| matches!(
+        item,
+        OrchestrationV2TurnItem::CommandExecution {
+            status: OrchestrationV2TurnItemStatus::Interrupted,
+            ..
+        }
+    )));
+}
+
+/// The terminal list is read before `turn/interrupt`, so the pump ending the turn first
+/// cannot hide a command from the terminate step.
+#[test]
+fn the_terminals_of_an_active_turn_are_read_before_it_ends() {
+    use crate::interrupt;
+    let mut state = RuntimeState::default();
+    let mut turn = detached_turn("native-turn-1");
+    turn.input.provider_thread.native_thread_ref =
+        Some(crate::orchestration_adapter::native_ref("thread-1"));
+    let provider_thread = turn.input.provider_thread.id.clone();
+    state.turns.insert("native-turn-1".into(), turn);
+    notify(
+        &mut state,
+        "item/started",
+        json!({"threadId": "thread-1", "turnId": "native-turn-1", "startedAtMs": 1, "item": running_command("cmd-1", "p1")}),
+    );
+    let plan = interrupt::plan(
+        &state,
+        &provider_turn_for("native-turn-1"),
+        &provider_thread,
+        false,
+    )
+    .expect("plan");
+    assert!(plan.targets[0].active);
+    let before = interrupt::terminals(&state, &plan.targets);
+    assert_eq!(before, vec![("thread-1".to_owned(), "p1".to_owned())]);
+
+    // Ending the interrupted turn forgets its commands.
+    state.interrupting.insert("native-turn-1".into());
+    let events = notify(
+        &mut state,
+        "turn/completed",
+        json!({"threadId": "thread-1", "turn": {"id": "native-turn-1", "status": "completed", "completedAt": 2}}),
+    );
+    assert!(interrupt::terminals(&state, &plan.targets).is_empty());
+    // A turn Stop is interrupting ends as interrupted although Codex called it completed.
+    assert_eq!(
+        terminal_status(&events),
+        ProviderAdapterV2TurnTerminalStatus::Interrupted
+    );
+}
+
+async fn terminate_with(entries: Vec<ReplayEntry>) -> (Result<(), String>, ReplayDriver) {
+    let mut transcript = fixture("simple");
+    transcript.entries = entries;
+    let (client, driver) = make_replay_client(transcript);
+    let outcome = crate::interrupt::terminate_background_terminal(&client, "thread-1", "p1").await;
+    (outcome, driver)
+}
+
+fn terminate_request(id: i64) -> ReplayEntry {
+    expect(
+        json!({"id": id, "method": "thread/backgroundTerminals/terminate",
+        "params": {"threadId": "thread-1", "processId": "p1"}}),
+    )
+}
+
+#[tokio::test]
+async fn terminating_tolerates_a_thread_the_app_server_already_unloaded() {
+    let (outcome, driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "error": {"code": -32600, "message": "thread not found: thread-1"}})),
+    ])
+    .await;
+    assert_eq!(outcome, Ok(()));
+    driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn terminating_fails_on_other_request_errors() {
+    let (outcome, _driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "error": {"code": -32600, "message": "something else"}})),
+    ])
+    .await;
+    assert!(outcome.is_err());
+}
+
+#[tokio::test]
+async fn an_unconfirmed_terminal_that_is_still_listed_is_an_error() {
+    let list = |id: i64| {
+        expect(
+            json!({"id": id, "method": "thread/backgroundTerminals/list",
+        "params": {"threadId": "thread-1"}}),
+        )
+    };
+    let (outcome, driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "result": {"terminated": false}})),
+        list(2),
+        emit(json!({"id": 2, "result": {"data": [{"processId": "p1"}], "nextCursor": null}})),
+    ])
+    .await;
+    assert_eq!(
+        outcome,
+        Err("Codex background terminal p1 remained active after termination.".to_owned())
+    );
+    driver.verify_complete().unwrap();
+
+    let (outcome, driver) = terminate_with(vec![
+        terminate_request(1),
+        emit(json!({"id": 1, "result": {"terminated": false}})),
+        list(2),
+        emit(json!({"id": 2, "result": {"data": [{"processId": "other"}], "nextCursor": null}})),
+    ])
+    .await;
+    assert_eq!(
+        outcome,
+        Ok(()),
+        "a terminal that is gone needs nothing more"
+    );
+    driver.verify_complete().unwrap();
+}
+
+/// A Stop on a turn nothing retains anything for is an error, unless it asks for a restart.
+#[tokio::test]
+async fn stopping_a_turn_that_is_not_active_is_an_error() {
+    let replay = open(fixture("simple")).await;
+    let input = |restart| ProviderAdapterV2InterruptInput {
+        provider_thread: replay.thread.clone(),
+        provider_turn_id: provider_turn_for("unknown-turn"),
+        request_runtime_restart: restart,
+    };
+    let error = replay
+        .runtime
+        .interrupt_turn(input(None))
+        .await
+        .expect_err("not active");
+    assert!(format!("{error:?}").contains("is not active and cannot be interrupted."));
+    replay
+        .runtime
+        .interrupt_turn(input(Some(true)))
+        .await
+        .unwrap();
+}
+
+/// `compactStrings` trims and drops blanks but keeps repeats.
+#[test]
+fn web_search_patterns_keep_repeats() {
+    let patterns = crate::items::web_search_patterns(&json!({
+        "type": "webSearch", "id": "w", "query": "rust",
+        "action": {"type": "search", "queries": ["rust", " rust ", ""], "query": "rust"}
+    }));
+    assert_eq!(patterns, ["rust", "rust", "rust", "rust"]);
+}
+
+/// Reasoning on a turn that did not complete is interrupted, and both its node and its
+/// item name the Codex item rather than the composite part key.
+#[test]
+fn reasoning_on_an_interrupted_turn_is_interrupted_and_names_the_codex_item() {
+    let mut turn = detached_turn("native-turn-1");
+    let part_key = "[\"native-turn-1\",\"item-1\",\"summary\",0]";
+    let running = crate::items::reasoning(
+        &mut turn,
+        part_key,
+        "item-1",
+        "thinking",
+        false,
+        false,
+        turin_contracts::UtcDateTime::now(),
+    );
+    assert_eq!(
+        running.node.status,
+        OrchestrationV2ExecutionNodeStatus::Running
+    );
+    let stopped = crate::items::reasoning(
+        &mut turn,
+        part_key,
+        "item-1",
+        "thinking",
+        true,
+        true,
+        turin_contracts::UtcDateTime::now(),
+    );
+    assert_eq!(
+        stopped.node.status,
+        OrchestrationV2ExecutionNodeStatus::Interrupted
+    );
+    let OrchestrationV2TurnItem::Reasoning {
+        status,
+        native_item_ref,
+        ..
+    } = &stopped.turn_item
+    else {
+        panic!("reasoning item");
+    };
+    assert_eq!(*status, OrchestrationV2TurnItemStatus::Interrupted);
+    for native in [
+        native_item_ref.as_ref().and_then(|r| r.native_id.as_ref()),
+        stopped
+            .node
+            .native_item_ref
+            .as_ref()
+            .and_then(|r| r.native_id.as_ref()),
+    ] {
+        assert_eq!(native.map(|id| id.as_str()), Some("item-1"));
+    }
+}
+
 /// Policy with the approval and sandbox settings the upstream recorder sent, so
 /// the replay's outbound frame check sees the same `turn/start`.
 fn recorded_policy(

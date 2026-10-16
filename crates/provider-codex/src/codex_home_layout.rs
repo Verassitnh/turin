@@ -11,6 +11,7 @@ use std::{
     fs, io,
     path::{Component, Path, PathBuf},
 };
+use turin_contracts::base_schemas::js_trim;
 
 use indexmap::IndexSet;
 use turin_provider_core::path_expansion::expand_home_path;
@@ -63,10 +64,15 @@ pub enum CodexShadowHomeError {
         "Codex shadow home private entry '{entry}' at '{path}' must be a real file, not a symlink."
     )]
     PrivateEntrySymlink { entry: String, path: String },
-    #[error("Codex shadow home filesystem operation '{operation}' failed for '{path}'.")]
+    #[error(
+        "Codex shadow home filesystem operation '{operation}' failed for '{path}'{}.",
+        target_suffix(.target_path)
+    )]
     FileSystem {
         operation: &'static str,
         path: String,
+        /// What a symlink pointed at, when the operation was creating one.
+        target_path: Option<String>,
         detail: String,
     },
 }
@@ -80,9 +86,10 @@ pub fn resolve_codex_home_layout(
 ) -> CodexHomeLayout {
     let shared_home_path = resolve_home_path(home, home_path);
     let continuation_key = format!("codex:home:{}", shared_home_path.display());
-    let shadow = shadow_home_path.trim();
+    let shadow = js_trim(shadow_home_path);
     if shadow.is_empty() {
-        let effective_home_path = (!home_path.trim().is_empty()).then(|| shared_home_path.clone());
+        let effective_home_path =
+            (!js_trim(home_path).is_empty()).then(|| shared_home_path.clone());
         return CodexHomeLayout {
             mode: CodexHomeMode::Direct,
             shared_home_path,
@@ -107,7 +114,7 @@ pub fn resolve_managed_codex_home_layout(
     shadow_home_path: &str,
     home: &str,
 ) -> CodexHomeLayout {
-    let shadow = if !shadow_home_path.trim().is_empty() {
+    let shadow = if !js_trim(shadow_home_path).is_empty() {
         shadow_home_path.to_owned()
     } else if instance_id == "codex" {
         String::new()
@@ -124,7 +131,7 @@ pub fn resolve_managed_codex_home_layout(
 }
 
 fn resolve_home_path(home: &str, value: &str) -> PathBuf {
-    let expanded = if value.trim().is_empty() {
+    let expanded = if js_trim(value).is_empty() {
         PathBuf::from(home).join(".codex")
     } else {
         PathBuf::from(expand_home_path(value, home))
@@ -154,10 +161,18 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// ` to '<target>'`, as upstream's message appends for a symlink.
+fn target_suffix(target: &Option<String>) -> String {
+    target
+        .as_ref()
+        .map_or_else(String::new, |target| format!(" to '{target}'"))
+}
+
 fn fs_error(operation: &'static str, path: &Path, error: io::Error) -> CodexShadowHomeError {
     CodexShadowHomeError::FileSystem {
         operation,
         path: path.to_string_lossy().into_owned(),
+        target_path: None,
         detail: error.to_string(),
     }
 }
@@ -192,14 +207,21 @@ fn remove_path(path: &Path) -> Result<(), CodexShadowHomeError> {
 
 #[cfg(unix)]
 fn create_symlink(target: &Path, link: &Path) -> Result<(), CodexShadowHomeError> {
-    std::os::unix::fs::symlink(target, link).map_err(|error| fs_error("symlink", link, error))
+    std::os::unix::fs::symlink(target, link).map_err(|error| {
+        let mut error = fs_error("symlink", link, error);
+        if let CodexShadowHomeError::FileSystem { target_path, .. } = &mut error {
+            *target_path = Some(target.to_string_lossy().into_owned());
+        }
+        error
+    })
 }
 
 #[cfg(not(unix))]
-fn create_symlink(_target: &Path, link: &Path) -> Result<(), CodexShadowHomeError> {
+fn create_symlink(target: &Path, link: &Path) -> Result<(), CodexShadowHomeError> {
     Err(CodexShadowHomeError::FileSystem {
         operation: "symlink",
         path: link.to_string_lossy().into_owned(),
+        target_path: Some(target.to_string_lossy().into_owned()),
         detail: "shadow home symlinks are only implemented on Unix".to_owned(),
     })
 }
@@ -568,6 +590,30 @@ mod tests {
         assert_eq!(
             normalize(Path::new("/a/b/../c/./d")),
             PathBuf::from("/a/c/d")
+        );
+    }
+
+    #[test]
+    fn a_symlink_failure_names_the_target() {
+        let with_target = CodexShadowHomeError::FileSystem {
+            operation: "symlink",
+            path: "/shadow/config.toml".to_owned(),
+            target_path: Some("/shared/config.toml".to_owned()),
+            detail: "denied".to_owned(),
+        };
+        assert_eq!(
+            with_target.to_string(),
+            "Codex shadow home filesystem operation 'symlink' failed for '/shadow/config.toml' to '/shared/config.toml'."
+        );
+        let without = CodexShadowHomeError::FileSystem {
+            operation: "makeDirectory",
+            path: "/shared/home".to_owned(),
+            target_path: None,
+            detail: "denied".to_owned(),
+        };
+        assert_eq!(
+            without.to_string(),
+            "Codex shadow home filesystem operation 'makeDirectory' failed for '/shared/home'."
         );
     }
 }

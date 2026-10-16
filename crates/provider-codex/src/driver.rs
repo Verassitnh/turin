@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use turin_contracts::base_schemas::js_trim;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -192,7 +193,11 @@ impl ProviderDriver for CodexDriver {
             settings.shadow_home_path.as_str(),
             &home,
         );
-        materialize_codex_shadow_home(&layout)
+        // Filesystem work off the async workers, as the managed path does.
+        let materialize = layout.clone();
+        tokio::task::spawn_blocking(move || materialize_codex_shadow_home(&materialize))
+            .await
+            .map_err(|error| driver_error(&self.kind, &input.instance_id, error.to_string()))?
             .map_err(|error| driver_error(&self.kind, &input.instance_id, error.to_string()))?;
         let config = runtime_config(&settings, &input, &layout);
         let identity = SnapshotIdentity {
@@ -621,6 +626,8 @@ pub(crate) async fn check_codex_provider_status(input: StatusInput<'_>) -> Serve
 }
 
 async fn probe_provider(input: &StatusInput<'_>, home: &Path) -> ServerProvider {
+    // Taken before the spawn, so a model-cache write landing during startup counts as fresh.
+    let spawned_at_ms = now_ms();
     let session = match input.config.connect(home).await {
         Ok(session) => session,
         Err(error) => return spawn_or_probe_failure(input, &error),
@@ -628,7 +635,7 @@ async fn probe_provider(input: &StatusInput<'_>, home: &Path) -> ServerProvider 
     let cwd = input.config.cwd.to_string_lossy().into_owned();
     // A managed account has no native usage to read.
     let skip_native_usage = input.managed_auth.is_some();
-    let snapshot = probe(&session, &cwd, skip_native_usage, now_ms()).await;
+    let snapshot = probe(&session, &cwd, skip_native_usage, spawned_at_ms).await;
     let version = session.version.clone();
     let _ = session.shutdown().await;
     let snapshot = match snapshot {
@@ -758,7 +765,7 @@ fn account_probe(response: &Value, workspace_id: Option<&str>) -> AccountStatus 
         .then(|| account.get("email").and_then(Value::as_str))
         .flatten()
         .and_then(tne);
-    auth.workspace_id = workspace_id.and_then(|id| tne(id.trim()));
+    auth.workspace_id = workspace_id.and_then(|id| tne(js_trim(id)));
     AccountStatus {
         status: ServerProviderState::Ready,
         auth,

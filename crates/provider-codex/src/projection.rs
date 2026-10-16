@@ -24,6 +24,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
+use turin_contracts::base_schemas::js_trim;
 use turin_contracts::{
     PlanId, PositiveInt, RunAttemptId, RunId, RuntimeRequestId, TrimmedNonEmptyString, UtcDateTime,
     orchestration_v2::{
@@ -168,6 +169,11 @@ pub struct RuntimeState {
     pub pending_root_turns: HashMap<String, ProviderAdapterV2TurnInput>,
     /// Requests no turn can show, to answer at once as (broker id, decision). The pump sends them.
     pub unanswered: Vec<(u64, crate::approvals::Decision)>,
+    /// Native turns a Stop is interrupting. A clean `turn/completed` for one reads as interrupted.
+    pub interrupting: HashSet<String>,
+    /// Native turns that have ended and are no longer held. A later frame for one is stale:
+    /// it is dropped (a request is rejected) rather than parked for a turn that never returns.
+    pub finished: HashSet<String>,
 }
 
 fn group_of(kind: TextKind) -> usize {
@@ -284,6 +290,7 @@ fn emit_text(
             &buffer.native_item,
             text,
             completed,
+            interrupted,
             now,
         )),
         TextKind::Plan => {
@@ -696,6 +703,73 @@ pub fn project_event(raw: CodexEvent, state: &mut RuntimeState) -> Vec<ProviderA
 /// command, or a persistent dynamic tool. Upstream's `turnHasRetainedBackgroundWork`.
 pub fn has_retained_work(turn: &TurnState) -> bool {
     !turn.running_commands.is_empty() || turn.running_tools.iter().any(is_persistent_tool)
+}
+
+/// The native thread a turn runs on: the child's thread for a subagent turn, else the
+/// root provider thread's native id.
+pub fn turn_native_thread(turn: &TurnState) -> Option<String> {
+    match &turn.subagent {
+        Some(child) => Some(child.clone()),
+        None => turn
+            .input
+            .provider_thread
+            .native_thread_ref
+            .as_ref()
+            .and_then(|native| native.native_id.as_ref())
+            .map(|id| id.as_str().to_owned()),
+    }
+}
+
+/// A Stop reached a settled turn: its retained commands and tools (persistent ones too)
+/// end as interrupted, without rewriting the completed turn, and the turn is released.
+pub fn stop_settled_work(
+    state: &mut RuntimeState,
+    native_turn: &str,
+    now: UtcDateTime,
+) -> Vec<ProviderAdapterV2Event> {
+    let Some(mut turn) = state.settled.remove(native_turn) else {
+        return vec![];
+    };
+    let mut events = vec![];
+    for command in std::mem::take(&mut turn.running_commands) {
+        let item = json!({
+            "id": command.id,
+            "command": command.command,
+            "aggregatedOutput": command.aggregated_output,
+            "status": "inProgress",
+        });
+        let mut artifacts = items::command_execution(&mut turn, &item, None, now);
+        artifacts.node.status = OrchestrationV2ExecutionNodeStatus::Interrupted;
+        artifacts.node.completed_at = Some(now);
+        if let OrchestrationV2TurnItem::CommandExecution {
+            status,
+            completed_at,
+            ..
+        } = &mut artifacts.turn_item
+        {
+            *status = OrchestrationV2TurnItemStatus::Interrupted;
+            *completed_at = Some(now);
+        }
+        events.extend(emit_item(artifacts));
+    }
+    for tool in std::mem::take(&mut turn.running_tools) {
+        let mut artifacts = items::dynamic_tool(&mut turn, &tool, now);
+        artifacts.node.status = OrchestrationV2ExecutionNodeStatus::Interrupted;
+        artifacts.node.completed_at = Some(now);
+        if let OrchestrationV2TurnItem::DynamicTool {
+            status,
+            completed_at,
+            updated_at,
+            ..
+        } = &mut artifacts.turn_item
+        {
+            *status = OrchestrationV2TurnItemStatus::Interrupted;
+            *completed_at = Some(now);
+            *updated_at = now;
+        }
+        events.extend(emit_item(artifacts));
+    }
+    events
 }
 
 /// `hasPendingBackgroundWork`: any running command or dynamic tool in any turn,
@@ -1219,7 +1293,7 @@ fn todo_updated(
         .enumerate()
         .map(|(index, step)| {
             let text = str_of(step, "step")
-                .map(str::trim)
+                .map(js_trim)
                 .filter(|text| !text.is_empty())
                 .map_or_else(|| format!("Step {}", index + 1), str::to_owned);
             OrchestrationV2PlanStep {
@@ -1232,7 +1306,7 @@ fn todo_updated(
         })
         .collect();
     let explanation = str_of(params, "explanation")
-        .map(str::trim)
+        .map(js_trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
     let native_item = format!("turn-plan:{}", turn.native_turn);
@@ -1277,7 +1351,13 @@ fn turn_completed(
     state: &mut RuntimeState,
     now: UtcDateTime,
 ) -> Vec<ProviderAdapterV2Event> {
-    let (status, terminal) = match params.pointer("/turn/status").and_then(Value::as_str) {
+    let native_status = params.pointer("/turn/status").and_then(Value::as_str);
+    // A turn Stop is interrupting ends as interrupted, even when Codex reports it completed.
+    let native_status = match native_status {
+        Some("completed") if state.interrupting.contains(&turn.native_turn) => Some("interrupted"),
+        other => other,
+    };
+    let (status, terminal) = match native_status {
         Some("completed") => (
             OrchestrationV2ProviderTurnStatus::Completed,
             ProviderAdapterV2TurnTerminalStatus::Completed,
@@ -1302,6 +1382,7 @@ fn turn_completed(
     if status != OrchestrationV2ProviderTurnStatus::Completed {
         state.terminalized.insert(turn.native_turn.clone());
     }
+    state.finished.insert(turn.native_turn.clone());
     let retry = turn.provider_retry.take();
     let mut events = retry::finish(turn, retry.clone(), status, now);
     events.extend(flush_turn(state, turn, stopped_early));

@@ -26,6 +26,35 @@ a{display:inline-flex;align-items:center;justify-content:center;margin-top:28px;
 @@LINK@@
 </main><script nonce="@@NONCE@@">history.replaceState(null,"","/auth/callback");</script></body></html>"##;
 
+/// Fills each `@@NAME@@` placeholder in one pass over the template. Substituted text is
+/// never scanned again, so a value that contains a placeholder stays as written.
+fn render(template: &str, values: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len() + 512);
+    let mut rest = template;
+    while let Some(start) = rest.find("@@") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let replaced = after.find("@@").and_then(|end| {
+            values
+                .iter()
+                .find(|(name, _)| *name == &after[..end])
+                .map(|(_, value)| (end, *value))
+        });
+        match replaced {
+            Some((end, value)) => {
+                out.push_str(value);
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str("@@");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn escape_html(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
@@ -81,17 +110,21 @@ pub fn codex_auth_callback_page(success: bool, return_url: Option<&str>, nonce: 
         ("#fef2f2", "#dc2626", "#450a0a", "#f87171")
     };
     let escaped_title = escape_html(title);
-    TEMPLATE
-        .replace("@@TITLE@@", &escaped_title)
-        .replace("@@REFRESH@@", &refresh)
-        .replace("@@STATUS_BG@@", status_bg)
-        .replace("@@STATUS_FG@@", status_fg)
-        .replace("@@DARK_STATUS_BG@@", dark_bg)
-        .replace("@@DARK_STATUS_FG@@", dark_fg)
-        .replace("@@ICON@@", icon)
-        .replace("@@DESCRIPTION@@", description)
-        .replace("@@LINK@@", &link)
-        .replace("@@NONCE@@", &escape_html(nonce))
+    render(
+        TEMPLATE,
+        &[
+            ("TITLE", &escaped_title),
+            ("REFRESH", &refresh),
+            ("STATUS_BG", status_bg),
+            ("STATUS_FG", status_fg),
+            ("DARK_STATUS_BG", dark_bg),
+            ("DARK_STATUS_FG", dark_fg),
+            ("ICON", icon),
+            ("DESCRIPTION", description),
+            ("LINK", &link),
+            ("NONCE", &escape_html(nonce)),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -143,5 +176,18 @@ mod tests {
     fn nonce_is_escaped_into_the_script_attribute() {
         let page = codex_auth_callback_page(false, None, r#"a"b<c>"#);
         assert!(page.contains(r#"<script nonce="a&quot;b&lt;c&gt;">"#));
+    }
+
+    #[test]
+    fn a_value_that_contains_a_placeholder_is_not_expanded() {
+        // The return-URL allowlist keeps such text out of real pages; the renderer must not
+        // depend on that.
+        let out = render(
+            "<a href=\"@@LINK@@\">@@TITLE@@</a>",
+            &[("LINK", "x=@@TITLE@@&y=@@LINK@@"), ("TITLE", "t@@LINK@@")],
+        );
+        assert_eq!(out, "<a href=\"x=@@TITLE@@&y=@@LINK@@\">t@@LINK@@</a>");
+        // An unknown or unterminated marker is left as it is.
+        assert_eq!(render("a @@NOPE@@ b @@ c", &[]), "a @@NOPE@@ b @@ c");
     }
 }

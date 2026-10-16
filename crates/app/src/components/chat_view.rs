@@ -18,6 +18,12 @@ use super::chat::composer_pending_panels::{
 };
 use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::should_show_provider_status_banner;
+use super::chat::thread_details_card::ThreadDetailsCard;
+use super::chat::thread_details_card_layout::{
+    ThreadDetailsCardContainer, ThreadDetailsCardLane, ThreadDetailsCardLayoutInput,
+    resolve_thread_details_card_layout,
+};
+use super::chat::thread_details_panel::ThreadDetailsPanel;
 use super::chat::thread_error_banner::should_show_thread_error_banner;
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
@@ -83,6 +89,7 @@ impl RenderOnce for ChatView {
         };
 
         let overlay_banners = chat_overlay_banners();
+        let details_card = thread_details_card(window, cx);
         div()
             .flex()
             .flex_col()
@@ -109,37 +116,66 @@ impl RenderOnce for ChatView {
                     }))
                     .drag_region(window, cx),
             )
-            .child(ChatCanvas::from_measurements(
-                ChatCanvasMeasurements {
-                    width: 1200.0,
-                    ..Default::default()
-                },
-                None,
+            .child(
                 div()
-                    .flex()
-                    .flex_col()
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .children(overlay_banners)
-                    .child(timeline)
-                    .child(
+                    .child(ChatCanvas::from_measurements(
+                        ChatCanvasMeasurements {
+                            width: 1200.0,
+                            ..Default::default()
+                        },
+                        None,
                         div()
-                            .flex_shrink_0()
-                            .px(lane_inset)
-                            .pt_2()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .children(overlay_banners)
+                            .child(timeline)
                             .child(
                                 div()
-                                    .mx_auto()
-                                    .w_full()
-                                    .max_w(CHAT_CONTENT_MAX_WIDTH)
-                                    .children(drawer)
-                                    .child(composer),
+                                    .flex_shrink_0()
+                                    .px(lane_inset)
+                                    .pt_2()
+                                    .child(
+                                        div()
+                                            .mx_auto()
+                                            .w_full()
+                                            .max_w(CHAT_CONTENT_MAX_WIDTH)
+                                            .children(drawer)
+                                            .child(composer),
+                                    )
+                                    .child(div().h(rems(1.25))),
                             )
-                            .child(div().h(rems(1.25))),
-                    )
-                    .into_any_element(),
-            ))
+                            .into_any_element(),
+                    ))
+                    .children(details_card),
+            )
     }
+}
+
+fn thread_details_card(window: &mut Window, cx: &mut App) -> Option<gpui_kit::AnyElement> {
+    let panel = ThreadDetailsPanel::from_demo(window, cx)?;
+    let layout = resolve_thread_details_card_layout(ThreadDetailsCardLayoutInput {
+        container: ThreadDetailsCardContainer {
+            width: 1200.0,
+            height: 800.0,
+        },
+        lane: ThreadDetailsCardLane {
+            padding: 48.0,
+            min_chat_width: 640.0,
+        },
+        top_inset: 0.0,
+    })?;
+    Some(
+        ThreadDetailsCard {
+            layout,
+            children: panel.into_any_element(),
+        }
+        .into_any_element(),
+    )
 }
 
 fn chat_overlay_banners() -> Vec<gpui_kit::AnyElement> {

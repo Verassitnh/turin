@@ -17,7 +17,6 @@ pub mod context_window;
 // Chat-lane geometry for the canvas.
 pub mod chat_canvas_layout;
 pub mod provider_status_banner;
-#[allow(dead_code)]
 pub mod subagent_tooltip_content;
 pub mod thread_error_banner;
 #[allow(dead_code)]
@@ -43,8 +42,14 @@ pub mod page_scroll_controller;
 pub mod pending_user_input;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
-#[allow(dead_code)]
+pub mod thread_details_card;
 pub mod thread_details_card_layout;
+pub mod thread_details_control;
+pub mod thread_details_demo;
+pub mod thread_details_panel;
+pub mod thread_details_panel_styles;
+pub mod thread_details_section;
+pub mod thread_relationships_panel;
 #[allow(dead_code)]
 pub mod thread_status_line;
 #[allow(dead_code)]

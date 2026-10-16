@@ -11,12 +11,14 @@ pub const THREAD_DETAILS_CARD_GAP: f64 = 12.0;
 const THREAD_DETAILS_CARD_WIDTH: f64 = 280.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ThreadDetailsCardDensity {
     Full,
     Compact,
     Essential,
 }
 
+#[allow(dead_code)]
 pub fn resolve_thread_details_card_density(
     height: f64,
     content: ThreadDetailsCardContentHeights,
@@ -31,6 +33,7 @@ pub fn resolve_thread_details_card_density(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub struct ThreadDetailsCardContentHeights {
     pub full: f64,
     pub compact: f64,

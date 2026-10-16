@@ -9,13 +9,13 @@ pub mod chat_canvas_layout;
 // Pure citation-selector text logic; the DOM capture half is not ported yet.
 #[allow(dead_code)]
 pub mod assistant_text_selection;
-pub mod composer_pending_panels;
-#[allow(dead_code)]
 #[allow(dead_code)]
 pub mod composer_event_scope;
 #[allow(dead_code)]
 pub mod composer_focus_state;
+#[allow(dead_code)]
 pub mod composer_menu_state;
+pub mod composer_pending_panels;
 // Route handoff around the mobile composer morph. No view calls it yet.
 #[allow(dead_code)]
 pub mod draft_hero_transition;

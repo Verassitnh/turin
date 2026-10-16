@@ -22,7 +22,7 @@ use super::super::add_provider_instance_logic::{
     WizardNavigation, WizardValidation, derive_available_instance_id, get_provider_identity_draft,
     resolve_wizard_navigation, update_provider_identity_draft,
 };
-use super::super::controls::{FieldSize, SelectWidth, switch, text_field};
+use super::super::controls::{FieldSize, SelectWidth, password_field, switch, text_field};
 use super::super::dialog::{Dialog, dialog_frame, dialog_header, dialog_panel};
 use super::super::layout::SettingsRow;
 use super::super::provider_form::{
@@ -616,6 +616,24 @@ impl SettingsView {
                                         }
                                     },
                                 )
+                            }
+                            ProviderSettingsFormControl::Password => {
+                                let current =
+                                    read_provider_config_string(config.as_ref(), &field.key);
+                                let input = self.password_input(
+                                    &format!("add-provider-field-{driver}-{}", field.key),
+                                    &current,
+                                    &field.placeholder.clone().unwrap_or_default(),
+                                    window,
+                                    cx,
+                                    move |this, text, _, cx| {
+                                        write(this, FieldValue::Text(&text), cx)
+                                    },
+                                );
+                                div()
+                                    .w(rems(14.))
+                                    .child(password_field(&input, None, FieldSize::Sm, cx))
+                                    .into_any_element()
                             }
                             _ => {
                                 let current =

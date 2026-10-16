@@ -218,6 +218,38 @@ impl SettingsView {
     }
 }
 
+/// WHATWG forbidden host code points (same set Node's URL parser rejects in a host).
+fn host_label_contains_forbidden_code_point(host: &str) -> bool {
+    let label = if let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        inner
+    } else {
+        host
+    };
+    label.chars().any(|c| {
+        matches!(
+            c,
+            '\u{0000}'
+                | '\u{0009}'
+                | '\u{000A}'
+                | '\u{000D}'
+                | ' '
+                | '#'
+                | '/'
+                | ':'
+                | '?'
+                | '@'
+                | '['
+                | '\\'
+                | ']'
+                | '%'
+                | '<'
+                | '>'
+                | '^'
+                | '|'
+        ) || (c.is_ascii() && c.is_ascii_control())
+    })
+}
+
 /// `new URL(url).host` for the shapes a hub URL takes, or `None` where the WHATWG
 /// parser throws. The scheme and `//` authority are read as the parser reads them,
 /// userinfo is dropped and a default port is omitted. IDNA and percent-decoding
@@ -265,6 +297,10 @@ fn url_host(input: &str) -> Option<String> {
         }
     };
     let host = host.to_ascii_lowercase();
+    let ipv6_literal = host.starts_with('[') && host.ends_with(']');
+    if !ipv6_literal && host_label_contains_forbidden_code_point(&host) {
+        return None;
+    }
     if host.is_empty() && special {
         return None;
     }
@@ -330,7 +366,7 @@ impl SettingsView {
             |_, _, _, _| {},
         );
         // `SecretInput`: the management key is write-only, like the provider secrets.
-        let key = self.secret_input("hub-key", "Not set", window, cx);
+        let key = self.secret_input("hub-key", false, window, cx);
         let label = self.input(
             "hub-label",
             "",
@@ -481,6 +517,14 @@ mod tests {
         assert_eq!(
             usage_source_id_from_url("https://:8318"),
             "cliproxy-https-8318"
+        );
+    }
+
+    #[test]
+    fn slug_malformed_urls_like_node() {
+        assert_eq!(
+            usage_source_id_from_url("https://a b.com"),
+            "cliproxy-https-a-b.com"
         );
     }
 }

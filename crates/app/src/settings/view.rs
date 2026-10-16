@@ -107,6 +107,10 @@ enum InputKind {
     Secret,
 }
 
+fn input_kind_is_masked(kind: InputKind) -> bool {
+    kind == InputKind::Secret
+}
+
 pub struct SettingsView {
     pub(super) store: Entity<SettingsStore>,
     pub(super) route: SettingsRoute,
@@ -279,6 +283,28 @@ impl SettingsView {
         self.input_with(id, value, placeholder, InputKind::Draft, window, cx, commit)
     }
 
+    /// Like [`Self::input`], but masked (`type="password"`) with autocomplete off
+    /// at the native layer (`ProviderSettingsFormControl::Password`).
+    pub(super) fn password_input(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<InputState> {
+        self.input_with(
+            id,
+            value,
+            placeholder,
+            InputKind::Secret,
+            window,
+            cx,
+            commit,
+        )
+    }
+
     /// Like [`Self::input`] but `commit` also runs on every change.
     pub(super) fn input_live(
         &mut self,
@@ -341,17 +367,28 @@ impl SettingsView {
 
     /// A masked single-line input with no commit hook (`SecretInput`); callers
     /// read it from [`Self::inputs`] when their button is pressed.
+    /// A write-only masked draft that commits only through its form (`SecretInput`
+    /// without `onCommit`): the saved value is never read back, so the field starts
+    /// empty and `configured` picks the stored-secret hint over "Not set".
     pub(super) fn secret_input(
         &mut self,
         id: &str,
-        placeholder: &str,
+        configured: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
         let key = SharedString::from(id.to_owned());
-        if let Some(state) = self.inputs.get(&key) {
-            return state.clone();
+        let placeholder = if configured {
+            STORED_SECRET_PLACEHOLDER
+        } else {
+            "Not set"
+        };
+        if let Some(state) = self.inputs.get(&key).cloned() {
+            self.follow_placeholder(&key, &state, placeholder, window, cx);
+            return state;
         }
+        self.input_placeholders
+            .insert(key.clone(), SharedString::from(placeholder.to_owned()));
         let state = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -359,6 +396,25 @@ impl SettingsView {
         });
         self.inputs.insert(key, state.clone());
         state
+    }
+
+    /// Pushes `placeholder` to `state` only when it differs from the last one given,
+    /// since a placeholder the caller changes (a saved secret) follows the caller.
+    fn follow_placeholder(
+        &mut self,
+        key: &SharedString,
+        state: &Entity<InputState>,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.input_placeholders.get(key).map(SharedString::as_str) != Some(placeholder) {
+            state.update(cx, |state, cx| {
+                state.set_placeholder(placeholder.to_owned(), window, cx)
+            });
+            self.input_placeholders
+                .insert(key.clone(), SharedString::from(placeholder.to_owned()));
+        }
     }
 
     fn input_with(
@@ -377,12 +433,10 @@ impl SettingsView {
             let state = state.clone();
             // The placeholder follows the caller, as an upstream prop does (a saved
             // secret swaps "Not set" for the stored-secret hint after save).
-            if self.input_placeholders.get(&key).map(SharedString::as_str) != Some(placeholder) {
-                state.update(cx, |state, cx| {
-                    state.set_placeholder(placeholder.to_owned(), window, cx)
-                });
-                self.input_placeholders
-                    .insert(key.clone(), SharedString::from(placeholder.to_owned()));
+            self.follow_placeholder(&key, &state, placeholder, window, cx);
+            let masked = input_kind_is_masked(kind);
+            if state.read(cx).presentation().is_masked() != masked {
+                state.update(cx, |state, cx| state.set_masked(masked, window, cx));
             }
             let focused = state.read(cx).focus_handle(cx).is_focused(window);
             if !focused && state.read(cx).value() != value {
@@ -618,3 +672,15 @@ pub(super) fn section_title(text: &'static str) -> AnyElement {
 
 #[allow(dead_code)]
 fn _search_target_marker(_: SettingsSearchTarget) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputKind, input_kind_is_masked};
+
+    #[test]
+    fn input_mask_follows_kind_on_reuse() {
+        assert!(!input_kind_is_masked(InputKind::Draft));
+        assert!(!input_kind_is_masked(InputKind::Live));
+        assert!(input_kind_is_masked(InputKind::Secret));
+    }
+}

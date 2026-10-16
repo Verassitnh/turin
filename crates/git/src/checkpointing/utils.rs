@@ -10,6 +10,10 @@ use turin_contracts::base_schemas::{CheckpointRef, CheckpointScopeId, ProjectId,
 
 const CHECKPOINT_REFS_PREFIX: &str = "refs/t3/checkpoints";
 
+// Upstream orchestration-v2/CheckpointService.ts. Scope refs written by the orchestrator must
+// use this prefix, or diffs read refs that were never written.
+const CHECKPOINT_SCOPE_REFS_PREFIX: &str = "refs/t3/orchestration-v2/checkpoints";
+
 /// `checkpointRefForThreadTurn`.
 ///
 /// Node `base64url` and Effect `Base64Url.encode` are unpadded URL-safe base64.
@@ -22,8 +26,9 @@ pub fn checkpoint_ref_for_thread_turn(thread_id: &ThreadId, turn_count: u64) -> 
     .expect("thread checkpoint ref is a non-empty trimmed string")
 }
 
-/// `checkpointRefForScopeOrdinal`.
+/// `checkpointRefForScopeOrdinal` (upstream orchestration-v2/CheckpointService.ts).
 ///
+/// Scope refs live under `refs/t3/orchestration-v2/checkpoints`, not the v1 `turn` prefix.
 /// SHA-256 of the scope id, the first 32 hex characters of that digest, then
 /// base64url of those hex characters (not of the raw digest bytes).
 pub fn checkpoint_ref_for_scope_ordinal(
@@ -35,7 +40,7 @@ pub fn checkpoint_ref_for_scope_ordinal(
     let scope_key = &hex[..32];
     let encoded = URL_SAFE_NO_PAD.encode(scope_key.as_bytes());
     CheckpointRef::new(format!(
-        "{CHECKPOINT_REFS_PREFIX}/{encoded}/ordinal/{ordinal_within_scope}"
+        "{CHECKPOINT_SCOPE_REFS_PREFIX}/{encoded}/ordinal/{ordinal_within_scope}"
     ))
     .expect("scope checkpoint ref is a non-empty trimmed string")
 }
@@ -98,8 +103,23 @@ mod tests {
         let scope_id = CheckpointScopeId::new("scope:checkpoint-diff-v2:1").unwrap();
         assert_eq!(
             checkpoint_ref_for_scope_ordinal(&scope_id, 0).as_str(),
-            "refs/t3/checkpoints/ZWFhMDVjMmI4NjQzYTEzNTY0YzdiNDczOWJhNGFkOWI/ordinal/0"
+            "refs/t3/orchestration-v2/checkpoints/ZWFhMDVjMmI4NjQzYTEzNTY0YzdiNDczOWJhNGFkOWI/ordinal/0"
         );
+    }
+
+    #[test]
+    fn scope_ordinal_refs_use_the_orchestration_v2_prefix_not_the_v1_turn_prefix() {
+        // Scope refs are written by the orchestrator's CheckpointService and read by
+        // checkpoint_diff_query. A v1-prefixed ref would never be found.
+        let scope_id = CheckpointScopeId::new("scope:prefix").unwrap();
+        let scope_ref = checkpoint_ref_for_scope_ordinal(&scope_id, 3);
+        assert!(
+            scope_ref
+                .as_str()
+                .starts_with("refs/t3/orchestration-v2/checkpoints/")
+        );
+        assert!(!scope_ref.as_str().starts_with("refs/t3/checkpoints/"));
+        assert!(scope_ref.as_str().ends_with("/ordinal/3"));
     }
 
     #[test]

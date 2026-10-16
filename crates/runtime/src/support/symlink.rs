@@ -12,6 +12,9 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// writers rename onto this path so a linked file keeps its link. Fails on a
 /// cycle, an overly long chain, or an unreadable link rather than handing
 /// back a link that a rename would replace.
+///
+/// Blocking: `read_link` and `canonicalize` hit the disk. Async callers run it
+/// on the blocking pool (see `server_settings::service`).
 pub fn resolve_symlink_target(file_path: &Path) -> io::Result<PathBuf> {
     let mut current = lexical_absolute(file_path)?;
     for _hop in 0..MAX_SYMLINK_HOPS {

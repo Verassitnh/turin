@@ -24,7 +24,9 @@ use turin_contracts::source_control::{
     SourceControlProviderDiscoveryItem, VcsDiscoveryItem,
 };
 
-use super::super::controls::{FieldSize, SelectWidth, switch, text_field, textarea_field};
+use super::super::controls::{
+    FieldSize, SelectWidth, redacted_placeholder, switch, text_field, textarea_field,
+};
 use super::super::github_account_logic::{
     GitHubHostChange, GitHubHostChoice, GitHubHosts, group_github_accounts, next_github_hosts,
 };
@@ -158,11 +160,6 @@ fn auth_presentation(auth: &SourceControlProviderAuth) -> (&'static str, bool) {
         SourceControlProviderAuthStatus::Unauthenticated => ("Not authenticated", true),
         SourceControlProviderAuthStatus::Unknown => ("Status unknown", false),
     }
-}
-
-/// `redactedPlaceholder`: a same-length run of bullets for a hidden login.
-fn redacted_placeholder(value: &str) -> String {
-    "•".repeat(value.chars().count().clamp(6, 16))
 }
 
 impl SettingsView {
@@ -849,12 +846,7 @@ impl SettingsView {
                 cx.notify();
             },
         );
-        let token_input = self.secret_input(
-            "github-token",
-            if is_saved { "Configured" } else { "" },
-            window,
-            cx,
-        );
+        let token_input = self.secret_input("github-token", is_saved, window, cx);
         let draft = token_input.read(cx).value().trim().to_owned();
         let save_tokens = tokens.clone();
         let remove_tokens = tokens.clone();

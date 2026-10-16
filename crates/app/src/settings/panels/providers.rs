@@ -26,7 +26,8 @@ use turin_provider_core::server_provider::{
 };
 
 use super::super::controls::{
-    FieldSize, PopupAlign, SelectWidth, redacted_sensitive_text, switch, text_field, with_popup,
+    FieldSize, PopupAlign, SelectWidth, password_field, redacted_sensitive_text, switch,
+    text_field, with_popup,
 };
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
 use super::super::panels_logic::{
@@ -1438,6 +1439,23 @@ impl SettingsView {
                         }
                     },
                 )
+            }
+            ProviderSettingsFormControl::Password => {
+                let current = read_provider_config_string(config, &field.key);
+                let placeholder = field.placeholder.clone().unwrap_or_default();
+                let write = write.clone();
+                let input = self.password_input(
+                    &format!("provider-field-{}-{}", row.id, field.key),
+                    &current,
+                    &placeholder,
+                    window,
+                    cx,
+                    move |this, text, _, cx| write(this, FieldValue::Text(&text), cx),
+                );
+                div()
+                    .w(rems(14.))
+                    .child(password_field(&input, None, FieldSize::Sm, cx))
+                    .into_any_element()
             }
             _ => {
                 let current = read_provider_config_string(config, &field.key);

@@ -28,6 +28,8 @@ tracing-subscriber.workspace = true
 turin-shared.workspace = true
 turin-persistence.workspace = true
 turin-orchestration.workspace = true
+turin-provider-core.workspace = true
+turin-runtime.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 gpui-kit = { workspace = true, features = [
     # Code block highlighting (ChatMarkdown). Not `tree-sitter-languages`:
@@ -62,6 +64,7 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
     "tree-sitter-zig",
 ] }
+percent-encoding.workspace = true
 markdown.workspace = true
 similar = "2"
 

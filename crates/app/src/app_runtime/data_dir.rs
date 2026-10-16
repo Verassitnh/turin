@@ -1,31 +1,28 @@
 //! Where Turin keeps its own state.
 //!
-//! Upstream derives `stateDir` from `baseDir` (`apps/server/src/config.ts`) and
-//! keeps `statev2.sqlite` under it. Turin's base is `~/.turin`, and the
-//! database sits directly in it, as the T3 importer documents (PORTING.md).
-//! `TURIN_DATA_DIR` replaces the base for dev runs and tests.
-//!
-//! N1 owns the shared paths module. This resolver is the one place to swap
-//! for it when it lands.
+//! Default layout comes from `turin_runtime::config` (`TURIN_HOME` /
+//! `~/.turin/userdata/statev2.sqlite`). `TURIN_DATA_DIR` keeps the flat dev
+//! layout (`<dir>/statev2.sqlite`) used by tests and seed examples.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+use turin_runtime::config::{
+    DeriveServerPathsOptions, derive_server_paths, resolve_base_dir_from_env,
+};
 
 pub const DATA_DIR_ENV: &str = "TURIN_DATA_DIR";
 pub const DATABASE_FILE_NAME: &str = "statev2.sqlite";
 
-/// `TURIN_DATA_DIR` when set and non-empty, else `$HOME/.turin`. `None` when
-/// neither is available.
+/// `TURIN_DATA_DIR` when set and non-empty, else the runtime `state_dir`
+/// (`~/.turin/userdata` by default). `None` when home is unavailable.
 pub fn resolve_data_dir() -> Option<PathBuf> {
-    resolve_from(std::env::var_os(DATA_DIR_ENV), std::env::var_os("HOME"))
-}
-
-fn resolve_from(override_dir: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    if let Some(dir) = override_dir.filter(|dir| !dir.is_empty()) {
+    if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|dir| !dir.is_empty()) {
         return Some(PathBuf::from(dir));
     }
-    home.filter(|home| !home.is_empty())
-        .map(|home| PathBuf::from(home).join(".turin"))
+    let base = resolve_base_dir_from_env().ok()?;
+    Some(
+        derive_server_paths(&base, None, DeriveServerPathsOptions::default()).state_dir,
+    )
 }
 
 pub fn database_path(data_dir: &Path) -> PathBuf {
@@ -37,24 +34,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn override_wins_over_home() {
+    fn override_wins_over_runtime_default() {
+        std::env::set_var(DATA_DIR_ENV, "/tmp/dev-turin");
         assert_eq!(
-            resolve_from(Some("/tmp/dev-turin".into()), Some("/Users/x".into())),
+            resolve_data_dir(),
             Some(PathBuf::from("/tmp/dev-turin"))
         );
+        std::env::remove_var(DATA_DIR_ENV);
     }
 
     #[test]
-    fn empty_override_falls_back_to_home() {
-        assert_eq!(
-            resolve_from(Some("".into()), Some("/Users/x".into())),
-            Some(PathBuf::from("/Users/x/.turin"))
-        );
-    }
-
-    #[test]
-    fn nothing_to_resolve_from_is_none() {
-        assert_eq!(resolve_from(None, None), None);
+    fn empty_override_uses_runtime_state_dir() {
+        std::env::set_var(DATA_DIR_ENV, "");
+        let base = resolve_base_dir_from_env().expect("home");
+        let expected = derive_server_paths(&base, None, DeriveServerPathsOptions::default())
+            .state_dir;
+        assert_eq!(resolve_data_dir(), Some(expected));
+        std::env::remove_var(DATA_DIR_ENV);
     }
 
     #[test]

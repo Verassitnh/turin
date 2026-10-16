@@ -6,6 +6,7 @@ pub mod chat_view;
 pub mod drag_region;
 pub mod project_favicon;
 pub mod project_monogram;
+pub mod provider_update_launch_notification_logic;
 pub mod right_panel_tabs;
 pub mod sidebar;
 pub mod thread_action_menu_logic;

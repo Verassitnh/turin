@@ -8,6 +8,9 @@ pub mod chat_canvas_layout;
 // Pure citation-selector text logic; the DOM capture half is not ported yet.
 #[allow(dead_code)]
 pub mod assistant_text_selection;
+// Pure citation-target rules; the chat view does not drive the navigation yet.
+#[allow(dead_code)]
+pub mod assistant_citation_target;
 pub mod composer_pending_panels;
 pub mod composer_surface;
 // Embedded-script scan for command and tool views; no view calls it yet.

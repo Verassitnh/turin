@@ -30,6 +30,8 @@ pub mod icons;
 pub mod keybindings_logic;
 pub mod layout;
 pub mod live_bindings;
+pub mod live_commands;
+pub mod live_init;
 pub mod live_projects;
 pub mod live_snapshot;
 pub mod live_source;

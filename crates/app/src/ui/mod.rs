@@ -8,6 +8,7 @@ pub mod animated_size;
 pub mod autocomplete;
 pub mod badge;
 pub mod button;
+pub mod calendar;
 pub mod collapsible;
 pub mod collapsible_section_header;
 pub mod color_picker;

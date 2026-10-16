@@ -23,6 +23,7 @@ pub mod mock_source;
 pub mod runtime;
 pub mod sidebar_actions;
 pub mod sidebar_chrome;
+pub mod sidebar_thread_undo_notice;
 pub mod sidebar_drag;
 pub mod sidebar_gestures;
 pub mod sidebar_list;
@@ -706,6 +707,7 @@ impl Render for Sidebar {
                     .fixed_header(SidebarGroup::new().child(header))
                     .child(SidebarGroup::new().with(|this| this.flex_1()).child(body)),
             )
+            .child(sidebar_thread_undo_notice::SidebarThreadUndoNotice)
             .child(SidebarChromeFooter::new(cx.entity().downgrade()))
             .children(self.render_gesture_listeners(window, cx))
     }

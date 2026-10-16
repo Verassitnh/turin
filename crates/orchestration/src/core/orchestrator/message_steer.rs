@@ -4,18 +4,16 @@
 //! turn and restarts the run on a new attempt (`steer_active` and
 //! `restart_active`, and `queued-message.promote-to-steer`).
 //!
-//! Not ported: the provider-handoff restart (a steer that changes provider
-//! instance without a resumable native thread, or an adapter that classifies
-//! the selection `create_with_handoff`). It needs `ContextHandoffService`
-//! (`prepareProviderHandoff`), which is not ported; it refuses with a named
-//! cause, before any event.
 
 use turin_contracts::{
     ProviderSessionId, RunId,
     chat_attachment::ChatAttachment,
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2ConversationMessage, OrchestrationV2DomainEvent,
+        OrchestrationV2ContextHandoff, OrchestrationV2ContextTransfer,
+        OrchestrationV2ContextTransferResolution, OrchestrationV2ContextTransferStatus,
+        OrchestrationV2ContextTransferType, OrchestrationV2ConversationMessage,
+        OrchestrationV2CoveredRunOrdinals, OrchestrationV2DomainEvent,
         OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeStatus,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus,
         OrchestrationV2ProviderTurnStatus, OrchestrationV2Run, OrchestrationV2RunAttempt,
@@ -34,13 +32,20 @@ use super::Orchestrator;
 use super::dispatch::{Decision, command_id, dispatch_failure};
 use super::message_dispatch::{
     emit_thread_event, is_native_maintenance_command, next_turn_item_ordinal, prepare_root_scope,
-    run_scoped_event,
+    provider_session_id_for, root_provider_threads_for_provider, run_scoped_event,
+};
+use super::message_transfer::read_handoff_items;
+use super::thread_fork::context_source_point_for_run;
+use crate::core::context_handoff_service::{
+    ContextHandoffService, PrepareProviderHandoffInput as ProviderHandoffInput,
+    ProviderHandoffStrategy,
 };
 use crate::core::provider_session_transition_policy::{
     ProviderSessionTransition, model_selections_equal,
 };
 use crate::pipeline::command_policy::{
-    CapabilityCheck, SteeringExecutionPolicy, decide_steering_execution,
+    CapabilityCheck, HandoffStrategy, SteeringExecutionPolicy, decide_steering_execution,
+    ensure_context_handoff,
 };
 use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect, SessionTransition};
 use crate::pipeline::orchestrator_port::OrchestratorError;
@@ -344,16 +349,146 @@ pub(super) async fn steer_into_run(
         || selection_transition == Some(ProviderSelectionTransitionPlan::CreateWithHandoff);
     let requires_provider_session_restart = can_resume_across_instances
         || selection_transition == Some(ProviderSelectionTransitionPlan::RestartSession);
-    if requires_provider_thread_handoff {
-        return Err(dispatch_failure(
-            command,
-            "Restarting a run on a new provider thread needs the context handoff service, which is not ported yet.",
-        ));
-    }
-
     let mut restart_provider_thread: OrchestrationV2ProviderThread = provider_thread.clone();
     let mut restart_session_transition: Option<SessionTransition> = None;
-    if requires_provider_session_restart {
+    let mut restart_handoff: Option<OrchestrationV2ContextHandoff> = None;
+    let mut restart_transfer: Option<OrchestrationV2ContextTransfer> = None;
+    if requires_provider_thread_handoff {
+        let target_adapter = orchestrator
+            .seams
+            .adapters
+            .adapter(&input.model_selection.instance_id)
+            .ok_or_else(|| {
+                dispatch_failure(
+                    command,
+                    format!(
+                        "Provider instance {} is not available.",
+                        input.model_selection.instance_id
+                    ),
+                )
+            })?;
+        let target_capabilities = target_adapter.get_capabilities().await.map_err(|cause| {
+            OrchestratorError::ProviderAdapter {
+                command_id: command_id(command).clone(),
+                provider_instance_id: input.model_selection.instance_id.clone(),
+                cause: Box::new(cause),
+            }
+        })?;
+        ensure_context_handoff(
+            &CapabilityCheck {
+                command_id: command_id(command),
+                thread_id: &thread.id,
+                provider_instance_id: &input.model_selection.instance_id,
+                capabilities: &target_capabilities,
+            },
+            HandoffStrategy::FullThreadSummary,
+        )
+        .map_err(|cause| dispatch_failure(command, cause.to_string()))?;
+        let existing_target_provider_thread =
+            root_provider_threads_for_provider(projection, &input.model_selection.instance_id)
+                .into_iter()
+                .find(|candidate| candidate.id != provider_thread.id);
+        let target_provider_session_id = match existing_target_provider_thread
+            .as_ref()
+            .and_then(|row| row.provider_session_id.clone())
+        {
+            Some(existing) => existing,
+            None => {
+                provider_session_id_for(
+                    target_adapter.as_ref(),
+                    &input.model_selection.instance_id,
+                    &thread.id,
+                    command,
+                )
+                .await?
+            }
+        };
+        let target_base = match existing_target_provider_thread {
+            None => OrchestrationV2ProviderThread {
+                id: ids::provider_thread(
+                    target_adapter.driver(),
+                    None,
+                    &format!("pending:{}:attempt:{attempt_ordinal}", target_run.id),
+                ),
+                driver: target_adapter.driver().clone(),
+                provider_instance_id: input.model_selection.instance_id.clone(),
+                provider_session_id: Some(target_provider_session_id),
+                app_thread_id: Some(thread.id.clone()),
+                owner_node_id: None,
+                native_thread_ref: None,
+                native_conversation_head_ref: None,
+                status: OrchestrationV2ProviderThreadStatus::NotLoaded,
+                first_run_ordinal: Some(target_run.ordinal),
+                last_run_ordinal: Some(target_run.ordinal),
+                handoff_ids: Vec::new(),
+                forked_from: None,
+                pending_background_tasks: Vec::new(),
+                context_usage: None,
+                native_metadata: None,
+                goal: None,
+                created_at: now,
+                updated_at: now,
+            },
+            Some(existing) => OrchestrationV2ProviderThread {
+                provider_session_id: Some(target_provider_session_id),
+                last_run_ordinal: Some(target_run.ordinal),
+                updated_at: now,
+                ..existing
+            },
+        };
+        let transfer_id = IdAllocator.context_transfer(&thread.id, &thread.id, "provider_handoff");
+        let items = read_handoff_items(orchestrator, &thread.id, None).await?;
+        let handoff =
+            ContextHandoffService::default().prepare_provider_handoff(&ProviderHandoffInput {
+                thread_id: &thread.id,
+                target_run_id: &target_run.id,
+                transfer_id: Some(transfer_id.clone()),
+                from_provider_thread_ids: std::slice::from_ref(&provider_thread.id),
+                to_provider_thread_id: &target_base.id,
+                from_provider_instance_id: &target_run.provider_instance_id,
+                to_provider_instance_id: &input.model_selection.instance_id,
+                covered_run_ordinals: OrchestrationV2CoveredRunOrdinals {
+                    from: turin_contracts::PositiveInt::new(1).expect("1 is positive"),
+                    to: target_run.ordinal,
+                },
+                runs: Some(&projection.runs),
+                strategy: ProviderHandoffStrategy::FullThreadSummary,
+                items: &items,
+                created_at: now,
+            });
+        restart_provider_thread = {
+            let mut handoff_ids = target_base.handoff_ids.clone();
+            if !handoff_ids.contains(&handoff.id) {
+                handoff_ids.push(handoff.id.clone());
+            }
+            OrchestrationV2ProviderThread {
+                handoff_ids,
+                ..target_base
+            }
+        };
+        restart_transfer = Some(OrchestrationV2ContextTransfer {
+            id: transfer_id,
+            r#type: OrchestrationV2ContextTransferType::ProviderHandoff,
+            source_thread_id: thread.id.clone(),
+            target_thread_id: thread.id.clone(),
+            source_point: context_source_point_for_run(projection, target_run),
+            base_point: None,
+            source_provider_instance_id: Some(target_run.provider_instance_id.clone()),
+            target_provider_instance_id: Some(input.model_selection.instance_id.clone()),
+            target_run_id: Some(target_run.id.clone()),
+            status: OrchestrationV2ContextTransferStatus::Consumed,
+            resolution: Some(OrchestrationV2ContextTransferResolution::PortableContext {
+                context_handoff_id: handoff.id.clone(),
+            }),
+            created_by: input.message.created_by,
+            error: None,
+            created_at: now,
+            updated_at: now,
+            consumed_at: Some(now),
+        });
+        restart_handoff = Some(handoff);
+        restart_session_transition = Some(SessionTransition::Detach);
+    } else if requires_provider_session_restart {
         let next_provider_session_id: ProviderSessionId =
             IdAllocator.provider_session(&input.model_selection.instance_id, &thread.id);
         restart_provider_thread = OrchestrationV2ProviderThread {
@@ -395,6 +530,10 @@ pub(super) async fn steer_into_run(
         active_attempt_id: Some(next_attempt_id.clone()),
         user_message_id: input.message.id.clone(),
         status: OrchestrationV2RunStatus::Starting,
+        context_handoff_id: restart_handoff
+            .as_ref()
+            .map(|handoff| handoff.id.clone())
+            .or_else(|| target_run.context_handoff_id.clone()),
         ..target_run.clone()
     };
     let next_attempt = OrchestrationV2RunAttempt {
@@ -478,7 +617,7 @@ pub(super) async fn steer_into_run(
             now,
         );
     }
-    if requires_provider_session_restart {
+    if requires_provider_thread_handoff || requires_provider_session_restart {
         let id = decision.event_id(&thread.id);
         decision.emit(OrchestrationV2DomainEvent::ProviderThreadUpdated {
             id,
@@ -491,6 +630,28 @@ pub(super) async fn steer_into_run(
             occurred_at: now,
             payload: restart_provider_thread.clone(),
         });
+    }
+    if let Some(handoff) = restart_handoff {
+        run_scoped_event!(
+            decision,
+            ContextHandoffUpdated,
+            &thread.id,
+            &target_run.id,
+            &next_root_node_id,
+            new_instance,
+            handoff
+        );
+    }
+    if let Some(transfer) = restart_transfer {
+        run_scoped_event!(
+            decision,
+            ContextTransferCreated,
+            &thread.id,
+            &target_run.id,
+            &next_root_node_id,
+            new_instance,
+            transfer
+        );
     }
     run_scoped_event!(
         decision,

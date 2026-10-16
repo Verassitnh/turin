@@ -187,6 +187,14 @@ pub(super) fn provider_thread_for_run<'a>(
         .find(|candidate| &candidate.id == provider_thread_id)
 }
 
+/// The id of `providerTurnForRun(projection, run)`, if there is one.
+pub(super) fn latest_turn_for_run(
+    projection: &OrchestrationV2ThreadProjection,
+    run: &OrchestrationV2Run,
+) -> Option<turin_contracts::ProviderTurnId> {
+    provider_turn_for_run(projection, run).map(|turn| turn.id.clone())
+}
+
 /// `providerTurnForRun`: the latest turn of the run's active attempt, or the
 /// turn the attempt itself names.
 fn provider_turn_for_run<'a>(

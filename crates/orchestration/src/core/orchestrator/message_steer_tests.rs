@@ -154,7 +154,36 @@ impl LiveSessions for FakeSessions {
     }
 }
 
+/// A provider-switch planner that answers a fixed plan: the sessions a test
+/// sets in `release` are the ones the switch releases.
+#[derive(Default)]
+pub(super) struct FixedPlanner {
+    pub(super) release: Mutex<Vec<ProviderSessionId>>,
+    pub(super) transition:
+        Mutex<Option<crate::core::provider_session_transition_policy::ProviderSessionTransition>>,
+}
+
+#[async_trait]
+impl super::services::ProviderSwitchPlanner for FixedPlanner {
+    async fn plan(
+        &self,
+        thread: &turin_contracts::orchestration_v2::OrchestrationV2ThreadProjection,
+        target: &turin_contracts::model_selection::ModelSelection,
+    ) -> Result<super::services::ProviderSwitchPlan, BoxError> {
+        Ok(super::services::ProviderSwitchPlan {
+            instance_changed: thread.thread.model_selection.instance_id != target.instance_id,
+            model_changed: thread.thread.model_selection.model != target.model,
+            target_provider_thread_id: None,
+            release_provider_session_ids: self.release.lock().clone(),
+            transition: self.transition.lock().clone().unwrap_or(
+                crate::core::provider_session_transition_policy::ProviderSessionTransition::Reuse,
+            ),
+        })
+    }
+}
+
 pub(super) struct Steer {
+    pub(super) planner: Arc<FixedPlanner>,
     pub(super) orchestrator: Orchestrator,
     pub(super) outbox: EffectOutbox,
     pub(super) projection: Arc<ProjectionStore>,
@@ -214,7 +243,14 @@ pub(super) async fn harness_with_settings(
         driver: serde_json::from_value(json!("codex")).expect("driver fixture"),
         transition,
     });
+    let other: Arc<dyn ProviderAdapterV2> = Arc::new(FakeAdapter {
+        instance: serde_json::from_value(json!("claudeAgent")).expect("instance fixture"),
+        capabilities,
+        driver: serde_json::from_value(json!("claudeAgent")).expect("driver fixture"),
+        transition: None,
+    });
     let sessions = Arc::new(FakeSessions::default());
+    let planner = Arc::new(FixedPlanner::default());
     let orchestrator = Orchestrator::new(
         projection.clone(),
         sink,
@@ -223,13 +259,17 @@ pub(super) async fn harness_with_settings(
     )
     .with_dispatch_seams(DispatchSeams {
         checkpoints: Arc::new(FakeCheckpoints),
-        adapters: Arc::new(FakeAdapters { adapter }),
+        adapters: Arc::new(FakeAdapters {
+            adapter,
+            other: Some(other),
+        }),
         project_roots: Arc::new(FakeProjectRoots),
         sessions: sessions.clone(),
         provider_instances: settings,
-        ..DispatchSeams::default()
+        switch_planner: planner.clone(),
     });
     Steer {
+        planner,
         orchestrator,
         outbox: EffectOutbox::new(db),
         projection,
@@ -712,22 +752,59 @@ async fn native_maintenance_and_goal_commands_never_steer() {
 }
 
 #[tokio::test]
-async fn a_provider_change_without_a_resumable_thread_needs_the_handoff_service() {
+async fn a_provider_change_restarts_the_run_on_a_new_thread_with_a_handoff() {
     let h = harness(true, None).await;
     let run_id = h.running_run("thread:switch").await;
-    let error = h
-        .steer(
-            "command:switch",
-            "thread:switch",
-            "steer_active",
-            &run_id,
-            json!({"modelSelection": {"instanceId": "claudeAgent", "model": "claude-test"}}),
-        )
+    h.steer(
+        "command:switch",
+        "thread:switch",
+        "steer_active",
+        &run_id,
+        json!({"modelSelection": {"instanceId": "claudeAgent", "model": "claude-test"}}),
+    )
+    .await
+    .expect("the switch restarts the run");
+
+    let projection = h
+        .orchestrator
+        .get_thread_projection(&thread("thread:switch"))
         .await
-        .expect_err("a handoff restart is not ported");
+        .expect("projection reads");
+    let run = &projection.runs[0];
+    assert_eq!(run.provider_instance_id.as_str(), "claudeAgent");
+    assert_eq!(run.status, OrchestrationV2RunStatus::Starting);
+    let handoff_id = run
+        .context_handoff_id
+        .clone()
+        .expect("the run names its handoff");
     assert!(
-        std::error::Error::source(&error)
-            .is_some_and(|cause| cause.to_string().contains("context handoff service")),
-        "{error:?}"
+        projection
+            .context_handoffs
+            .iter()
+            .any(|handoff| handoff.id == handoff_id)
     );
+    let transfer = projection
+        .context_transfers
+        .iter()
+        .find(|transfer| {
+            transfer.r#type
+                == turin_contracts::orchestration_v2::OrchestrationV2ContextTransferType::ProviderHandoff
+        })
+        .expect("a provider handoff transfer");
+    assert_eq!(
+        transfer.status,
+        turin_contracts::orchestration_v2::OrchestrationV2ContextTransferStatus::Consumed
+    );
+    // The old codex thread stays; the restart runs on a new claude thread.
+    assert_eq!(projection.provider_threads.len(), 2);
+    let effects = h.effects("command:switch").await;
+    let [
+        EffectRequest::ProviderTurnRestart {
+            session_transition, ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("one restart effect: {effects:?}");
+    };
+    assert_eq!(*session_transition, Some(SessionTransition::Detach));
 }

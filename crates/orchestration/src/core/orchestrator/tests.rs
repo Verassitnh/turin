@@ -52,14 +52,15 @@ pub(super) fn command_id(id: &str) -> CommandId {
     CommandId::new(id).expect("command id")
 }
 
-fn model_selection_set(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
+/// A kind whose handler is not ported yet (delegated tasks).
+fn unported_command(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
     serde_json::from_value(json!({
-        "type": "thread.model-selection.set",
+        "type": "delegated_task.completion-delivery.dispose",
         "commandId": command,
-        "threadId": thread_id,
-        "modelSelection": {"instanceId": "codex", "model": "gpt-test"},
+        "parentThreadId": thread_id,
+        "taskId": "node:task",
     }))
-    .expect("thread.model-selection.set decodes")
+    .expect("delegated_task.completion-delivery.dispose decodes")
 }
 
 fn archive(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
@@ -98,12 +99,12 @@ async fn a_kind_without_a_handler_is_rejected_and_leaves_no_receipt() {
     let (orchestrator, receipts) = harness().await;
 
     let error = orchestrator
-        .dispatch(model_selection_set("command:unported", "thread:a"))
+        .dispatch(unported_command("command:unported", "thread:a"))
         .await
         .expect_err("unported kinds are rejected");
 
     assert!(
-        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.model-selection.set"),
+        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "delegated_task.completion-delivery.dispose"),
         "{error:?}"
     );
     assert!(error.was_not_accepted());
@@ -341,8 +342,8 @@ async fn an_invalid_visit_time_is_refused_and_the_refusal_is_replayed() {
 }
 
 #[tokio::test]
-async fn an_imported_native_thread_is_not_ported_and_leaves_no_receipt() {
-    let (orchestrator, receipts) = harness().await;
+async fn an_imported_native_thread_creates_its_provider_thread() {
+    let (orchestrator, _) = harness().await;
     let mut command = serde_json::to_value(create_command(
         "command:import",
         "thread:import",
@@ -355,21 +356,36 @@ async fn an_imported_native_thread_is_not_ported_and_leaves_no_receipt() {
     let command: OrchestrationV2ServerCommand =
         serde_json::from_value(command).expect("imported create decodes");
 
-    let error = orchestrator
+    let result = orchestrator
         .dispatch(command)
         .await
-        .expect_err("imported threads are not ported");
-    assert!(
-        matches!(error, OrchestratorError::CommandRejected { .. }),
-        "{error:?}"
+        .expect("an imported thread is created");
+    let types: Vec<_> = result
+        .stored_events
+        .iter()
+        .map(|stored| serde_json::to_value(&stored.event).unwrap()["type"].clone())
+        .collect();
+    assert_eq!(
+        types,
+        vec![json!("thread.created"), json!("provider-thread.updated")]
     );
-    assert!(
-        receipts
-            .get_by_command_id(command_id("command:import"))
-            .await
-            .unwrap()
-            .is_none()
+    let projection = orchestrator
+        .get_thread_projection(&thread("thread:import"))
+        .await
+        .expect("projection reads");
+    let [provider_thread] = projection.provider_threads.as_slice() else {
+        panic!("one provider thread: {:?}", projection.provider_threads);
+    };
+    let reference = provider_thread
+        .native_thread_ref
+        .as_ref()
+        .expect("a native ref");
+    assert_eq!(
+        reference.native_id.as_ref().map(|id| id.as_str()),
+        Some("native-1")
     );
+    assert!(provider_thread.provider_session_id.is_none());
+    assert!(provider_thread.first_run_ordinal.is_none());
 }
 
 /// A thread-row command: `kind` is the wire type, `extra` adds its fields.
@@ -962,28 +978,6 @@ async fn a_manual_continuation_of_an_unknown_run_is_refused_and_replays() {
     assert!(
         matches!(replay, OrchestratorError::CommandPreviouslyRejected { .. }),
         "{replay:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_restart_continuation_is_refused_until_the_restart_port_lands() {
-    let (orchestrator, _) = harness().await;
-    orchestrator
-        .dispatch(create_command("command:create", "thread:restart", "Thread"))
-        .await
-        .expect("create commits");
-
-    let error = orchestrator
-        .dispatch(message_command(
-            "command:restart",
-            "thread:restart",
-            json!({ "restartContinuationOfRunId": "run:interrupted" }),
-        ))
-        .await
-        .expect_err("restart continuation is not ported");
-    assert!(
-        refusal_text(&error).contains("Restart continuation is not ported yet (T13e)."),
-        "{error:?}"
     );
 }
 

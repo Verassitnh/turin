@@ -112,7 +112,31 @@ pub(super) async fn decide(
             thread_id,
             settled_at,
             ..
+        }
+        | C::ThreadAutoSettle {
+            thread_id,
+            settled_at,
+            ..
         } => {
+            // Automatic settlement (#8600): the sweep evaluated a shell
+            // snapshot, so re-check against the live thread before settling.
+            // Any change after the snapshot, or any explicit override
+            // (including the un-settle button's "active"), wins over the sweep.
+            if let C::ThreadAutoSettle { snapshot_at, .. } = client {
+                let current = orchestrator
+                    .projection
+                    .get_thread(thread_id)
+                    .await
+                    .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+                if current.settled_override.is_some()
+                    || current.updated_at.as_datetime() > snapshot_at.as_datetime()
+                {
+                    return Err(dispatch_failure(
+                        command,
+                        format!("Thread {thread_id} changed before automatic settlement."),
+                    ));
+                }
+            }
             let thread =
                 super::thread_mutation::load_live_thread(orchestrator, command, thread_id).await?;
             let records = orchestrator

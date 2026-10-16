@@ -423,9 +423,87 @@ pub(super) async fn decide(
                 false,
             );
         }
+        C::ThreadModelSelectionSet {
+            thread_id,
+            model_selection,
+            ..
+        }
+        | C::ProviderSwitch {
+            thread_id,
+            model_selection,
+            ..
+        } => {
+            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let always_switch = matches!(client_of(command), Some(C::ProviderSwitch { .. }));
+            // The target instance must exist, and the planner decides how the
+            // live sessions move.
+            if orchestrator
+                .seams
+                .adapters
+                .adapter(&model_selection.instance_id)
+                .is_none()
+            {
+                return Err(OrchestratorError::ProviderAdapter {
+                    command_id: super::dispatch::command_id(command).clone(),
+                    provider_instance_id: model_selection.instance_id.clone(),
+                    cause: format!(
+                        "Provider instance {} is not available.",
+                        model_selection.instance_id
+                    )
+                    .into(),
+                });
+            }
+            let context = orchestrator
+                .get_thread_records(
+                    thread_id,
+                    &[RecordField::ProviderSessions, RecordField::ProviderThreads],
+                    &RecordFilter::default(),
+                )
+                .await?;
+            let plan = orchestrator
+                .seams
+                .switch_planner
+                .plan(&context, model_selection)
+                .await
+                .map_err(|cause| dispatch_failure(command, cause.to_string()))?;
+            let now = decision.now();
+            let same_instance = thread.provider_instance_id == model_selection.instance_id;
+            let updated = OrchestrationV2AppThread {
+                provider_instance_id: model_selection.instance_id.clone(),
+                model_selection: model_selection.clone(),
+                updated_at: now,
+                ..thread
+            };
+            if same_instance && !always_switch {
+                thread_event!(decision, ThreadModelSelectionUpdated, updated);
+            } else {
+                thread_event!(decision, ThreadProviderSwitched, updated);
+            }
+            let released: Vec<_> = context
+                .provider_sessions
+                .iter()
+                .filter(|session| plan.release_provider_session_ids.contains(&session.id))
+                .cloned()
+                .collect();
+            provider_detach::detach_sessions(
+                decision,
+                thread_id,
+                &released,
+                "Provider or model selection changed.",
+                false,
+            );
+        }
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// The client command inside a server command.
+fn client_of(command: &OrchestrationV2ServerCommand) -> Option<&C> {
+    match command {
+        OrchestrationV2ServerCommand::Client(client) => Some(client),
+        OrchestrationV2ServerCommand::Internal(_) => None,
+    }
 }
 
 /// Loads the thread a mutation addresses. A deleted thread refuses every kind.

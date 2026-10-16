@@ -14,9 +14,9 @@
 //! * delegated-completion deliveries (wake text, mailbox steer routing) and
 //!   source-plan starts.
 //!
-//! Refused until their slices land: restart continuation (needs
-//! `stopReachedRun`, T13e). Not yet ported: provider switch, fork and merge-back
-//! transfers, legacy import handoffs (refused, see `start_run`).
+//! * provider switches, pending fork and merge-back transfers: `message_transfer.rs`.
+//!
+//! Refused until its slice lands: restart continuation (`continueRestartedRun`, T13e).
 
 use turin_contracts::{
     NodeId, PositiveInt, ProviderThreadId, RunId, ThreadId, UtcDateTime,
@@ -60,13 +60,21 @@ use crate::pipeline::notification_mailbox::is_undelivered_mailbox_steer;
 use crate::pipeline::orchestrator_port::OrchestratorError;
 use crate::pipeline::runtime_policy::{self, RuntimePolicyOverride};
 use crate::projection::shared::thread_error::{
-    latest_executed_run, latest_root_provider_failure, usage_limit_blocked_run,
+    latest_executed_run, latest_root_provider_failure, run_ran_after, usage_limit_blocked_run,
 };
 
 use super::Orchestrator;
 use super::dispatch::{Decision, command_id, dispatch_failure};
 use super::message_steer::{SteerInput, steer_into_run};
+use super::message_transfer::{
+    read_handoff_items, should_prepare_legacy_import_handoff, start_run_with_transfers,
+};
+use super::run_stop::stop_reached_run;
 use super::services::PrepareRootRunScope;
+use crate::core::context_handoff_service::{
+    ContextHandoffService, PrepareLegacyImportInput as LegacyImportInput,
+};
+use crate::core::restart_background_note::{ProviderTurnState, is_restart_continuation_source};
 
 /// The workspace-preparation placeholder, upstream `WORKSPACE_PREPARATION_INPUT`.
 pub(super) const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
@@ -189,6 +197,9 @@ pub(super) async fn dispatch_message(
             })
             || recovery.as_ref().is_none_or(|recovery| {
                 !recovery.auto_resume
+                    || Some(&recovery.run_id) != run.map(|run| &run.id)
+                    || chrono::DateTime::parse_from_rfc3339(recovery.reset_at.as_str())
+                        .is_ok_and(|reset| reset.timestamp_millis() > millis(now))
                     || recovery.request_id.as_ref() != usage_limit_recovery_request_id.as_ref()
                     || failure
                         .and_then(|failure| failure.reset_at.as_ref())
@@ -227,11 +238,33 @@ pub(super) async fn dispatch_message(
         }
     }
 
-    if restart_continuation_of_run_id.is_some() {
-        return Err(dispatch_failure(
-            command,
-            "Restart continuation is not ported yet (T13e).",
-        ));
+    if let Some(source_id) = restart_continuation_of_run_id {
+        let turn_states: Vec<ProviderTurnState> =
+            projection.provider_turns.iter().map(Into::into).collect();
+        let source = projection.runs.iter().find(|run| &run.id == source_id);
+        // Held queued runs never started; they wait behind the continuation.
+        let stale = match source {
+            None => true,
+            Some(source) => {
+                !is_restart_continuation_source(source, &turn_states)
+                    || projection.thread.archived_at.is_some()
+                    || projection.thread.deleted_at.is_some()
+                    || projection.thread.provider_instance_id != source.provider_instance_id
+                    || projection.runs.iter().any(|run| {
+                        run.id != source.id
+                            && run.status != OrchestrationV2RunStatus::Queued
+                            && run_ran_after(run, source)
+                    })
+                    || stop_reached_run(orchestrator, command, thread_id, &source.id).await?
+            }
+        };
+        if stale {
+            // Preserve the current row so stale automatic deliveries receive an
+            // accepted receipt without changing work or repeatedly retrying.
+            let now = decision.now();
+            emit_thread_event(decision, "metadata-updated", &projection.thread, now);
+            return Ok(());
+        }
     }
 
     // A new turn settles and un-snoozes the thread first, as upstream does.
@@ -339,6 +372,10 @@ pub(super) async fn dispatch_message(
         None => text.clone(),
     };
     let resolved = Resolved {
+        continued_task_id: restart_continuation_of_run_id
+            .as_ref()
+            .and_then(|source_id| projection.runs.iter().find(|run| &run.id == source_id))
+            .and_then(|source| source.delegated_task_id.clone()),
         text,
         delegated_completion: delegated,
         source_plan: resolve_source_plan(orchestrator, command, client, &projection).await?,
@@ -442,7 +479,10 @@ pub(super) async fn dispatch_message(
 /// What the delegated-completion and source-plan reads settle for one
 /// dispatch: the message text (a delegated completion replaces it with a wake
 /// detail), the delivery it carries, and the plan it completes.
-struct Resolved {
+pub(super) struct Resolved {
+    /// The delegated task a restart continuation carries on
+    /// (`continuedTaskId`).
+    pub(super) continued_task_id: Option<NodeId>,
     text: String,
     delegated_completion: Option<OrchestrationV2MessageDelegatedCompletion>,
     source_plan: Option<OrchestrationV2PlanArtifact>,
@@ -450,14 +490,14 @@ struct Resolved {
 
 impl Resolved {
     /// The command's message as this dispatch writes it.
-    fn apply(&self, message: &mut OrchestrationV2ConversationMessage) {
+    pub(super) fn apply(&self, message: &mut OrchestrationV2ConversationMessage) {
         message.text.clone_from(&self.text);
         message.delegated_completion = self.delegated_completion.clone();
     }
 
     /// `completeSourcePlan`: the plan a run was started from is done once the
     /// run exists.
-    fn complete_source_plan(&self, decision: &mut Decision, now: UtcDateTime) {
+    pub(super) fn complete_source_plan(&self, decision: &mut Decision, now: UtcDateTime) {
         let Some(OrchestrationV2PlanArtifact::ProposedPlan {
             id,
             thread_id,
@@ -493,7 +533,7 @@ impl Resolved {
     }
 }
 
-fn source_plan_ref_of(client: &C) -> Option<OrchestrationV2SourcePlanRef> {
+pub(super) fn source_plan_ref_of(client: &C) -> Option<OrchestrationV2SourcePlanRef> {
     let C::MessageDispatch {
         source_plan_ref, ..
     } = client
@@ -501,6 +541,26 @@ fn source_plan_ref_of(client: &C) -> Option<OrchestrationV2SourcePlanRef> {
         unreachable!("source_plan_ref_of is called only for message.dispatch");
     };
     source_plan_ref.clone()
+}
+
+/// The command's message id.
+pub(super) fn message_id_of(client: &C) -> turin_contracts::MessageId {
+    let C::MessageDispatch { message_id, .. } = client else {
+        unreachable!("message_id_of is called only for message.dispatch");
+    };
+    message_id.clone()
+}
+
+/// The run a restart continuation resumes, if the command is one.
+pub(super) fn restart_of(client: &C) -> Option<RunId> {
+    let C::MessageDispatch {
+        restart_continuation_of_run_id,
+        ..
+    } = client
+    else {
+        unreachable!("restart_of is called only for message.dispatch");
+    };
+    restart_continuation_of_run_id.clone()
 }
 
 /// `delegatedCompletionWakeDetail`.
@@ -712,7 +772,7 @@ enum Dispatch {
 /// How a start-type dispatch begins. A deferred start waits for its workspace
 /// to be prepared before the provider turn runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Start {
+pub(super) enum Start {
     Immediate,
     Deferred {
         workspace_strategy: Option<OrchestrationV2ThreadLaunchWorkspaceStrategy>,
@@ -896,20 +956,19 @@ fn millis(at: UtcDateTime) -> i64 {
 }
 
 /// What the start branch needs beyond the projection.
-struct StartInput<'a> {
-    client: &'a C,
-    requested_model: &'a ModelSelection,
-    start: Start,
-    resolved: &'a Resolved,
+pub(super) struct StartInput<'a> {
+    pub(super) client: &'a C,
+    pub(super) requested_model: &'a ModelSelection,
+    pub(super) start: Start,
+    pub(super) resolved: &'a Resolved,
 }
 
 /// The start branch of `dispatchMessage`: a `starting` run that gets its
 /// provider turn from the effect, or a `preparing` run for `defer_start`. A
 /// deferred run has no effect here; it starts once its workspace is ready.
 ///
-/// Refused, with no event written: provider switches (upstream's
-/// `isProviderSwitch`), pending fork or merge-back transfers, and legacy
-/// import handoffs (a v1 import with a completed run needs its item reads).
+/// A provider switch (upstream's `isProviderSwitch`) or a pending fork or
+/// merge-back transfer takes `message_transfer.rs` instead.
 async fn start_run(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
@@ -940,40 +999,6 @@ async fn start_run(
             .iter()
             .find(|candidate| &candidate.id == id)
     });
-    if active_provider_thread.is_some_and(|active| &active.provider_instance_id != instance) {
-        return Err(dispatch_failure(
-            command,
-            "Provider switching is not ported yet (T13c item I).",
-        ));
-    }
-    if projection.context_transfers.iter().any(|transfer| {
-        transfer.target_thread_id == thread.id
-            && transfer.status == OrchestrationV2ContextTransferStatus::Pending
-            && matches!(
-                transfer.r#type,
-                OrchestrationV2ContextTransferType::Fork
-                    | OrchestrationV2ContextTransferType::MergeBack
-            )
-    }) {
-        return Err(dispatch_failure(
-            command,
-            "Fork and merge-back transfers are not ported yet (T13c item I).",
-        ));
-    }
-    let imported_history =
-        thread.history_origin == Some(OrchestrationV2ThreadHistoryOrigin::V1Import);
-    if imported_history
-        && projection
-            .runs
-            .iter()
-            .any(|run| run.status == OrchestrationV2RunStatus::Completed)
-    {
-        return Err(dispatch_failure(
-            command,
-            "Legacy import handoff is not ported yet.",
-        ));
-    }
-
     let now = decision.now();
     if thread.model_selection != *requested_model || thread.provider_instance_id != *instance {
         // A same-instance change is a model update; across instances it is a
@@ -994,6 +1019,33 @@ async fn start_run(
             &updated,
             now,
         );
+    }
+
+    let is_provider_switch =
+        active_provider_thread.is_some_and(|active| &active.provider_instance_id != instance);
+    let carries_transfer = projection.context_transfers.iter().any(|transfer| {
+        transfer.target_thread_id == thread.id
+            && transfer.status == OrchestrationV2ContextTransferStatus::Pending
+            && matches!(
+                transfer.r#type,
+                OrchestrationV2ContextTransferType::Fork
+                    | OrchestrationV2ContextTransferType::MergeBack
+            )
+    });
+    if is_provider_switch || carries_transfer {
+        return start_run_with_transfers(
+            orchestrator,
+            command,
+            projection,
+            StartInput {
+                client,
+                requested_model,
+                start,
+                resolved,
+            },
+            decision,
+        )
+        .await;
     }
 
     let ordinal = next_run_ordinal(projection);
@@ -1018,10 +1070,46 @@ async fn start_run(
         || ids::provider_thread(adapter.driver(), None, &format!("pending:{run_id}")),
         |active| active.id.clone(),
     );
+    // A thread imported from the previous orchestrator hands its history to
+    // the first native turn.
+    let imported = thread.history_origin == Some(OrchestrationV2ThreadHistoryOrigin::V1Import);
+    let legacy_import_items = if imported {
+        read_handoff_items(orchestrator, &thread.id, Some(vec![None])).await?
+    } else {
+        Vec::new()
+    };
+    let legacy_import_handoff = should_prepare_legacy_import_handoff(
+        imported,
+        projection
+            .runs
+            .iter()
+            .any(|run| run.status == OrchestrationV2RunStatus::Completed),
+        legacy_import_items.len(),
+    )
+    .then(|| {
+        ContextHandoffService::default().prepare_legacy_import(&LegacyImportInput {
+            thread_id: &thread.id,
+            target_run_id: &run_id,
+            to_provider_thread_id: &provider_thread_id,
+            to_provider_instance_id: instance,
+            items: &legacy_import_items,
+            created_at: now,
+        })
+    });
+    let legacy_handoff_ids = |existing: &[turin_contracts::ContextHandoffId]| {
+        let mut ids_out = existing.to_vec();
+        if let Some(handoff) = &legacy_import_handoff
+            && !ids_out.contains(&handoff.id)
+        {
+            ids_out.push(handoff.id.clone());
+        }
+        ids_out
+    };
     let provider_thread = match active_provider_thread {
         Some(active) => OrchestrationV2ProviderThread {
             provider_session_id: Some(provider_session_id.clone()),
             last_run_ordinal: PositiveInt::new(ordinal),
+            handoff_ids: legacy_handoff_ids(&active.handoff_ids),
             updated_at: now,
             ..active.clone()
         },
@@ -1037,7 +1125,7 @@ async fn start_run(
             status: OrchestrationV2ProviderThreadStatus::NotLoaded,
             first_run_ordinal: PositiveInt::new(ordinal),
             last_run_ordinal: PositiveInt::new(ordinal),
-            handoff_ids: Vec::new(),
+            handoff_ids: legacy_handoff_ids(&[]),
             forked_from: None,
             pending_background_tasks: Vec::new(),
             context_usage: None,
@@ -1093,9 +1181,11 @@ async fn start_run(
         started_at: None,
         completed_at: None,
         checkpoint_id: None,
-        context_handoff_id: None,
-        restart_continuation_of_run_id: None,
-        delegated_task_id: None,
+        context_handoff_id: legacy_import_handoff
+            .as_ref()
+            .map(|handoff| handoff.id.clone()),
+        restart_continuation_of_run_id: restart_of(client),
+        delegated_task_id: resolved.continued_task_id.clone(),
         work_started_at: wake_work_started_at(&projection.runs, is_wake(client)),
         restart_cancelled_background_work: None,
         source_plan_ref: source_plan_ref_of(client),
@@ -1208,6 +1298,17 @@ async fn start_run(
         occurred_at: now,
         payload: provider_thread,
     });
+    if let Some(handoff) = legacy_import_handoff {
+        run_scoped_event!(
+            decision,
+            ContextHandoffUpdated,
+            &thread.id,
+            &run_id,
+            &root_node_id,
+            instance,
+            handoff
+        );
+    }
     run_scoped_event!(
         decision,
         RunCreated,
@@ -1308,7 +1409,7 @@ async fn start_run(
 
 /// `providerSessionIdFor`: one shared session per instance when the adapter
 /// runs several provider threads in a session, else a session for this thread.
-async fn provider_session_id_for(
+pub(super) async fn provider_session_id_for(
     adapter: &dyn ProviderAdapterV2,
     instance: &ProviderInstanceId,
     thread_id: &ThreadId,
@@ -1343,7 +1444,7 @@ pub(super) async fn provider_session_id_for_raw(
 
 /// The user message a dispatch writes, under the run and root node it starts
 /// or queues.
-fn conversation_message(
+pub(super) fn conversation_message(
     client: &C,
     thread_id: &ThreadId,
     run_id: &RunId,
@@ -1413,7 +1514,7 @@ pub(super) fn wake_work_started_at(runs: &[OrchestrationV2Run], wake: bool) -> O
 }
 
 /// Whether the command is a wake, as `wakeWorkStartedAt` reads its trigger.
-fn is_wake(client: &C) -> bool {
+pub(super) fn is_wake(client: &C) -> bool {
     let C::MessageDispatch {
         notification,
         delegated_completion,
@@ -1646,7 +1747,7 @@ async fn queue_run(
         checkpoint_id: None,
         context_handoff_id: None,
         restart_continuation_of_run_id: restart_continuation_of_run_id.clone(),
-        delegated_task_id: None,
+        delegated_task_id: input.resolved.continued_task_id.clone(),
         work_started_at: wake_work_started_at(&projection.runs, is_wake(input.client)),
         restart_cancelled_background_work: None,
         source_plan_ref: source_plan_ref_of(input.client),
@@ -1873,13 +1974,13 @@ fn pending_merge_back_transfers(projection: &OrchestrationV2ThreadProjection) ->
 }
 
 /// `nextRunOrdinal`.
-fn next_run_ordinal(projection: &OrchestrationV2ThreadProjection) -> u64 {
+pub(super) fn next_run_ordinal(projection: &OrchestrationV2ThreadProjection) -> u64 {
     projection.runs.len() as u64 + 1
 }
 
 /// `rootProviderThreadsForProvider`: the thread's own provider threads on
 /// this instance, newest first.
-fn root_provider_threads_for_provider(
+pub(super) fn root_provider_threads_for_provider(
     projection: &OrchestrationV2ThreadProjection,
     instance_id: &ProviderInstanceId,
 ) -> Vec<OrchestrationV2ProviderThread> {

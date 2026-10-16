@@ -22,9 +22,16 @@ mod message_dispatch;
 mod message_dispatch_tests;
 #[cfg(test)]
 mod message_plan_tests;
+#[cfg(test)]
+mod message_restart_tests;
 mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;
+mod message_transfer;
+#[cfg(test)]
+mod message_transfer_tests;
+#[cfg(test)]
+mod model_selection_tests;
 mod prepared_run;
 #[cfg(test)]
 mod prepared_run_tests;
@@ -41,6 +48,9 @@ mod run_stop_tests;
 mod runtime_request;
 #[cfg(test)]
 mod runtime_request_tests;
+mod secret_request;
+#[cfg(test)]
+mod secret_request_tests;
 pub mod services;
 #[cfg(test)]
 pub(super) mod test_harness;

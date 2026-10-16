@@ -571,6 +571,7 @@ impl Harness {
         let queue = AttachmentUploadQueue::new(
             Arc::clone(&services) as Arc<dyn AttachmentUploadServices>,
             Arc::clone(&drafts) as Arc<dyn ComposerDraftUploads>,
+            tokio::runtime::Handle::current(),
         );
         Self {
             queue,
@@ -1514,4 +1515,61 @@ async fn does_not_let_stalled_uploads_block_another_environment() {
     h.queue
         .await_attachment_uploads(vec![images[3].id().to_owned()])
         .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fails_a_file_with_an_empty_mime_type_as_unsupported() {
+    let h = Harness::new();
+    let attachment = match file("no-mime") {
+        ComposerUploadAttachment::File {
+            id,
+            name,
+            size_bytes,
+            bytes,
+            ..
+        } => ComposerUploadAttachment::File {
+            id,
+            name,
+            mime_type: String::new(),
+            size_bytes,
+            bytes,
+            uploaded_attachment_id: None,
+            upload_environment_id: None,
+            source: None,
+        },
+        ComposerUploadAttachment::Image { .. } => unreachable!(),
+    };
+    h.queue.start(ENV1, attachment.clone(), None);
+    h.queue
+        .await_attachment_uploads(vec![attachment.id().to_owned()])
+        .await;
+    assert_eq!(h.services.mint_count(), 0);
+    match h.queue.read(attachment.id()) {
+        Some(AttachmentUploadState::Failed { reason, .. }) => {
+            assert_eq!(reason, "Unsupported image type")
+        }
+        other => panic!("expected a failed upload, got {other:?}"),
+    }
+}
+
+/// The GPUI main thread has no reactor entered: the queue spawns through the
+/// handle it was given, so `start` works from a plain thread.
+#[tokio::test(flavor = "current_thread")]
+async fn starts_an_upload_from_a_thread_without_a_reactor() {
+    let h = Harness::new();
+    let attachment = file("off-runtime");
+    let queue = h.queue.clone();
+    let starting = attachment.clone();
+    std::thread::spawn(move || queue.start(ENV1, starting, None))
+        .join()
+        .expect("start must not panic without a reactor");
+    wait_for_xhrs(&h.services, 1).await;
+    h.services.xhrs()[0].complete(200);
+    h.queue
+        .await_attachment_uploads(vec![attachment.id().to_owned()])
+        .await;
+    assert!(matches!(
+        h.queue.read(attachment.id()),
+        Some(AttachmentUploadState::Ready(_))
+    ));
 }

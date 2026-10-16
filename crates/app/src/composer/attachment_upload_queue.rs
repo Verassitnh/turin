@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use tokio::runtime::Handle;
 use tokio::sync::watch;
 use turin_contracts::chat_attachment::PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES;
 
@@ -124,7 +125,8 @@ impl ComposerUploadAttachment {
     fn upload_mime(&self) -> Option<String> {
         let mime = self.mime_type().to_lowercase();
         match self {
-            Self::File { .. } => Some(mime),
+            // `!mimeType`: an empty type is unsupported for a file too.
+            Self::File { .. } => (!mime.is_empty()).then_some(mime),
             Self::Image { .. } => PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES
                 .iter()
                 .find(|supported| **supported == mime)
@@ -311,6 +313,9 @@ struct QueueState {
 struct Inner {
     services: Arc<dyn AttachmentUploadServices>,
     drafts: Arc<dyn ComposerDraftUploads>,
+    /// Runs the upload tasks. The GPUI main thread has no reactor entered, so
+    /// the queue spawns through this handle and never through bare `tokio::spawn`.
+    runtime: Handle,
     state: Mutex<QueueState>,
 }
 
@@ -323,11 +328,13 @@ impl AttachmentUploadQueue {
     pub fn new(
         services: Arc<dyn AttachmentUploadServices>,
         drafts: Arc<dyn ComposerDraftUploads>,
+        runtime: Handle,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 services,
                 drafts,
+                runtime,
                 state: Mutex::new(QueueState {
                     uploads: HashMap::new(),
                     jobs: HashMap::new(),
@@ -657,7 +664,7 @@ impl AttachmentUploadQueue {
         }
         for job in starting {
             let queue = self.clone();
-            tokio::spawn(async move {
+            self.inner.runtime.spawn(async move {
                 queue.run_upload(&job).await;
                 queue.finish(&job);
             });
@@ -717,7 +724,7 @@ impl AttachmentUploadQueue {
             }
             let queue = queue.clone();
             let job = Arc::clone(&watched);
-            tokio::spawn(async move {
+            queue.inner.runtime.clone().spawn(async move {
                 let _ = job.settled_rx.clone().wait_for(|settled| *settled).await;
                 let still_failed = {
                     let state = queue.inner.state.lock();
@@ -822,6 +829,8 @@ impl AttachmentUploadQueue {
             size_bytes: job.image.size_bytes(),
         };
         let result = self.run_cycle(job, &claim, &mime_type).await;
+        // The transfer is over; a later cancel must not call a stale abort.
+        job.inner.lock().abort = None;
         if job.inner.lock().cancelled || matches!(result, CycleResult::Cancelled) {
             return;
         }
@@ -890,12 +899,21 @@ impl AttachmentUploadQueue {
                 };
             }
         };
-        let cancelled = job.inner.lock().cancelled;
-        if cancelled && self.inner.services.can_upload(&job.environment_id) {
+        // One critical section: `cancel` reads `attachment_id` under this lock,
+        // so a cancel either sees the id (and deletes it) or this sees the cancel.
+        let cancelled = {
+            let mut inner = job.inner.lock();
+            if inner.cancelled {
+                true
+            } else {
+                inner.attachment_id = Some(minted.attachment_id.clone());
+                false
+            }
+        };
+        if cancelled {
             self.delete_pending(&job.environment_id, &minted.attachment_id);
             return CycleResult::Cancelled;
         }
-        job.inner.lock().attachment_id = Some(minted.attachment_id.clone());
 
         let url = self.resolve_upload_url(job, &minted.relative_url);
         let Some(url) = url else {

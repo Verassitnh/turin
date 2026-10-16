@@ -2927,6 +2927,105 @@ async fn v2_reconcile_settles_a_background_child_gone_from_active() {
     session.close().await;
 }
 
+/// A Stop interrupts a child announced by `session.created` before the call attaches it.
+#[tokio::test]
+async fn v2_stop_interrupts_an_announced_child_before_the_call_attaches() {
+    let interrupted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&interrupted);
+    let script = script(move |request| {
+        if request.method == "POST" && request.target.contains("/interrupt") {
+            seen.lock().unwrap().push(request.target.clone());
+            return FakeResponse::json(404, r#"{"name":"SessionNotFoundError","data":{}}"#);
+        }
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread.clone(), "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"s1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}).to_string(),
+        )))
+        .unwrap();
+    let _ = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "running"
+    })
+    .await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"s2","type":"session.created","data":{"sessionID":"ses_child","parentID":"ses_1","id":"ses_child"}}).to_string(),
+        )))
+        .unwrap();
+    let linked = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if session.test_child_linked("ses_child", "ses_1") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(linked.is_ok(), "session.created must announce the child");
+    session
+        .interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: thread,
+            provider_turn_id: turin_contracts::ProviderTurnId::new("turn_1").unwrap(),
+            request_runtime_restart: Some(true),
+        })
+        .await
+        .unwrap();
+    let settled = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "interrupted"
+    })
+    .await;
+    assert!(
+        of_type(&settled, "turn_item.updated")
+            .iter()
+            .any(|event| event["turn_item"]["status"] == "interrupted"),
+        "{settled:#?}"
+    );
+    let targets = interrupted.lock().unwrap().clone();
+    assert!(
+        targets.iter().any(|target| target.contains("ses_child")),
+        "Stop must interrupt the announced child: {targets:?}"
+    );
+    session.close().await;
+}
+
 /// A Stop treats a background child session that is already gone as interrupted.
 #[tokio::test]
 async fn v2_stop_treats_a_gone_background_child_as_interrupted() {

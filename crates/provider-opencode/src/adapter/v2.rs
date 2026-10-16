@@ -200,6 +200,11 @@ struct V2Inner {
     /// Background subagents still running, by child session id. Each stays open until its
     /// report settles it, past the end of the turn that launched it.
     background: HashMap<String, OpenSubagent>,
+    /// Background calls seen at `tool.called` before a child session is attached (upstream
+    /// `state.calls` with `child === undefined`). Keyed by call id.
+    unattached_background: HashMap<String, OpenSubagent>,
+    /// Call ids already settled. A later progress must not start them again.
+    settled_calls: HashSet<String>,
 }
 
 /// A background subagent whose launch returned while it still runs (upstream's background
@@ -311,6 +316,8 @@ impl OpenCodeV2Session {
                 tool_names: HashMap::new(),
                 background_calls: HashSet::new(),
                 background: HashMap::new(),
+                unattached_background: HashMap::new(),
+                settled_calls: HashSet::new(),
                 stopped_children: HashSet::new(),
             }),
             continuation: Mutex::new(Arc::new(ProviderContinuationRequests::dropping())),
@@ -485,7 +492,21 @@ impl OpenCodeV2Session {
             for open in &lost {
                 guard.background.remove(&open.child_session);
                 guard.background_calls.remove(&open.native_item_id);
+                guard.settled_calls.insert(open.native_item_id.clone());
             }
+            // A background call with no child yet cannot still be running on the server
+            // (upstream `child === undefined` settles as lost).
+            let unattached: Vec<OpenSubagent> = guard
+                .unattached_background
+                .drain()
+                .map(|(_, open)| open)
+                .collect();
+            for open in &unattached {
+                guard.background_calls.remove(&open.native_item_id);
+                guard.settled_calls.insert(open.native_item_id.clone());
+            }
+            let mut lost = lost;
+            lost.extend(unattached);
             for session_id in guard.threads.keys().cloned().collect::<Vec<_>>() {
                 if let Some(wakes) = guard.wakes.remove(&session_id) {
                     for wake in wakes {
@@ -565,6 +586,16 @@ impl OpenCodeV2Session {
         self.fail_stream(message).await;
     }
 
+    /// Whether `session.created` has linked `child` under `parent`.
+    #[cfg(test)]
+    pub(in crate::adapter) fn test_child_linked(&self, child: &str, parent: &str) -> bool {
+        self.inner
+            .lock()
+            .children
+            .get(child)
+            .is_some_and(|known| known == parent)
+    }
+
     /// Whether a held wake for `session_id` has parked an event whose payload contains `needle`.
     #[cfg(test)]
     pub(in crate::adapter) fn test_wake_contains(&self, session_id: &str, needle: &str) -> bool {
@@ -597,8 +628,17 @@ impl OpenCodeV2Session {
                 terminals.push(id);
             }
         }
-        let backgrounds: Vec<OpenSubagent> =
+        let mut backgrounds: Vec<OpenSubagent> =
             guard.background.drain().map(|(_, open)| open).collect();
+        backgrounds.extend(
+            guard
+                .unattached_background
+                .drain()
+                .map(|(_, open)| open),
+        );
+        for open in &backgrounds {
+            guard.settled_calls.insert(open.native_item_id.clone());
+        }
         guard.background_calls.clear();
         let child_turns: Vec<String> = guard.child_turns.keys().cloned().collect();
         for wakes in guard.wakes.values() {
@@ -1052,6 +1092,9 @@ impl OpenCodeV2Session {
                 return;
             };
             let is_subagent = name == "task" || name == "subagent";
+            if is_subagent && inner.settled_calls.contains(call_id) {
+                return;
+            }
             let status_name = if is_subagent {
                 state
                     .get("status")
@@ -1183,31 +1226,48 @@ impl OpenCodeV2Session {
                 let background = inner.background_calls.contains(call_id);
                 let result = output.as_deref().map(subagent_output);
                 let ordinal = item_ordinal(turn, call_id);
-                if status == OrchestrationV2TurnItemStatus::Running && background {
-                    if let Some(child_session) = child_session.filter(|_| is_root) {
-                        inner.background.insert(
-                            child_session.to_owned(),
-                            OpenSubagent {
-                                parent_session: session_id.to_owned(),
-                                child_session: child_session.to_owned(),
-                                thread_id: thread_id.clone(),
-                                root_node_id: root_node_id.clone(),
-                                provider_thread_id: provider_thread_id.clone(),
-                                provider_turn_id: provider_turn_id.clone(),
-                                native_item_id: call_id.to_owned(),
-                                ordinal,
-                                prompt: prompt.clone(),
-                                title: title.map(str::to_owned),
-                                started_at,
-                                child: child.clone(),
-                            },
-                        );
+                if status == OrchestrationV2TurnItemStatus::Running && background && is_root {
+                    let mut tracked = OpenSubagent {
+                        parent_session: session_id.to_owned(),
+                        child_session: child_session.unwrap_or("").to_owned(),
+                        thread_id: thread_id.clone(),
+                        root_node_id: root_node_id.clone(),
+                        provider_thread_id: provider_thread_id.clone(),
+                        provider_turn_id: provider_turn_id.clone(),
+                        native_item_id: call_id.to_owned(),
+                        ordinal,
+                        prompt: prompt.clone(),
+                        title: title.map(str::to_owned),
+                        started_at,
+                        child: child.clone(),
+                    };
+                    if tracked.prompt.is_empty() || tracked.title.is_none() {
+                        if let Some(previous) = inner.unattached_background.get(call_id) {
+                            if tracked.prompt.is_empty() {
+                                tracked.prompt = previous.prompt.clone();
+                            }
+                            if tracked.title.is_none() {
+                                tracked.title = previous.title.clone();
+                            }
+                        }
                     }
-                } else {
+                    if let Some(child_session) = child_session {
+                        inner.unattached_background.remove(call_id);
+                        inner
+                            .background
+                            .insert(child_session.to_owned(), tracked);
+                    } else {
+                        inner
+                            .unattached_background
+                            .insert(call_id.to_owned(), tracked);
+                    }
+                } else if status != OrchestrationV2TurnItemStatus::Running {
                     inner.background_calls.remove(call_id);
+                    inner.unattached_background.remove(call_id);
                     inner
                         .background
                         .retain(|_, open| open.native_item_id != call_id);
+                    inner.settled_calls.insert(call_id.to_owned());
                 }
                 let records = subagent_records(
                     &self.driver,
@@ -1658,6 +1718,8 @@ impl OpenCodeV2Session {
         let settled = guard.background.remove(child);
         if let Some(open) = &settled {
             guard.background_calls.remove(&open.native_item_id);
+            guard.unattached_background.remove(&open.native_item_id);
+            guard.settled_calls.insert(open.native_item_id.clone());
         }
         guard
             .reports
@@ -2408,6 +2470,8 @@ impl OpenCodeV2Session {
                     }
                     if let Some(open) = guard.background.remove(&child_session) {
                         guard.background_calls.remove(&call_id);
+                        guard.unattached_background.remove(&call_id);
+                        guard.settled_calls.insert(call_id.clone());
                         close_events.extend(self.settle_background(open, item_status, None));
                     }
                 }
@@ -3617,41 +3681,63 @@ impl OpenCodeV2Session {
     /// the reports already queued answer that Stop. A child that does not answer its interrupt
     /// stays running and tracked, so the next Stop tries it again.
     async fn stop_background(&self, session_id: &str) {
-        let children: Vec<String> = self
-            .inner
-            .lock()
-            .background
-            .iter()
-            .filter(|(_, open)| open.parent_session == session_id)
-            .map(|(child, _)| child.clone())
-            .collect();
-        for child in children {
-            self.inner.lock().stopped_children.insert(child.clone());
-            let reached =
-                match tokio::time::timeout(INTERRUPT_TIMEOUT, self.client.interrupt(&child, None))
-                    .await
+        // Upstream `runningCalls` then `childrenOf`: an attached call stops its child; a call
+        // that has not named one yet stops the children `session.created` announced.
+        let calls: Vec<(OpenSubagent, Vec<String>)> = {
+            let guard = self.inner.lock();
+            let mut calls = Vec::new();
+            for open in guard.background.values() {
+                if !session_owns(&guard, session_id, &open.parent_session) {
+                    continue;
+                }
+                calls.push((open.clone(), vec![open.child_session.clone()]));
+            }
+            for open in guard.unattached_background.values() {
+                if !session_owns(&guard, session_id, &open.parent_session) {
+                    continue;
+                }
+                let announced = guard
+                    .children
+                    .iter()
+                    .filter(|(_, parent)| *parent == &open.parent_session)
+                    .map(|(child, _)| child.clone())
+                    .collect();
+                calls.push((open.clone(), announced));
+            }
+            calls
+        };
+        for (open, children) in calls {
+            let mut unreached = false;
+            for child in &children {
+                self.inner.lock().stopped_children.insert(child.clone());
+                let reached = match tokio::time::timeout(
+                    INTERRUPT_TIMEOUT,
+                    self.client.interrupt(child, None),
+                )
+                .await
                 {
                     Ok(Ok(_)) => true,
                     Ok(Err(err)) if err.detail.contains("SessionNotFoundError") => true,
                     _ => false,
                 };
-            if !reached {
+                if !reached {
+                    unreached = true;
+                }
+            }
+            if unreached {
                 continue;
             }
-            let open = {
+            {
                 let mut guard = self.inner.lock();
-                let open = guard.background.remove(&child);
-                if let Some(open) = &open {
-                    guard.background_calls.remove(&open.native_item_id);
-                }
-                open
-            };
-            if let Some(open) = open {
-                for event in
-                    self.settle_background(open, OrchestrationV2TurnItemStatus::Interrupted, None)
-                {
-                    self.emit(event);
-                }
+                guard.background.remove(&open.child_session);
+                guard.unattached_background.remove(&open.native_item_id);
+                guard.background_calls.remove(&open.native_item_id);
+                guard.settled_calls.insert(open.native_item_id.clone());
+            }
+            for event in
+                self.settle_background(open, OrchestrationV2TurnItemStatus::Interrupted, None)
+            {
+                self.emit(event);
             }
         }
         let running = {
@@ -3691,6 +3777,22 @@ impl Drop for OpenCodeV2Session {
             handle.abort();
         }
     }
+}
+
+/// Whether `owner` is `root` or a subagent session under it (upstream `sessionsOf` membership
+/// for a Stop of `root`).
+fn session_owns(guard: &V2Inner, root: &str, owner: &str) -> bool {
+    let mut current = owner;
+    for _ in 0..16 {
+        if current == root {
+            return true;
+        }
+        match guard.children.get(current) {
+            Some(parent) => current = parent.as_str(),
+            None => return false,
+        }
+    }
+    false
 }
 
 /// The session whose wake replay should queue this live event (upstream's lock around `replay`).

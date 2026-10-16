@@ -78,6 +78,9 @@ struct ParsedDirective {
     /// Byte range of the label's content, inside the brackets.
     label: Option<(usize, usize)>,
     attributes: Option<Attributes>,
+    /// The attributes in `Object.entries` order (first occurrence of each name), for
+    /// [`restored_leaf_directive_text`].
+    attribute_list: Vec<(String, String)>,
 }
 
 fn is_space_or_tab(b: u8) -> bool {
@@ -154,10 +157,10 @@ fn parse_attributes(
     start: usize,
     limit: usize,
     allow_eol: bool,
-) -> Option<(usize, Attributes)> {
+) -> Option<(usize, Vec<(String, String)>)> {
     let bytes = source.as_bytes();
-    let mut attributes = Attributes::new();
-    let mut classes: Vec<&str> = Vec::new();
+    // mdast-util-directive's `directiveAttributes`: one entry per id, class, name and value.
+    let mut list: Vec<(String, String)> = Vec::new();
     let mut i = start + 1;
     let skip_whitespace = |mut i: usize| -> Option<usize> {
         while i < limit && (is_space_or_tab(bytes[i]) || is_line_ending(bytes[i])) {
@@ -192,11 +195,8 @@ fn parse_attributes(
                     return None;
                 }
                 let value = &source[value_start..j];
-                if marker == b'#' {
-                    attributes.insert("id".to_string(), decode_character_references(value));
-                } else {
-                    classes.push(value);
-                }
+                let key = if marker == b'#' { "id" } else { "class" };
+                list.push((key.to_string(), decode_character_references(value)));
                 i = j;
             }
             b if b.is_ascii_alphabetic() || b == b'_' || b == b':' => {
@@ -243,26 +243,33 @@ fn parse_attributes(
                     if !separated(next, false) {
                         return None;
                     }
-                    attributes.insert(name, decode_character_references(value));
+                    list.push((name, decode_character_references(value)));
                     i = next;
                 } else {
                     if !separated(j, false) {
                         return None;
                     }
-                    attributes.insert(name, String::new());
+                    list.push((name, String::new()));
                     i = j;
                 }
             }
             _ => return None,
         }
     }
-    if !classes.is_empty() {
-        attributes.insert(
-            "class".to_string(),
-            decode_character_references(&classes.join(" ")),
-        );
+    // `exitAttributes`: a repeated name keeps the last value in its first position, and a
+    // non-empty `class` accumulates.
+    let mut cleaned: Vec<(String, String)> = Vec::new();
+    for (name, value) in list {
+        match cleaned.iter_mut().find(|(known, _)| *known == name) {
+            Some((_, existing)) if name == "class" && !existing.is_empty() => {
+                existing.push(' ');
+                existing.push_str(&value);
+            }
+            Some((_, existing)) => *existing = value,
+            None => cleaned.push((name, value)),
+        }
     }
-    Some((i + 1, attributes))
+    Some((i + 1, cleaned))
 }
 
 /// After the name: an optional label, then optional attributes. A label or
@@ -284,17 +291,20 @@ fn parse_directive_tail(
         j = end;
     }
     let mut attributes = None;
+    let mut attribute_list = Vec::new();
     if j < limit
         && bytes[j] == b'{'
         && let Some((end, parsed)) = parse_attributes(source, j, limit, allow_eol)
     {
-        attributes = Some(parsed);
+        attributes = Some(parsed.iter().cloned().collect::<Attributes>());
+        attribute_list = parsed;
         j = end;
     }
     ParsedDirective {
         end: j,
         label,
         attributes,
+        attribute_list,
     }
 }
 
@@ -350,6 +360,9 @@ pub enum DirectiveReplacement {
     Template(CodexArtifactTemplate),
     /// A follow-up suggestion: keep its label source (`labelRange`).
     LabelRange(usize, usize),
+    /// A leaf directive that did not resolve (`restoreLeafDirective`): its own paragraph holding
+    /// this rebuilt source text. Copy and inline Markdown leave the source as written.
+    Literal(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -773,6 +786,54 @@ fn line_ranges(source: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// `textContent` of the label's Markdown: text, code and raw HTML values, concatenated.
+fn markdown_text_content(node: &markdown::mdast::Node) -> String {
+    use markdown::mdast::Node;
+    match node {
+        Node::Text(text) => text.value.clone(),
+        Node::InlineCode(code) => code.value.clone(),
+        Node::Code(code) => code.value.clone(),
+        Node::Html(html) => html.value.clone(),
+        other => other
+            .children()
+            .map(|children| children.iter().map(markdown_text_content).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// `sourceForDirective` for a leaf directive. Upstream runs the directive plugin without a source
+/// file, so the text is always rebuilt from the node: `::name`, `[label text]` when there is a
+/// label, and `{name="value" ...}` (JSON-quoted values, bare names as `name=""`) when there are
+/// attributes.
+fn restored_leaf_directive_text(source: &str, directive: &ParsedDirective) -> String {
+    let mut text = format!("::{CODEX_ARTIFACT_TEMPLATE_NAME}");
+    if let Some((start, end)) = directive.label.filter(|(start, end)| start < end) {
+        let label = &source[start..end];
+        let content = markdown::to_mdast(label, &markdown::ParseOptions::gfm())
+            .map(|root| markdown_text_content(&root))
+            .unwrap_or_else(|_| label.to_string());
+        text.push('[');
+        text.push_str(&content);
+        text.push(']');
+    }
+    if !directive.attribute_list.is_empty() {
+        let attributes: Vec<String> = directive
+            .attribute_list
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "{name}={}",
+                    serde_json::to_string(value).unwrap_or_default()
+                )
+            })
+            .collect();
+        text.push('{');
+        text.push_str(&attributes.join(" "));
+        text.push('}');
+    }
+    text
+}
+
 /// The directives in `markdown` that render as something else, in source order within each
 /// paragraph. Ranges are byte offsets.
 pub fn collect_directive_matches(markdown: &str) -> Vec<DirectiveMatch> {
@@ -835,13 +896,16 @@ pub fn collect_directive_matches(markdown: &str) -> Vec<DirectiveMatch> {
                 skill_directory: attributes.get("skill_directory").map(String::as_str),
                 skill_name: attributes.get("skill_name").map(String::as_str),
             };
-            if let Some(template) = resolve_codex_artifact_template(Some(&template_attributes)) {
-                matches.push(DirectiveMatch {
-                    start: content_start,
-                    end: directive.end,
-                    replacement: DirectiveReplacement::Template(template),
-                });
-            }
+            matches.push(DirectiveMatch {
+                start: content_start,
+                end: directive.end,
+                replacement: match resolve_codex_artifact_template(Some(&template_attributes)) {
+                    Some(template) => DirectiveReplacement::Template(template),
+                    None => DirectiveReplacement::Literal(restored_leaf_directive_text(
+                        markdown, &directive,
+                    )),
+                },
+            });
             continue;
         }
         if is_atx_heading(content) {
@@ -908,7 +972,7 @@ pub fn render_codex_directives_for_copy(markdown: &str) -> String {
                 codex_artifact_template_presentation_label(&template.artifact_kind)
                     .unwrap_or_default()
             )),
-            DirectiveReplacement::LabelRange(..) => None,
+            DirectiveReplacement::LabelRange(..) | DirectiveReplacement::Literal(_) => None,
         }
     })
 }

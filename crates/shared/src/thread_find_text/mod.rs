@@ -42,7 +42,7 @@ use crate::markdown_links::{
 };
 use crate::markdown_list_indentation::remark_normalize_list_item_indentation;
 use crate::proposed_plan_text::{proposed_plan_title, strip_displayed_plan_markdown};
-use turin_contracts::base_schemas::js_trim;
+use turin_contracts::base_schemas::{is_js_whitespace, js_trim};
 
 /// Inline wrappers (including Shiki token spans) must not split a search phrase.
 pub const THREAD_FIND_BLOCK_TAGS: &[&str] = &[
@@ -90,11 +90,26 @@ pub fn is_thread_find_block_tag(tag: &str) -> bool {
 }
 
 /// `shouldPreserveAssistantLineBreaks`: `/^★ Insight(?:\s|─)/mu`.
+///
+/// The `m` flag makes `^` match at the start of the text and after `\n`, `\r`, U+2028 and
+/// U+2029 (not only after `\n`, which is all `str::lines` splits on), and `\s` includes line
+/// terminators, so a bare `★ Insight` line followed by a break matches too.
 pub fn should_preserve_assistant_line_breaks(text: &str) -> bool {
-    text.lines().any(|line| {
-        line.strip_prefix("★ Insight")
-            .is_some_and(|rest| rest.starts_with(char::is_whitespace) || rest.starts_with('─'))
-    })
+    const PREFIX: &str = "★ Insight";
+    let mut at_line_start = true;
+    let mut rest = text;
+    while !rest.is_empty() {
+        if at_line_start
+            && let Some(after) = rest.strip_prefix(PREFIX)
+            && (after.starts_with(is_js_whitespace) || after.starts_with('─'))
+        {
+            return true;
+        }
+        let Some(ch) = rest.chars().next() else { break };
+        at_line_start = matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+        rest = &rest[ch.len_utf8()..];
+    }
+    false
 }
 
 /// `Pick<OrchestrationV2ConversationMessage, "role" | "text" | "streaming" | "context">`.
@@ -169,18 +184,20 @@ pub fn searchable_message_segments(
     }
 }
 
-/// The Markdown with each Codex directive replaced by what the renderer shows, and the artifact
-/// template cards the replaced `::artifact-template` directives stand for.
-fn prepare_directives(markdown: &str) -> (String, Vec<CodexArtifactTemplate>) {
+/// The Markdown with each Codex directive replaced by what the renderer shows, the artifact
+/// template cards the replaced `::artifact-template` directives stand for, and the text of the
+/// unresolved ones, which become paragraphs of their own.
+fn prepare_directives(markdown: &str) -> (String, Vec<CodexArtifactTemplate>, Vec<String>) {
     if !markdown.contains(":codex-file-citation")
         && !markdown.contains(":codex-followup")
         && !markdown.contains("::artifact-template")
     {
-        return (markdown.to_owned(), Vec::new());
+        return (markdown.to_owned(), Vec::new(), Vec::new());
     }
     let mut matches = collect_directive_matches(markdown);
     matches.sort_by_key(|directive| directive.start);
     let mut templates = Vec::new();
+    let mut literals = Vec::new();
     let mut replacements = Vec::with_capacity(matches.len());
     for directive in &matches {
         let replacement = match &directive.replacement {
@@ -192,6 +209,12 @@ fn prepare_directives(markdown: &str) -> (String, Vec<CodexArtifactTemplate>) {
                 templates.push(template.clone());
                 format!("# {}", to_hast::template_token(templates.len() - 1))
             }
+            // `restoreLeafDirective`: a paragraph of the directive's own text. The same heading
+            // placeholder makes it interrupt the surrounding paragraph.
+            DirectiveReplacement::Literal(text) => {
+                literals.push(text.clone());
+                format!("# {}", to_hast::literal_token(literals.len() - 1))
+            }
         };
         replacements.push(replacement);
     }
@@ -199,13 +222,13 @@ fn prepare_directives(markdown: &str) -> (String, Vec<CodexArtifactTemplate>) {
     for (directive, replacement) in matches.iter().zip(&replacements).rev() {
         prepared.replace_range(directive.start..directive.end, replacement);
     }
-    (prepared, templates)
+    (prepared, templates, literals)
 }
 
 /// The hast tree the renderer is built from, for user messages (no rehype plugins) or assistant
 /// messages (`rehype-raw` and `rehype-sanitize`).
 fn render_tree(markdown: &str, user_message: bool, line_breaks: bool) -> Vec<Hast> {
-    let (prepared, templates) = prepare_directives(markdown);
+    let (prepared, templates, literals) = prepare_directives(markdown);
     let mut root = markdown::to_mdast(&prepared, &to_hast::parse_options()).unwrap_or_else(|_| {
         markdown::mdast::Node::Root(markdown::mdast::Root {
             children: vec![markdown::mdast::Node::Text(markdown::mdast::Text {
@@ -223,7 +246,7 @@ fn render_tree(markdown: &str, user_message: bool, line_breaks: bool) -> Vec<Has
     if user_message || line_breaks {
         to_hast::newline_to_break(&mut root);
     }
-    let mut tree = to_hast::to_hast(&root, &prepared, &templates);
+    let mut tree = to_hast::to_hast(&root, &prepared, &templates, &literals);
     if !user_message {
         hast::preserve_bare_anchor_placeholders(&mut tree);
         tree = hast::sanitize(hast::parse_raw(&tree));

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use html5ever::tendril::{StrTendril, TendrilSink};
-use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
+use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeBuilderOpts, TreeSink};
 use html5ever::{
     Attribute, ExpandedName, ParseOpts, QualName, local_name, namespace_url, ns, parse_fragment,
 };
@@ -505,7 +505,15 @@ pub(crate) fn parse_raw(nodes: &[Hast]) -> Vec<Hast> {
     let mut html = String::new();
     serialize(nodes, &mut html);
     let context = QualName::new(None, ns!(html), local_name!("template"));
-    let dom = parse_fragment(Dom::new(), ParseOpts::default(), context, Vec::new()).one(html);
+    // hast-util-raw parses with `scriptingEnabled: false`, so `<noscript>` content is markup.
+    let options = ParseOpts {
+        tree_builder: TreeBuilderOpts {
+            scripting_enabled: false,
+            ..TreeBuilderOpts::default()
+        },
+        ..ParseOpts::default()
+    };
+    let dom = parse_fragment(Dom::new(), options, context, Vec::new()).one(html);
     // The fragment algorithm roots the result under a synthetic `html` element.
     let mut out = Vec::new();
     if let Some(root) = dom.nodes[0].children.first() {

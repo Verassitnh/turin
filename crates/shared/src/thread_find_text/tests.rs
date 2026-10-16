@@ -187,6 +187,30 @@ fn uses_insight_line_breaks_without_splitting_ordinary_assistant_prose() {
     );
 }
 
+#[test]
+fn insight_line_breaks_follow_the_multiline_regex() {
+    use super::should_preserve_assistant_line_breaks as preserve;
+    // A bare line matches because `\s` consumes the line terminator.
+    assert!(preserve("\u{2605} Insight\na\nb"));
+    assert!(preserve("x\n\u{2605} Insight\na\nb"));
+    assert!(preserve("\u{2605} Insight\r\na\r\nb"));
+    // `m` also starts lines after a lone CR, U+2028 and U+2029.
+    assert!(preserve("x\r\u{2605} Insight\ra\rb"));
+    assert!(preserve("x\u{2028}\u{2605} Insight\u{2028}a"));
+    assert!(preserve("x\u{2029}\u{2605} Insight\u{2029}a"));
+    assert!(preserve("\u{2605} Insight \u{2500}\u{2500}"));
+    assert!(preserve("\u{2605} Insight\u{2500}"));
+    // Not at a line start, no separator, or end of text.
+    assert!(!preserve("x \u{2605} Insight\na"));
+    assert!(!preserve("\u{2605} Insights\na"));
+    assert!(!preserve("\u{2605} Insight"));
+    assert!(!preserve("\u{2605} Insight\u{0085}a"));
+    assert_eq!(
+        assistant("\u{2605} Insight\na\nb", None),
+        strings(&["\u{2605} Insight", " a", " b"])
+    );
+}
+
 fn skills() -> Vec<InlineSkill> {
     vec![InlineSkill {
         name: "test-t3-app".to_owned(),
@@ -405,4 +429,78 @@ fn block_tags_are_shared_with_the_renderer_side_walker() {
     assert!(is_thread_find_block_tag("br"));
     assert!(!is_thread_find_block_tag("span"));
     assert!(!is_thread_find_block_tag("code"));
+}
+
+// Expected values below come from running upstream `searchableMessageSegments`.
+
+#[test]
+fn unresolved_leaf_directives_are_paragraphs_of_their_own() {
+    assert_eq!(
+        user("x\n::artifact-template{artifact_kind=\"bogus\" display_name=\"A *b* _c_\"}\ny"),
+        Some(strings(&[
+            "x",
+            r#"::artifact-template{artifact_kind="bogus" display_name="A *b* _c_"}"#,
+            "y"
+        ]))
+    );
+    assert_eq!(
+        user("para\n::artifact-template\nafter"),
+        Some(strings(&["para", "::artifact-template", "after"]))
+    );
+    assert_eq!(
+        user("Use $test-t3-app\n::artifact-template{a=1}\nnow"),
+        Some(strings(&[
+            "Use $test-t3-app",
+            r#"::artifact-template{a="1"}"#,
+            "now"
+        ]))
+    );
+}
+
+#[test]
+fn unresolved_leaf_directives_are_rebuilt_from_the_parsed_node() {
+    assert_eq!(
+        assistant("x\n::artifact-template{}\ny", None),
+        strings(&["x", "::artifact-template", "y"])
+    );
+    assert_eq!(
+        assistant("x\n::artifact-template{ a=\"1\"   b }  \ny", None),
+        strings(&["x", r#"::artifact-template{a="1" b=""}"#, "y"])
+    );
+    assert_eq!(
+        assistant(
+            "x\n::artifact-template[lab *e*]{.a #b .c a='q\"r'}\ny",
+            None
+        ),
+        strings(&[
+            "x",
+            r#"::artifact-template[lab e]{class="a c" id="b" a="q\"r"}"#,
+            "y"
+        ])
+    );
+    assert_eq!(
+        assistant("> x\n> ::artifact-template{a=\"&amp; <b>\"}\n> y", None),
+        strings(&["x", r#"::artifact-template{a="& <b>"}"#, "y"])
+    );
+}
+
+#[test]
+fn unresolved_leaf_directives_follow_list_tightness() {
+    // A tight list item unwraps its paragraphs, so the pieces share one segment.
+    assert_eq!(
+        assistant("- x\n  ::artifact-template{a=\"1\"}\n  y", None),
+        strings(&[r#"x ::artifact-template{a="1"} y"#])
+    );
+    assert_eq!(
+        assistant("- x\n\n  ::artifact-template{a=\"1\"}\n  y", None),
+        strings(&["x", r#"::artifact-template{a="1"}"#, "y"])
+    );
+}
+
+#[test]
+fn raw_html_is_parsed_with_scripting_disabled() {
+    assert_eq!(
+        assistant("<noscript><p>x</p></noscript>y", None),
+        strings(&["x", "y"])
+    );
 }

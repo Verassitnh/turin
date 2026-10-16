@@ -42,6 +42,12 @@ pub(super) fn template_token(index: usize) -> String {
     format!("\u{E000}t3-artifact-template-{index}\u{E001}")
 }
 
+/// An unresolved `::artifact-template` directive placeholder: a heading holding this text stands
+/// for a paragraph of the directive's own text.
+pub(super) fn literal_token(index: usize) -> String {
+    format!("\u{E000}t3-directive-literal-{index}\u{E001}")
+}
+
 // ---------------------------------------------------------------------------
 // mdast transforms
 // ---------------------------------------------------------------------------
@@ -283,16 +289,23 @@ struct Definition {
 pub(super) struct ToHast<'a> {
     source: &'a str,
     templates: &'a [CodexArtifactTemplate],
+    literals: &'a [String],
     definitions: HashMap<String, Definition>,
     footnotes: HashMap<String, &'a [Node]>,
     footnote_order: Vec<String>,
     footnote_counts: HashMap<String, usize>,
 }
 
-pub(super) fn to_hast(root: &Node, source: &str, templates: &[CodexArtifactTemplate]) -> Vec<Hast> {
+pub(super) fn to_hast(
+    root: &Node,
+    source: &str,
+    templates: &[CodexArtifactTemplate],
+    literals: &[String],
+) -> Vec<Hast> {
     let mut state = ToHast {
         source,
         templates,
+        literals,
         definitions: HashMap::new(),
         footnotes: HashMap::new(),
         footnote_order: Vec::new(),
@@ -368,6 +381,9 @@ impl<'a> ToHast<'a> {
             Node::Heading(heading) => {
                 if let Some(template) = self.template_for(&heading.children) {
                     return vec![template];
+                }
+                if let Some(paragraph) = self.literal_for(&heading.children) {
+                    return vec![paragraph];
                 }
                 vec![self.element(
                     &format!("h{}", heading.depth),
@@ -490,6 +506,18 @@ impl<'a> ToHast<'a> {
             element = element.with_prop("dataGalleryKind", gallery_kind.clone());
         }
         Some(Hast::Element(element))
+    }
+
+    /// An unresolved leaf directive placeholder heading as the paragraph of its text.
+    fn literal_for(&self, children: &[Node]) -> Option<Hast> {
+        let [Node::Text(only)] = children else {
+            return None;
+        };
+        let index = (0..self.literals.len()).find(|index| only.value == literal_token(*index))?;
+        Some(Hast::Element(Element::new(
+            "p",
+            vec![text(self.literals[index].clone())],
+        )))
     }
 
     /// `revert`: a reference without a definition reads as its source text.

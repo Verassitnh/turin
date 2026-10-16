@@ -55,12 +55,14 @@ pub(super) fn command_id(id: &str) -> CommandId {
 /// A kind whose handler is not ported yet (delegated tasks).
 fn unported_command(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
     serde_json::from_value(json!({
-        "type": "delegated_task.completion-delivery.dispose",
+        "type": "thread.pull-request.unlink",
         "commandId": command,
-        "parentThreadId": thread_id,
-        "taskId": "node:task",
+        "threadId": thread_id,
+        "host": "github.com",
+        "repository": "o/r",
+        "number": 1,
     }))
-    .expect("delegated_task.completion-delivery.dispose decodes")
+    .expect("thread.pull-request.unlink decodes")
 }
 
 fn archive(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
@@ -104,7 +106,7 @@ async fn a_kind_without_a_handler_is_rejected_and_leaves_no_receipt() {
         .expect_err("unported kinds are rejected");
 
     assert!(
-        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "delegated_task.completion-delivery.dispose"),
+        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.pull-request.unlink"),
         "{error:?}"
     );
     assert!(error.was_not_accepted());

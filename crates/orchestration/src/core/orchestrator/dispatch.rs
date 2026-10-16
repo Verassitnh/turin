@@ -16,9 +16,9 @@ use turin_persistence::ReceiptStatus;
 use turin_provider_core::id_allocator::IdAllocator;
 
 use super::{
-    Orchestrator, message_dispatch, prepared_run, queue_start, queued_run, run_stop,
-    runtime_request, secret_request, thread_archive, thread_delete, thread_fork, thread_lifecycle,
-    thread_merge_back, thread_metadata, thread_mutation,
+    Orchestrator, delegated_commands, message_dispatch, prepared_run, queue_start, queued_run,
+    run_stop, runtime_request, secret_request, thread_archive, thread_delete, thread_fork,
+    thread_lifecycle, thread_merge_back, thread_metadata, thread_mutation,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::dispatch_mode_limit::{
@@ -648,6 +648,16 @@ async fn run_post_commit_hooks(
             .await
             .map_err(|cause| dispatch_error(command_id, command_type, cause))?;
     }
+    // A task wake policy names its parent thread, which is the command's thread.
+    if matches!(
+        command_type,
+        "notification.delivery.accept" | "delegated_task.wake-policy"
+    ) {
+        orchestrator
+            .offer_delegated_completion_deliveries(thread_id)
+            .await
+            .map_err(|cause| dispatch_error(command_id, command_type, cause))?;
+    }
     Ok(())
 }
 
@@ -761,6 +771,9 @@ async fn decide(
         return Ok(true);
     }
     if queued_run::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if delegated_commands::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     if secret_request::decide(orchestrator, command, decision).await? {

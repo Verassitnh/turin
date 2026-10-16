@@ -67,7 +67,7 @@ pub struct FinalizeOptions {
 }
 
 /// `isTerminalDelegatedTaskStatus`.
-fn is_terminal_task_status(status: OrchestrationV2SubagentStatus) -> bool {
+pub(super) fn is_terminal_task_status(status: OrchestrationV2SubagentStatus) -> bool {
     matches!(
         status,
         OrchestrationV2SubagentStatus::Completed
@@ -124,14 +124,14 @@ fn task_delivery(
 }
 
 /// `planDelegatedCompletionDelivery`'s result.
-struct CompletionPlan {
-    task: OrchestrationV2Subagent,
-    parent_run: Option<OrchestrationV2Run>,
-    message: Option<OrchestrationV2ConversationMessage>,
-    offer: bool,
+pub(super) struct CompletionPlan {
+    pub(super) task: OrchestrationV2Subagent,
+    pub(super) parent_run: Option<OrchestrationV2Run>,
+    pub(super) message: Option<OrchestrationV2ConversationMessage>,
+    pub(super) offer: bool,
 }
 
-fn plan_completion_delivery(
+pub(super) fn plan_completion_delivery(
     parent: &OrchestrationV2ThreadProjection,
     parent_run: Option<&OrchestrationV2Run>,
     task: &OrchestrationV2Subagent,

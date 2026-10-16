@@ -12,12 +12,104 @@ use crate::components::chat::expanded_image::{PreviewAttachment, build_expanded_
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
 use crate::composer::views::chrome::{floating, glass_surface};
 use crate::composer::views::composer_context_presentation::{
-    ContextClick, DraftContextInput, composer_context_details, composer_context_records_from_draft,
-    context_reference_click,
+    ComposerDraftContextRecord, ContextClick, DraftContextInput, composer_context_details,
+    composer_context_records_from_draft, context_reference_click,
+    uploaded_context_record_from_draft,
 };
 use crate::theme::ActiveAppTheme as _;
 
+fn draft_context_wire_record(
+    entry: &ComposerDraftContextRecord,
+) -> Option<turin_contracts::composer_context::ComposerContextRecord> {
+    use crate::composer::composer_context_records::{
+        KnownComposerContextRecord, preview_annotation_context_record,
+        review_comment_context_record, terminal_context_record,
+    };
+    use turin_contracts::composer_context::ComposerContextRecord;
+
+    if let Some(record) = uploaded_context_record_from_draft(entry) {
+        return Some(record);
+    }
+    match entry {
+        ComposerDraftContextRecord::Terminal(draft) => {
+            terminal_context_record(draft)
+                .ok()
+                .map(|record| {
+                    ComposerContextRecord::Known(KnownComposerContextRecord::Terminal(record))
+                })
+        }
+        ComposerDraftContextRecord::ReviewComment(draft) => {
+            review_comment_context_record(draft)
+                .ok()
+                .map(|record| {
+                    ComposerContextRecord::Known(KnownComposerContextRecord::ReviewComment(record))
+                })
+        }
+        ComposerDraftContextRecord::Thread(record) => Some(ComposerContextRecord::Known(
+            KnownComposerContextRecord::Thread(record.clone()),
+        )),
+        ComposerDraftContextRecord::PreviewAnnotation {
+            record,
+            screenshot,
+        } => {
+            let screenshot = screenshot.as_ref().map(|image| image.id.as_str());
+            Some(ComposerContextRecord::Known(
+                KnownComposerContextRecord::PreviewAnnotation(preview_annotation_context_record(
+                    record,
+                    screenshot,
+                )),
+            ))
+        }
+        ComposerDraftContextRecord::Image { .. } | ComposerDraftContextRecord::File { .. } => None,
+    }
+}
+
 impl ChatComposer {
+    /// Keeps the prompt editor's context copy/paste hooks aligned with [`Self::context_records`].
+    pub(super) fn sync_context_editor(&mut self, cx: &mut Context<Self>) {
+        use std::rc::Rc;
+
+        use turin_contracts::composer_context_clipboard::ComposerContextClipboardFragment;
+        use turin_shared::composer_context_clipboard::encode_composer_context_fragment;
+
+        use crate::composer::views::prompt_editor::BuildContextFragment;
+        use crate::state::local_environment_id;
+
+        let count = self.composer_context_records().len();
+        self.editor.update(cx, |editor, cx| {
+            editor.set_context_record_count(count, cx);
+        });
+
+        let merged = self.composer_context_records();
+        let environment_id =
+            turin_contracts::base_schemas::EnvironmentId::new(local_environment_id())
+                .expect("environment id");
+        let build: BuildContextFragment = Rc::new(move |ids: &[String]| {
+            let records: Vec<_> = ids
+                .iter()
+                .filter_map(|id| merged.get(id))
+                .filter_map(draft_context_wire_record)
+                .collect();
+            if records.is_empty() {
+                return None;
+            }
+            encode_composer_context_fragment(&ComposerContextClipboardFragment {
+                version: turin_contracts::composer_context_clipboard::ComposerContextClipboardVersion,
+                source: turin_contracts::composer_context_clipboard::ComposerContextClipboardSource {
+                    environment_id: environment_id.clone(),
+                    thread_id: None,
+                    message_id: None,
+                },
+                records,
+            })
+        });
+        self.editor.update(cx, |editor, _| {
+            editor.set_build_context_fragment(Some(build));
+            // Paste import needs wire→draft converters on a shared store; host merge pending.
+            editor.set_import_context_fragment(None);
+        });
+    }
+
     /// The records behind the references of the open draft: its attachments,
     /// and the other kinds the host fed in.
     pub(super) fn composer_context_records(

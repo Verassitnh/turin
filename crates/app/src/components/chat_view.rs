@@ -23,6 +23,8 @@ use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
 use super::chat::live_chat::LiveChat;
+use super::chat::live_wiring::{live_overlay_banners, subagent_bar_from_state};
+use super::chat::timeline_page_scroll::TimelinePageScrollSession;
 use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::{
     get_provider_status_banner_key, should_show_provider_status_banner,
@@ -153,7 +155,8 @@ impl ChatView {
         };
         // `.chat-composer-lane` / timeline `padding-inline: 3rem` at ≥640px.
         let lane_inset = rems(3.);
-        let (timeline, composer) = match &self.live {
+        let live_target = self.live.clone();
+        let (timeline, composer, page_scroll) = match &self.live {
             Some(LiveChatTarget { thread: None, .. }) => {
                 return self
                     .render_empty_state(header_left, window, cx)
@@ -173,17 +176,35 @@ impl ChatView {
                     let chat = chat.read(cx);
                     (chat.timeline.clone(), chat.composer.clone())
                 };
+                let page_scroll = window.use_keyed_state(
+                    SharedString::from(format!("timeline-page-scroll-{thread_id}")),
+                    cx,
+                    |_, _| TimelinePageScrollSession::default(),
+                );
+                let scroll_for_timeline = page_scroll.clone();
                 let timeline = window.use_keyed_state(
                     SharedString::from(format!("messages-timeline-{thread_id}")),
                     cx,
                     |window, cx| MessagesTimeline::new(timeline_store, window, cx),
                 );
+                let scroll_for_composer = page_scroll.clone();
+                let timeline_for_scroll = timeline.clone();
                 let composer = window.use_keyed_state(
                     SharedString::from(format!("chat-composer-{thread_id}")),
                     cx,
-                    |window, cx| ChatComposer::new(composer_store, window, cx),
+                    |window, cx| {
+                        let mut composer = ChatComposer::new(composer_store, window, cx);
+                        composer.bind_page_scroll(
+                            scroll_for_composer,
+                            timeline_for_scroll,
+                            window,
+                            cx,
+                        );
+                        composer
+                    },
                 );
-                (timeline, composer)
+                let _ = scroll_for_timeline;
+                (timeline, composer, Some(page_scroll))
             }
             None => {
                 let timeline = window.use_keyed_state("messages-timeline", cx, |window, cx| {
@@ -194,7 +215,7 @@ impl ChatView {
                     let store = MockComposerSource::start(cx);
                     ChatComposer::new(store, window, cx)
                 });
-                (timeline, composer)
+                (timeline, composer, None)
             }
         };
         // The composer's top drawer: the oldest pending approval, else the
@@ -202,7 +223,21 @@ impl ChatView {
         let store = timeline.read(cx).store().clone();
         let snapshot = store.read(cx).snapshot().clone();
         let source = store.read(cx).source();
-        let subagent_bar = self.subagent_bar.clone().map(|data| {
+        let subagent_bar_data = live_target
+            .as_ref()
+            .and_then(|live| {
+                let thread_id = live.thread.as_ref()?;
+                let state = live.client.read(cx).state();
+                subagent_bar_from_state(state, &live.bus, thread_id)
+            })
+            .or_else(|| {
+                live_target
+                    .is_none()
+                    .then(subagent_bar_demo)
+                    .flatten()
+            })
+            .or_else(|| live_target.is_none().then(|| self.subagent_bar.clone()).flatten());
+        let subagent_bar = subagent_bar_data.map(|data| {
             let open_parent = data.parent_thread_id.clone().zip(source.clone()).map(
                 |(parent, source)| -> OpenHandler {
                     Rc::new(move |_, _, cx| source.open_thread(&parent, cx))
@@ -234,7 +269,36 @@ impl ChatView {
                 .map(|prompt| ComposerPendingUserInputBanner { prompt, source }.into_any_element())
         };
 
-        let overlay_banners = chat_overlay_banners(window, cx);
+        let mut overlay_banners = live_target
+            .as_ref()
+            .and_then(|live| {
+                let thread_id = live.thread.as_ref()?;
+                Some(live_overlay_banners(
+                    &live.client,
+                    &live.bus,
+                    thread_id,
+                    window,
+                    cx,
+                ))
+            })
+            .unwrap_or_default();
+        if live_target.is_none() {
+            overlay_banners.extend(chat_overlay_banners(window, cx));
+        }
+        if let (Some(page_scroll), Some(live)) = (&page_scroll, &live_target) {
+            if page_scroll.read(cx).needs_frame() {
+                let metrics = timeline.read(cx).page_scroll_metrics(window);
+                if let Some(delta) = page_scroll.update(cx, |session, _| session.frame(metrics)) {
+                    timeline.update(cx, |timeline, cx| {
+                        timeline.apply_page_scroll_delta(delta, cx);
+                    });
+                }
+                window.defer(cx, |_, cx| cx.notify());
+            } else if page_scroll.read(cx).take_notify() {
+                window.defer(cx, |_, cx| cx.notify());
+            }
+            let _ = live;
+        }
         let composer_strip = self.git_host.read(cx).composer_strip();
         // `TURIN_CHAT_DEMO=thread-details` swaps in the lineage demo card.
         // `ChatCanvas` measures its container (ResizeObserver upstream); the
@@ -250,7 +314,10 @@ impl ChatView {
         } else {
             (1200.0, 800.0)
         };
-        let demo_card = thread_details_card(window, cx, canvas_width, canvas_height);
+        let demo_card = live_target
+            .is_none()
+            .then(|| thread_details_card(window, cx, canvas_width, canvas_height))
+            .flatten();
         // `reportDetailsCard`: the card's left edge and, once measured, where its content ends.
         let demo_lane_card = demo_card
             .as_ref()
@@ -279,7 +346,10 @@ impl ChatView {
                 bottom: layout.y + layout.height,
             })
         });
-        let selection_toolbar = selection_toolbar_demo();
+        let selection_toolbar = live_target
+            .is_none()
+            .then(selection_toolbar_demo)
+            .flatten();
         let details_card = demo_card.map(|(_, _, card)| card).or_else(|| {
             self.thread_details_open
                 .then(|| self.git_host.read(cx).details_card(cx))

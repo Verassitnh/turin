@@ -542,6 +542,7 @@ impl ChatComposer {
             }
             Some(Layer::ContextMeter) => layers.extend(self.context_meter_popover(vm, cx)),
             Some(Layer::Traits) => layers.extend(self.traits_menu(vm, _window, cx)),
+            Some(Layer::ContextDetails) => layers.extend(self.context_details_layer(cx)),
             _ => {}
         }
         if self.layer.is_some() {

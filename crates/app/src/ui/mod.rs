@@ -32,6 +32,7 @@ pub mod middle_truncate;
 pub mod morph_icon;
 pub mod number_field;
 pub mod panel_tab_close_button;
+pub mod pierre_file_icon;
 pub mod pierre_icons;
 pub mod pierre_file_icon;
 pub mod popover;

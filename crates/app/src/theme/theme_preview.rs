@@ -10,14 +10,14 @@ use super::color::{Oklab, oklab_to_rgba, parse_color, rgba_to_oklab, to_hex};
 use super::theme_palettes::ThemeAppearance;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ThemePreviewColors {
-    pub canvas: &'static str,
-    pub accent: &'static str,
-    pub message_action: &'static str,
+pub struct ThemePreviewColors<'a> {
+    pub canvas: &'a str,
+    pub accent: &'a str,
+    pub message_action: &'a str,
 }
 
 /// The standard T3 Code artwork is not a built-in theme, so its preview colors live here.
-pub fn standard_theme_preview_colors(appearance: ThemeAppearance) -> ThemePreviewColors {
+pub fn standard_theme_preview_colors(appearance: ThemeAppearance) -> ThemePreviewColors<'static> {
     match appearance {
         ThemeAppearance::Light => ThemePreviewColors {
             canvas: "#fcfcfc",

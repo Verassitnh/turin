@@ -16,6 +16,8 @@ pub mod code_block_highlight;
 pub mod code_languages;
 pub mod command_items;
 pub mod composer_context_records;
+pub mod composer_handle_context;
+pub mod composer_path_search_state;
 pub mod context_meter;
 pub mod dispatch;
 pub mod draft_store;

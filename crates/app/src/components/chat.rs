@@ -10,6 +10,7 @@ pub mod chat_canvas_layout;
 #[allow(dead_code)]
 pub mod assistant_text_selection;
 pub mod composer_pending_panels;
+pub mod live_chat;
 pub mod markdown;
 pub mod message_copy_button;
 pub mod messages_timeline;

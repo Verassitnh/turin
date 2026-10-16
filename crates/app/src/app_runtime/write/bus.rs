@@ -76,6 +76,28 @@ impl CommandBus {
         });
     }
 
+    /// [`Self::spawn`] as a GPUI task the caller awaits on the UI thread.
+    pub fn task<T, F, Fut>(
+        &self,
+        cx: &mut gpui_kit::App,
+        command: F,
+    ) -> gpui_kit::Task<Result<T, CommandError>>
+    where
+        T: Send + 'static,
+        F: FnOnce(Commands) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, CommandError>> + Send + 'static,
+    {
+        let (done, outcome) = futures::channel::oneshot::channel();
+        self.spawn(command, move |result| {
+            let _ = done.send(result);
+        });
+        cx.spawn(async move |_| {
+            outcome
+                .await
+                .unwrap_or_else(|_| Err(CommandError::new("The command was interrupted.")))
+        })
+    }
+
     /// Runs `command` to completion from a non-async caller: a background
     /// task or the UI thread (the commands are short database commits). Never
     /// call it from a tokio worker.

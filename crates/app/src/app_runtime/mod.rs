@@ -136,7 +136,9 @@ pub async fn run(
     .await
     {
         Ok(runtime) => {
-            bus.install(write::commands::Commands::new(Arc::clone(&runtime)));
+            let commands = write::commands::Commands::new(Arc::clone(&runtime));
+            tokio::spawn(write::smoke::run_if_requested(commands.clone()));
+            bus.install(commands);
             Some(runtime)
         }
         Err(error) => {

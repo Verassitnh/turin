@@ -29,6 +29,7 @@ pub mod command_palette_content;
 pub mod command_palette_logic;
 pub mod command_palette_results;
 pub mod demo;
+pub mod live_source;
 pub mod mock_source;
 pub mod palette_items;
 pub mod palette_source;

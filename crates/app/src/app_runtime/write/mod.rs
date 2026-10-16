@@ -7,4 +7,5 @@ pub mod effects;
 pub mod providers;
 pub mod runtime;
 pub mod settings;
+pub mod smoke;
 pub mod thread_commands;

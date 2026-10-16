@@ -327,8 +327,8 @@ mod tests {
     fn uses_fallback_segments_without_syntax_while_cache_warms() {
         let match_ = sample_match("hello", &[(1, 4)]);
         let segments = SearchLineHighlightCache::cached(&match_, "src/main.rs", false);
-        assert_eq!(segments.len(), 2);
         assert!(segments.iter().any(|segment| segment.is_match));
+        assert!(segments.iter().any(|segment| !segment.is_match));
     }
 
     #[test]

@@ -457,6 +457,48 @@ pub fn text_field(
     text_field_leading(state, width, size, mono, None, cx)
 }
 
+/// Like [`text_field`], for password controls (`autoComplete="off"` upstream).
+pub fn password_field(
+    state: &gpui_kit::Entity<gpui_kit::component::input::InputState>,
+    width: Option<Pixels>,
+    size: FieldSize,
+    cx: &App,
+) -> Div {
+    use gpui_kit::component::input::{Input, InputContentType};
+
+    let theme = cx.app_theme();
+    let height = match size {
+        FieldSize::Sm => px(28.),
+        FieldSize::Default => px(32.),
+    };
+    div()
+        .flex()
+        .items_center()
+        .h(height)
+        .when_some(width, |this, width| this.w(width))
+        .when(width.is_none(), |this| this.w_full())
+        .min_w_0()
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(theme.input)
+        .bg(if theme.is_dark() {
+            with_alpha(theme.input, 0.32).into()
+        } else {
+            theme.background
+        })
+        .shadow(tokens::shadow_xs(0.05))
+        .text_size(TEXT_SM.size)
+        .px(px(9.))
+        .gap(px(6.))
+        .child(
+            Input::new(state)
+                .appearance(false)
+                .bordered(false)
+                .focus_bordered(false)
+                .content_type(InputContentType::Password),
+        )
+}
+
 /// [`text_field`] with an `InputGroupAddon` icon before the text.
 pub fn text_field_leading(
     state: &gpui_kit::Entity<gpui_kit::component::input::InputState>,

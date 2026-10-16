@@ -36,6 +36,7 @@ pub mod table;
 pub mod text_input;
 pub mod textarea;
 pub mod toggle;
+pub mod toggle_group;
 pub mod tooltip;
 pub mod workspace_page;
 

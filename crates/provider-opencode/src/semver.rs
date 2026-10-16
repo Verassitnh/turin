@@ -13,13 +13,20 @@ fn is_digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// Upstream does `split("-", 2)`, so a prerelease keeps only what precedes the
+/// second hyphen (`1.2.3-beta-1` gives `beta`). An empty prerelease is absent,
+/// as the JS truthiness check treats it.
+fn split_prerelease(version: &str) -> (&str, Option<&str>) {
+    let mut parts = version.splitn(3, '-');
+    let main = parts.next().unwrap_or("");
+    let prerelease = parts.next().filter(|prerelease| !prerelease.is_empty());
+    (main, prerelease)
+}
+
 /// Pad shorthand versions (`"20"`, `"20.1"`) to three segments. Inputs with
 /// more than three segments are left untouched.
 pub fn normalize_semver_version(version: &str) -> String {
-    let (main, prerelease) = match version.trim().split_once('-') {
-        Some((main, rest)) => (main, Some(rest)),
-        None => (version.trim(), None),
-    };
+    let (main, prerelease) = split_prerelease(version.trim());
     let mut segments: Vec<&str> = main
         .split('.')
         .map(str::trim)
@@ -37,10 +44,7 @@ pub fn normalize_semver_version(version: &str) -> String {
 pub fn parse_semver(value: &str) -> Option<ParsedSemver> {
     let normalized = normalize_semver_version(value);
     let normalized = normalized.strip_prefix('v').unwrap_or(&normalized);
-    let (main, prerelease) = match normalized.split_once('-') {
-        Some((main, rest)) => (main, Some(rest)),
-        None => (normalized, None),
-    };
+    let (main, prerelease) = split_prerelease(normalized);
     let segments: Vec<&str> = main.split('.').collect();
     if segments.len() != 3 {
         return None;
@@ -233,6 +237,21 @@ mod tests {
         );
         assert_eq!(parse_generic_cli_version("no version here"), None);
         assert_eq!(parse_generic_cli_version("build2.0.3artifact"), None);
+    }
+
+    #[test]
+    fn a_second_hyphen_ends_the_prerelease_like_upstream_split() {
+        assert_eq!(normalize_semver_version("1.2.3-beta-1"), "1.2.3-beta");
+        assert_eq!(normalize_semver_version("1.2-"), "1.2.0");
+        assert_eq!(
+            compare_semver_versions("1.14.19-rc-1", "1.14.19-rc-2"),
+            0,
+            "upstream truncates both to rc"
+        );
+        assert_eq!(
+            parse_semver("1.2.3-beta-1").map(|parsed| parsed.prerelease),
+            parse_semver("1.2.3-beta").map(|parsed| parsed.prerelease)
+        );
     }
 
     #[test]

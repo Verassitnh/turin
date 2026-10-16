@@ -12,12 +12,12 @@ static WINDOWS_PLATFORM_PATTERN: LazyLock<Regex> =
 
 /// `isMacPlatform` from `@t3tools/shared/keybindings`. Copied because that
 /// module is not in this crate's scope.
-fn is_mac_platform(platform: &str) -> bool {
+pub fn is_mac_platform(platform: &str) -> bool {
     MAC_PLATFORM_PATTERN.is_match(platform)
 }
 
 /// `isWindowsPlatform` from `lib/utils.ts`. Copied for the same reason.
-fn is_windows_platform(platform: &str) -> bool {
+pub fn is_windows_platform(platform: &str) -> bool {
     WINDOWS_PLATFORM_PATTERN.is_match(platform)
 }
 

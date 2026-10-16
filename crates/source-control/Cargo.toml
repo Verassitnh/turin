@@ -8,6 +8,7 @@ license.workspace = true
 turin-contracts.workspace = true
 turin-persistence.workspace = true
 turin-provider-core.workspace = true
+turin-shared.workspace = true
 rusqlite.workspace = true
 anyhow.workspace = true
 bytes = "1"

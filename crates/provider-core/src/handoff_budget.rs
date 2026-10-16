@@ -453,3 +453,480 @@ pub fn handoff_coverage(
     ]
     .join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    //! Port of the "handoff budget" describe in
+    //! upstream/apps/server/src/orchestration-v2/ContextHandoffBudget.test.ts.
+    //!
+    //! The first `it` (`projectContextHandoffForWire`) lives in
+    //! `wire_projection`. The "handoff delivery" describe lives with
+    //! `ContextHandoffDelivery`.
+
+    use super::{
+        ContextUsageForHandoffInput, HandoffBudgetInput, SelectHistoryInput,
+        context_usage_for_handoff, handoff_budget, historical_message, history_cost,
+        history_response_items, select_history,
+    };
+    use serde_json::{Value, json};
+    use turin_contracts::chat_attachment::{
+        ChatAttachment, ChatAttachmentId, ChatImageAttachment, ImageType,
+        PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+    };
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2HistoricalMessage, OrchestrationV2HistoricalMessageRole,
+        OrchestrationV2TurnItem,
+    };
+    use turin_contracts::provider_runtime::ThreadTokenUsageSnapshot;
+    use turin_contracts::{ProviderThreadId, RunId, ThreadId, TrimmedNonEmptyString, TurnItemId};
+
+    fn message(
+        id: &str,
+        role: OrchestrationV2HistoricalMessageRole,
+        text: &str,
+    ) -> OrchestrationV2HistoricalMessage {
+        OrchestrationV2HistoricalMessage {
+            role,
+            text: text.to_owned(),
+            run_status: None,
+            thread_id: ThreadId::new("thread:handoff").unwrap(),
+            run_id: Some(RunId::new("run:source").unwrap()),
+            item_id: TurnItemId::new(id).unwrap(),
+            provider_thread_id: Some(ProviderThreadId::new("provider-thread:source").unwrap()),
+            status: "interrupted".to_owned(),
+            kind: match role {
+                OrchestrationV2HistoricalMessageRole::User => "user_message",
+                OrchestrationV2HistoricalMessageRole::Assistant => "assistant_message",
+            }
+            .to_owned(),
+        }
+    }
+
+    fn sample_messages() -> Vec<OrchestrationV2HistoricalMessage> {
+        vec![
+            message(
+                "item:one",
+                OrchestrationV2HistoricalMessageRole::User,
+                "Preserve every line.\n\n  And this indentation.\n",
+            ),
+            message(
+                "item:two",
+                OrchestrationV2HistoricalMessageRole::Assistant,
+                &format!("Partial work: 日本語 🧪 مرحبا\n{}", "x".repeat(600)),
+            ),
+        ]
+    }
+
+    fn turn_item(kind: &str, extra: Value) -> OrchestrationV2TurnItem {
+        let mut item = json!({
+            "id": "item:command",
+            "type": kind,
+            "threadId": "thread:handoff",
+            "runId": "run:source",
+            "nodeId": null,
+            "providerThreadId": "provider-thread:target",
+            "providerTurnId": null,
+            "nativeItemRef": null,
+            "parentItemId": null,
+            "ordinal": 1,
+            "status": "failed",
+            "title": null,
+            "startedAt": "2026-09-17T00:00:00.000Z",
+            "completedAt": "2026-09-17T00:00:00.000Z",
+            "updatedAt": "2026-09-17T00:00:00.000Z",
+        });
+        for (key, value) in extra.as_object().unwrap().clone() {
+            item[key] = value;
+        }
+        serde_json::from_value(item).unwrap_or_else(|err| panic!("{kind}: {err}"))
+    }
+
+    fn usage(used: u64, max: Option<u64>, auto: Option<u64>) -> ThreadTokenUsageSnapshot {
+        let mut value = json!({ "usedTokens": used });
+        if let Some(max) = max {
+            value["maxTokens"] = json!(max);
+        }
+        if let Some(auto) = auto {
+            value["autoCompactThreshold"] = json!(auto);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn image(id: &str, name: &str, size_bytes: u64) -> ChatAttachment {
+        ChatAttachment::Image(ChatImageAttachment {
+            type_: ImageType,
+            id: ChatAttachmentId::new(id).unwrap(),
+            name: TrimmedNonEmptyString::new(name).unwrap(),
+            mime_type: TrimmedNonEmptyString::new("image/png").unwrap(),
+            size_bytes,
+            source: None,
+        })
+    }
+
+    fn budget(
+        token_cap: i64,
+        user_text: &str,
+        attachments: &[ChatAttachment],
+        context_usage: Option<&ThreadTokenUsageSnapshot>,
+        native_context_estimate: i64,
+        model_context_window: Option<i64>,
+    ) -> i64 {
+        handoff_budget(&HandoffBudgetInput {
+            token_cap,
+            user_text,
+            attachments,
+            context_usage,
+            native_context_estimate,
+            model_context_window,
+        })
+    }
+
+    #[test]
+    fn carries_command_outcomes_as_attributed_activity_and_excludes_reasoning() {
+        let command = historical_message(&turn_item(
+            "command_execution",
+            json!({
+                "input": "vp test",
+                "output": format!("Failure near the end: {}", "界".repeat(300)),
+                "exitCode": 1,
+            }),
+        ))
+        .unwrap();
+        assert_eq!(
+            command.role,
+            OrchestrationV2HistoricalMessageRole::Assistant
+        );
+        assert_eq!(command.kind, "command_execution");
+        assert!(command.text.contains("Exit code: 1"));
+        assert!(command.text.contains(&"界".repeat(300)));
+        assert!(
+            historical_message(&turn_item(
+                "reasoning",
+                json!({ "text": "private reasoning", "streaming": false }),
+            ))
+            .is_none()
+        );
+        assert_eq!(
+            history_response_items(std::slice::from_ref(&command), "Activity")[1]["type"],
+            "message"
+        );
+    }
+
+    #[test]
+    fn retains_short_conversations_verbatim_in_role_and_order() {
+        let messages = sample_messages();
+        let selected = select_history(&SelectHistoryInput {
+            messages: &messages,
+            coverage: "History",
+            omitted_items: None,
+            budget: 16_000,
+        });
+        assert_eq!(selected.messages, messages);
+        let items = history_response_items(&selected.messages, &selected.context);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["user", "user", "assistant"]
+        );
+        assert!(
+            items[1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&messages[0].text)
+        );
+        assert!(
+            items[2]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&messages[1].text)
+        );
+        assert_eq!(selected.omitted_items, 0);
+    }
+
+    #[test]
+    fn omits_oversized_multilingual_items_whole() {
+        let messages = sample_messages();
+        let candidates = vec![
+            messages[0].clone(),
+            message(
+                "huge",
+                OrchestrationV2HistoricalMessageRole::Assistant,
+                &"界🧪".repeat(20_000),
+            ),
+            message(
+                "old",
+                OrchestrationV2HistoricalMessageRole::Assistant,
+                &"a".repeat(4_000),
+            ),
+            messages[1].clone(),
+        ];
+        let selected = select_history(&SelectHistoryInput {
+            messages: &candidates,
+            coverage: "thread:handoff runs 1-4",
+            omitted_items: None,
+            budget: 3_000,
+        });
+        assert_eq!(selected.messages, messages);
+        assert_eq!(selected.omitted_items, 2);
+        assert!(history_cost(&selected.messages, &selected.context) <= 3_000);
+    }
+
+    #[test]
+    fn counts_json_escaping_and_utf8_bytes_across_many_messages() {
+        let candidates: Vec<_> = (0..500)
+            .map(|index| {
+                message(
+                    &format!("item:{index}"),
+                    if index % 2 == 1 {
+                        OrchestrationV2HistoricalMessageRole::Assistant
+                    } else {
+                        OrchestrationV2HistoricalMessageRole::User
+                    },
+                    &"\u{0000}\\\"🧪界".repeat(15),
+                )
+            })
+            .collect();
+        for budget in [1_024, 4_000, 16_000] {
+            let selected = select_history(&SelectHistoryInput {
+                messages: &candidates,
+                coverage: "Retrieve omitted history",
+                omitted_items: None,
+                budget,
+            });
+            assert!(history_cost(&selected.messages, &selected.context) <= budget);
+            assert!(selected.omitted_items > 0);
+        }
+    }
+
+    #[test]
+    fn fits_the_final_envelope_at_digit_boundaries() {
+        let candidates: Vec<_> = (0..20)
+            .map(|index| {
+                message(
+                    &format!("boundary:{index}"),
+                    OrchestrationV2HistoricalMessageRole::User,
+                    "Short request",
+                )
+            })
+            .collect();
+        for budget in 4_000..=9_000 {
+            let selected = select_history(&SelectHistoryInput {
+                messages: &candidates,
+                coverage: "Recover history",
+                omitted_items: Some(90),
+                budget,
+            });
+            assert!(history_cost(&selected.messages, &selected.context) <= budget);
+        }
+    }
+
+    #[test]
+    fn subtracts_native_usage_input_attachments_instructions_and_work_space() {
+        let base_budget = budget(16_000, "Continue", &[], None, 0, Some(32_000));
+        assert!(base_budget < 16_000);
+        assert!(budget(16_000, "Continue", &[], None, 8_000, Some(32_000)) < base_budget);
+        assert_eq!(
+            budget(16_000, &"界".repeat(30_000), &[], None, 0, Some(32_000)),
+            0
+        );
+        let crowded = usage(23_000, Some(24_000), None);
+        assert_eq!(
+            budget(16_000, "Continue", &[], Some(&crowded), 0, Some(32_000)),
+            0
+        );
+        for size_bytes in [100_000, 10 * 1024 * 1024] {
+            let attachments = vec![image("attachment", "image.png", size_bytes)];
+            let with_image = budget(16_000, "Continue", &attachments, None, 0, Some(32_000));
+            assert!(with_image > 4_000);
+            assert!(with_image < base_budget);
+            let doubled = [attachments[0].clone(), attachments[0].clone()];
+            assert_eq!(
+                budget(16_000, "Continue", &doubled, None, 0, Some(32_000)),
+                0
+            );
+            let wide = usage(0, Some(1_000_000), None);
+            assert_eq!(
+                budget(
+                    64_000,
+                    &"x".repeat(70_000),
+                    &attachments,
+                    Some(&wide),
+                    0,
+                    Some(1_000_000),
+                ),
+                64_000
+            );
+        }
+        assert_eq!(budget(2_000, "Continue", &[], None, 0, Some(32_000)), 2_000);
+    }
+
+    #[test]
+    fn keeps_measured_occupancy_across_a_model_change() {
+        let previous = usage(37_321, Some(258_400), Some(32_000));
+        assert!(
+            context_usage_for_handoff(&ContextUsageForHandoffInput {
+                same_native_thread: false,
+                same_selection: false,
+                reuse_telemetry: false,
+                previous_usage: Some(&previous),
+                known_model_window: None,
+            })
+            .is_none()
+        );
+        assert_eq!(
+            context_usage_for_handoff(&ContextUsageForHandoffInput {
+                same_native_thread: true,
+                same_selection: true,
+                reuse_telemetry: true,
+                previous_usage: Some(&previous),
+                known_model_window: None,
+            }),
+            Some(previous.clone())
+        );
+        let measured = usage(37_321, Some(258_400), None);
+        assert_eq!(
+            context_usage_for_handoff(&ContextUsageForHandoffInput {
+                same_native_thread: true,
+                same_selection: false,
+                reuse_telemetry: true,
+                previous_usage: Some(&previous),
+                known_model_window: None,
+            }),
+            Some(measured.clone())
+        );
+        assert_eq!(
+            context_usage_for_handoff(&ContextUsageForHandoffInput {
+                same_native_thread: true,
+                same_selection: false,
+                reuse_telemetry: false,
+                previous_usage: Some(&previous),
+                known_model_window: None,
+            }),
+            Some(measured.clone())
+        );
+        assert_eq!(
+            context_usage_for_handoff(&ContextUsageForHandoffInput {
+                same_native_thread: true,
+                same_selection: false,
+                reuse_telemetry: false,
+                previous_usage: Some(&usage(30_000, Some(32_000), Some(31_000))),
+                known_model_window: Some(1_000_000),
+            }),
+            Some(usage(30_000, Some(1_000_000), None))
+        );
+
+        let preserved = context_usage_for_handoff(&ContextUsageForHandoffInput {
+            same_native_thread: true,
+            same_selection: false,
+            reuse_telemetry: false,
+            previous_usage: Some(&previous),
+            known_model_window: None,
+        })
+        .unwrap();
+        let screenshots = vec![
+            image("screenshot-a", "a.png", 100_000),
+            image("screenshot-b", "b.png", 100_000),
+        ];
+        assert_eq!(
+            budget(
+                16_000,
+                "Continue work",
+                &screenshots,
+                Some(&preserved),
+                0,
+                preserved.max_tokens.map(|max| max.get() as i64),
+            ),
+            16_000
+        );
+        assert_eq!(budget(16_000, "Continue work", &[], None, 120_000, None), 0);
+    }
+
+    #[test]
+    fn reserves_context_for_image_batches_up_to_the_attachment_limit() {
+        let messages = sample_messages();
+        let mut previous_budget = 16_000;
+        for count in 1..=PROVIDER_SEND_TURN_MAX_ATTACHMENTS {
+            let attachments: Vec<_> = (0..count)
+                .map(|index| image(&format!("image-{index}"), "image.png", 100_000))
+                .collect();
+            let budget = budget(
+                16_000,
+                "Compare these screenshots",
+                &attachments,
+                None,
+                0,
+                None,
+            );
+            assert!(budget >= 0);
+            assert!(budget <= previous_budget);
+            previous_budget = budget;
+            if count <= 8 {
+                assert_eq!(budget, 16_000);
+            }
+            if count == 10 {
+                assert!(budget > 0);
+                assert!(budget < 16_000);
+            }
+            if count == PROVIDER_SEND_TURN_MAX_ATTACHMENTS {
+                assert_eq!(budget, 0);
+            }
+            if budget > 0 {
+                let selected = select_history(&SelectHistoryInput {
+                    messages: &messages,
+                    coverage: "Recover omitted history",
+                    omitted_items: None,
+                    budget,
+                });
+                assert!(history_cost(&selected.messages, &selected.context) <= budget);
+            }
+            assert_eq!(
+                super::handoff_budget(&HandoffBudgetInput {
+                    token_cap: 16_000,
+                    user_text: "Compare these screenshots",
+                    attachments: &attachments,
+                    context_usage: None,
+                    native_context_estimate: 0,
+                    model_context_window: Some(2_000_000),
+                }),
+                16_000
+            );
+            assert_eq!(
+                super::handoff_budget(&HandoffBudgetInput {
+                    token_cap: 16_000,
+                    user_text: "Compare these screenshots",
+                    attachments: &attachments,
+                    context_usage: None,
+                    native_context_estimate: 0,
+                    model_context_window: Some(20_000),
+                }),
+                0
+            );
+            let small_window = usage(0, Some(20_000), None);
+            assert_eq!(
+                super::handoff_budget(&HandoffBudgetInput {
+                    token_cap: 16_000,
+                    user_text: "Compare these screenshots",
+                    attachments: &attachments,
+                    context_usage: Some(&small_window),
+                    native_context_estimate: 0,
+                    model_context_window: None,
+                }),
+                0
+            );
+            let compacting = usage(0, Some(1_000_000), Some(20_000));
+            assert_eq!(
+                super::handoff_budget(&HandoffBudgetInput {
+                    token_cap: 16_000,
+                    user_text: "Compare these screenshots",
+                    attachments: &attachments,
+                    context_usage: Some(&compacting),
+                    native_context_estimate: 0,
+                    model_context_window: Some(1_000_000),
+                }),
+                0
+            );
+        }
+    }
+}

@@ -160,6 +160,24 @@ icon_assets!(
         Users,
         X,
         Zap,
+        ArrowDown,
+        Cloud,
+        CloudDownload,
+        CloudUpload,
+        Computer,
+        CornerLeftUp,
+        FileSearch,
+        FolderGit,
+        GitBranchPlus,
+        Laptop,
+        MessageSquareDashed,
+        Monitor,
+        Moon,
+        Palette,
+        Scale,
+        Server,
+        Sun,
+        TextSearch,
     ]
 );
 
@@ -168,6 +186,9 @@ pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 /// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
 /// stock `IconName::ChevronDown` is stroke 2.
 pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
+/// EnvironmentMachineIcon's hand-drawn Mac mini / Mac Studio (lucide has no Apple desktops).
+pub const MAC_MINI: &str = "brand/mac-mini.svg";
+pub const MAC_STUDIO: &str = "brand/mac-studio.svg";
 /// The bare T mark for the sidebar brand slot (upstream `T3Wordmark`). Bytes are
 /// `assets/prod/wordmark.svg`, `currentColor`. The asset key stays `brand/`.
 pub const WORDMARK: &str = "brand/wordmark.svg";
@@ -200,6 +221,32 @@ pub const BRANCH_MARK: &str = "brand/branch-mark.svg";
 pub const SMILE_PLUS: &str = "brand/smile-plus.svg";
 
 /// `@pierre/diffs` sprite icons (`dist/sprite.js`), one monochrome SVG each.
+/// JetBrains product marks (`components/JetBrainsIcons.tsx`).
+pub mod editor_icons {
+    pub const ANTIGRAVITY: &str = "editors/antigravity.svg";
+    pub const AQUA: &str = "editors/aqua.svg";
+    pub const CLION: &str = "editors/clion.svg";
+    pub const DATAGRIP: &str = "editors/datagrip.svg";
+    pub const DATASPELL: &str = "editors/dataspell.svg";
+    pub const FILE_EXPLORER: &str = "editors/file-explorer.svg";
+    pub const FINDER: &str = "editors/finder.svg";
+    pub const FOLDER_CLOSED: &str = "editors/folder-closed.svg";
+    pub const GOLAND: &str = "editors/goland.svg";
+    pub const IDEA: &str = "editors/idea.svg";
+    pub const KIRO: &str = "editors/kiro.svg";
+    pub const PHPSTORM: &str = "editors/phpstorm.svg";
+    pub const PYCHARM: &str = "editors/pycharm.svg";
+    pub const RIDER: &str = "editors/rider.svg";
+    pub const RUBYMINE: &str = "editors/rubymine.svg";
+    pub const RUSTROVER: &str = "editors/rustrover.svg";
+    pub const TRAE: &str = "editors/trae.svg";
+    pub const VSCODIUM: &str = "editors/vscodium.svg";
+    pub const VSCODE: &str = "editors/vscode.svg";
+    pub const VSCODE_INSIDERS: &str = "editors/vscode-insiders.svg";
+    pub const WEBSTORM: &str = "editors/webstorm.svg";
+    pub const ZED: &str = "editors/zed.svg";
+}
+
 pub mod diff_icons {
     pub const SYMBOL_ADDED: &str = "diff/symbol-added.svg";
     pub const SYMBOL_DELETED: &str = "diff/symbol-deleted.svg";
@@ -218,6 +265,8 @@ const BRAND: &[(&str, &[u8])] = &[
         CHEVRON_DOWN,
         include_bytes!("../assets/brand/chevron-down.svg"),
     ),
+    (MAC_MINI, include_bytes!("../assets/brand/mac-mini.svg")),
+    (MAC_STUDIO, include_bytes!("../assets/brand/mac-studio.svg")),
     (
         WORDMARK,
         include_bytes!("../../../assets/prod/wordmark.svg"),
@@ -239,6 +288,94 @@ const BRAND: &[(&str, &[u8])] = &[
         include_bytes!("../assets/brand/branch-mark.svg"),
     ),
     (SMILE_PLUS, include_bytes!("../assets/brand/smile-plus.svg")),
+    (
+        editor_icons::ANTIGRAVITY,
+        include_bytes!("../assets/editors/antigravity.svg"),
+    ),
+    (
+        editor_icons::AQUA,
+        include_bytes!("../assets/editors/aqua.svg"),
+    ),
+    (
+        editor_icons::CLION,
+        include_bytes!("../assets/editors/clion.svg"),
+    ),
+    (
+        editor_icons::DATAGRIP,
+        include_bytes!("../assets/editors/datagrip.svg"),
+    ),
+    (
+        editor_icons::DATASPELL,
+        include_bytes!("../assets/editors/dataspell.svg"),
+    ),
+    (
+        editor_icons::FILE_EXPLORER,
+        include_bytes!("../assets/editors/file-explorer.svg"),
+    ),
+    (
+        editor_icons::FINDER,
+        include_bytes!("../assets/editors/finder.svg"),
+    ),
+    (
+        editor_icons::FOLDER_CLOSED,
+        include_bytes!("../assets/editors/folder-closed.svg"),
+    ),
+    (
+        editor_icons::GOLAND,
+        include_bytes!("../assets/editors/goland.svg"),
+    ),
+    (
+        editor_icons::IDEA,
+        include_bytes!("../assets/editors/idea.svg"),
+    ),
+    (
+        editor_icons::KIRO,
+        include_bytes!("../assets/editors/kiro.svg"),
+    ),
+    (
+        editor_icons::PHPSTORM,
+        include_bytes!("../assets/editors/phpstorm.svg"),
+    ),
+    (
+        editor_icons::PYCHARM,
+        include_bytes!("../assets/editors/pycharm.svg"),
+    ),
+    (
+        editor_icons::RIDER,
+        include_bytes!("../assets/editors/rider.svg"),
+    ),
+    (
+        editor_icons::RUBYMINE,
+        include_bytes!("../assets/editors/rubymine.svg"),
+    ),
+    (
+        editor_icons::RUSTROVER,
+        include_bytes!("../assets/editors/rustrover.svg"),
+    ),
+    (
+        editor_icons::TRAE,
+        include_bytes!("../assets/editors/trae.svg"),
+    ),
+    (
+        editor_icons::VSCODIUM,
+        include_bytes!("../assets/editors/vscodium.svg"),
+    ),
+    (
+        editor_icons::VSCODE,
+        include_bytes!("../assets/editors/vscode.svg"),
+    ),
+    (
+        editor_icons::VSCODE_INSIDERS,
+        include_bytes!("../assets/editors/vscode-insiders.svg"),
+    ),
+    (
+        editor_icons::WEBSTORM,
+        include_bytes!("../assets/editors/webstorm.svg"),
+    ),
+    (
+        editor_icons::ZED,
+        include_bytes!("../assets/editors/zed.svg"),
+    ),
     (
         diff_icons::SYMBOL_ADDED,
         include_bytes!("../assets/diff/symbol-added.svg"),

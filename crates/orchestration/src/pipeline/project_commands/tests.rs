@@ -367,3 +367,15 @@ fn rejections_round_trip_through_receipt_json() {
     assert_eq!(decode_project_command_rejection(&encoded), Some(rejection));
     assert_eq!(decode_project_command_rejection("legacy text"), None);
 }
+
+#[test]
+fn rejections_round_trip_through_their_receipt_json() {
+    let rejection = ProjectCommandRejection::WorkspaceConflict {
+        workspace_root: "/tmp/p".into(),
+        conflicting_project_id: ProjectId::new("project-1").unwrap(),
+    };
+    let text = encode_project_command_rejection(&rejection);
+    assert!(text.contains("\"_tag\":\"ProjectWorkspaceConflictError\""));
+    assert_eq!(decode_project_command_rejection(&text), Some(rejection));
+    assert_eq!(decode_project_command_rejection("plain text"), None);
+}

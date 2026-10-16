@@ -17,6 +17,13 @@ pub mod composer_pending_panels;
 #[allow(dead_code)]
 pub mod embedded_scripts;
 // Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
+pub mod composer_context_undo;
+pub mod composer_event_scope;
+pub mod composer_focus_state;
+pub mod composer_menu_state;
+// Route handoff around the mobile composer morph. No view calls it yet.
+pub mod draft_hero_transition;
+pub mod folder_drop;
 pub mod markdown;
 #[allow(dead_code)]
 pub mod markdown_clipboard;
@@ -24,6 +31,8 @@ pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod open_in_picker;
 pub mod panel_layout_controls;
+#[allow(dead_code)]
+pub mod pending_draft_work;
 // Pure scroll state machine; the timeline view does not drive page keys yet.
 #[allow(dead_code)]
 pub mod page_scroll_controller;
@@ -32,6 +41,15 @@ pub mod page_scroll_controller;
 #[allow(dead_code)]
 pub mod pending_user_input;
 pub mod thread_details_control;
+#[allow(dead_code)]
+pub mod use_composer_multiline_prompt;
+#[allow(dead_code)]
+pub mod use_composer_trigger_state;
+#[allow(dead_code)]
+pub mod use_composer_typing_guard;
+// Sidebar thread drag into the composer. The sidebar view does not drive it yet.
+#[allow(dead_code)]
+pub mod thread_context_drag;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]
@@ -57,3 +75,5 @@ pub mod thread_find_position;
 #[allow(dead_code)]
 pub mod thread_find_state;
 pub mod work_log;
+#[allow(dead_code)]
+pub mod workspace_file_drop;

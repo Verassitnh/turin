@@ -829,3 +829,147 @@ fn resolves_models_by_slug_name_alias_and_provider_alias() {
     );
     assert_eq!(resolve_selectable_model("codex", None, &models), None);
 }
+
+// --- providerModels.ts: getProviderModels / resolveSelectableProvider / getDefaultServerModel ---
+
+fn instance(
+    instance_id: &str,
+    driver: &str,
+    enabled: bool,
+    models: Vec<ProviderModel>,
+) -> ProviderInstanceEntry {
+    ProviderInstanceEntry {
+        enabled,
+        models,
+        ..ProviderInstanceEntry::new(instance_id, driver, driver)
+    }
+}
+
+fn custom_model(slug: &str) -> ProviderModel {
+    ProviderModel {
+        is_custom: true,
+        ..ProviderModel::simple(slug, slug)
+    }
+}
+
+fn default_model(slug: &str) -> ProviderModel {
+    ProviderModel {
+        is_default: true,
+        ..ProviderModel::simple(slug, slug)
+    }
+}
+
+#[test]
+fn provider_models_come_from_the_drivers_default_instance() {
+    let providers = vec![
+        instance(
+            "codex_work",
+            "codex",
+            true,
+            vec![ProviderModel::simple("work-only", "work-only")],
+        ),
+        instance(
+            "codex",
+            "codex",
+            true,
+            vec![ProviderModel::simple("gpt", "gpt")],
+        ),
+    ];
+    let slugs: Vec<_> = get_provider_models(&providers, "codex")
+        .iter()
+        .map(|model| model.slug.as_str())
+        .collect();
+    assert_eq!(slugs, ["gpt"]);
+    assert!(get_provider_models(&providers, "claudeAgent").is_empty());
+    assert!(get_provider_models(&[], "codex").is_empty());
+}
+
+#[test]
+fn an_enabled_requested_instance_resolves_to_its_driver() {
+    let providers = vec![
+        instance("codex", "codex", true, vec![]),
+        instance("claude_work", "claudeAgent", true, vec![]),
+    ];
+    assert_eq!(
+        resolve_selectable_provider(&providers, Some("claude_work")),
+        "claudeAgent"
+    );
+}
+
+#[test]
+fn a_disabled_or_missing_instance_falls_back_to_the_first_enabled_provider() {
+    let providers = vec![
+        instance("codex", "codex", false, vec![]),
+        instance("cursor", "cursor", true, vec![]),
+        instance("claudeAgent", "claudeAgent", true, vec![]),
+    ];
+    assert_eq!(
+        resolve_selectable_provider(&providers, Some("codex")),
+        "cursor"
+    );
+    assert_eq!(
+        resolve_selectable_provider(&providers, Some("gone")),
+        "cursor"
+    );
+    assert_eq!(resolve_selectable_provider(&providers, None), "cursor");
+}
+
+#[test]
+fn with_no_enabled_provider_the_selectable_provider_is_codex() {
+    let providers = vec![instance("claudeAgent", "claudeAgent", false, vec![])];
+    assert_eq!(
+        resolve_selectable_provider(&providers, Some("claudeAgent")),
+        "codex"
+    );
+    assert_eq!(resolve_selectable_provider(&[], None), "codex");
+}
+
+#[test]
+fn the_default_server_model_prefers_a_non_custom_default() {
+    let providers = vec![instance(
+        "codex",
+        "codex",
+        true,
+        vec![
+            custom_model("custom-default"),
+            ProviderModel::simple("plain", "plain"),
+            default_model("the-default"),
+        ],
+    )];
+    assert_eq!(get_default_server_model(&providers, "codex"), "the-default");
+}
+
+#[test]
+fn without_a_default_the_first_non_custom_model_wins_then_the_first_model() {
+    let providers = vec![instance(
+        "codex",
+        "codex",
+        true,
+        vec![
+            custom_model("custom"),
+            ProviderModel::simple("plain", "plain"),
+        ],
+    )];
+    assert_eq!(get_default_server_model(&providers, "codex"), "plain");
+
+    let only_custom = vec![instance(
+        "codex",
+        "codex",
+        true,
+        vec![custom_model("custom")],
+    )];
+    assert_eq!(get_default_server_model(&only_custom, "codex"), "custom");
+}
+
+#[test]
+fn without_any_models_the_default_falls_back_to_the_driver_table_then_the_global_default() {
+    let providers = vec![instance("claudeAgent", "claudeAgent", true, vec![])];
+    assert_eq!(
+        get_default_server_model(&providers, "claudeAgent"),
+        "claude-fable-5-1"
+    );
+    assert_eq!(
+        get_default_server_model(&providers, "unknown-driver"),
+        DEFAULT_MODEL
+    );
+}

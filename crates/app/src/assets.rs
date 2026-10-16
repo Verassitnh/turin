@@ -238,6 +238,8 @@ pub const BRANCH_MARK: &str = "brand/branch-mark.svg";
 
 /// lucide `smile-plus` (the reaction picker trigger); the gpui-kit icon set ships no `smile` family.
 pub const SMILE_PLUS: &str = "brand/smile-plus.svg";
+/// The T3 wordmark (`components/T3Wordmark.tsx`).
+pub const T3_WORDMARK: &str = "brand/t3-wordmark.svg";
 
 /// `@pierre/diffs` sprite icons (`dist/sprite.js`), one monochrome SVG each.
 /// JetBrains product marks (`components/JetBrainsIcons.tsx`).
@@ -414,6 +416,10 @@ const BRAND: &[(&str, &[u8])] = &[
     (
         editor_icons::ZED,
         include_bytes!("../assets/editors/zed.svg"),
+    ),
+    (
+        T3_WORDMARK,
+        include_bytes!("../assets/brand/t3-wordmark.svg"),
     ),
     (
         diff_icons::SYMBOL_ADDED,

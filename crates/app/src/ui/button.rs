@@ -318,7 +318,17 @@ pub struct Button {
     pressed: bool,
     tooltip: Option<Tooltip>,
     on_click: Option<ClickHandler>,
+    color_overrides: ColorOverrides,
     style: StyleRefinement,
+}
+
+/// `className` colour overrides on top of the variant (`text-*`,
+/// `hover:bg-*`, `hover:text-*`).
+#[derive(Clone, Copy, Debug, Default)]
+struct ColorOverrides {
+    fg: Option<Hsla>,
+    bg_hover: Option<Hsla>,
+    fg_hover: Option<Hsla>,
 }
 
 impl Button {
@@ -335,8 +345,27 @@ impl Button {
             pressed: false,
             tooltip: None,
             on_click: None,
+            color_overrides: ColorOverrides::default(),
             style: StyleRefinement::default(),
         }
+    }
+
+    /// A `text-*` class on top of the variant's foreground.
+    pub fn fg(mut self, color: impl Into<Hsla>) -> Self {
+        self.color_overrides.fg = Some(color.into());
+        self
+    }
+
+    /// A `hover:bg-*` class on top of the variant's hover fill.
+    pub fn hover_bg(mut self, color: impl Into<Hsla>) -> Self {
+        self.color_overrides.bg_hover = Some(color.into());
+        self
+    }
+
+    /// A `hover:text-*` class on top of the variant's hover foreground.
+    pub fn hover_fg(mut self, color: impl Into<Hsla>) -> Self {
+        self.color_overrides.fg_hover = Some(color.into());
+        self
     }
 
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
@@ -419,7 +448,16 @@ impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
         let size = self.size.spec();
-        let colors = self.variant.colors(theme);
+        let mut colors = self.variant.colors(theme);
+        if let Some(fg) = self.color_overrides.fg {
+            colors.fg = fg;
+        }
+        if let Some(bg) = self.color_overrides.bg_hover {
+            colors.bg_hover = Some(bg);
+        }
+        if let Some(fg) = self.color_overrides.fg_hover {
+            colors.fg_hover = Some(fg);
+        }
         let group: SharedString = format!("button-{:?}", self.id).into();
         let interactive = !self.disabled;
         let pressed = self.pressed && interactive;

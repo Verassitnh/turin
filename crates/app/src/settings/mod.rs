@@ -34,6 +34,7 @@ pub mod provider_status;
 pub mod rows;
 pub mod search;
 pub mod slider;
+pub mod theme_ui;
 pub mod time_format;
 pub mod usage_shortcuts;
 pub mod view;

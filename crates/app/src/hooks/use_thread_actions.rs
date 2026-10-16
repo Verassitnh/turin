@@ -37,7 +37,7 @@ use crate::components::sidebar::runtime::thread_sort::{ThreadSortOrder, pin_orde
 use crate::components::sidebar::sidebar_logic::get_fallback_thread_id_after_delete;
 use crate::components::sidebar::thread_status_indicators::format_worktree_path_for_display;
 use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoNotices, UndoAction, UndoPlan, UndoRun};
-use crate::state::command_result::{CommandFailure, CommandResult};
+use crate::state::command_result::{CommandFailure, CommandResult, is_command_interrupted};
 use crate::state::models::{EnvironmentProject, EnvironmentThreadShell};
 use crate::state::projects::is_scratch_project;
 use crate::state::right_panel_store::thread_key;
@@ -273,6 +273,17 @@ pub fn request_thread_unpin_confirmation(
     ))
 }
 
+/// `result._tag === "Failure" && !isAtomCommandInterrupted(result)`.
+fn undo_error_is_interrupted(error: &ThreadActionError) -> bool {
+    let failure = match error {
+        ThreadActionError::Dispatch(failure)
+        | ThreadActionError::ArchivedNavigationFailed(failure) => failure,
+        _ => return false,
+    };
+    let result: CommandResult<(), String> = Err(failure.clone());
+    is_command_interrupted(&result)
+}
+
 /// `error instanceof Error ? error.message : "An error occurred."`.
 fn failure_message(failure: &CommandFailure<String>) -> String {
     match failure {
@@ -380,6 +391,7 @@ impl<C: ThreadCommands, H: ThreadActionHost> ThreadActions<C, H> {
 
     /// Runs the Undo a notice carries: each offer goes through the same
     /// method the action used, and a failure raises the offer's toast.
+    /// An interrupted command does not (`isAtomCommandInterrupted`).
     pub fn undo_notice(&mut self, ids: &[u64]) {
         for UndoRun {
             plan,
@@ -387,6 +399,9 @@ impl<C: ThreadCommands, H: ThreadActionHost> ThreadActions<C, H> {
         } in self.notices.take_undo(ids)
         {
             if let Err(error) = self.run_undo_plan(plan) {
+                if undo_error_is_interrupted(&error) {
+                    continue;
+                }
                 self.host.show_error_toast(ErrorToast {
                     title: failure_title.into(),
                     description: error.to_string(),

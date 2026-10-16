@@ -26,7 +26,8 @@ use super::{
     request_thread_unpin_confirmation,
 };
 use crate::components::sidebar::runtime::thread_sort::ThreadSortOrder;
-use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoNotices, UndoAction};
+use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoClaim, ThreadUndoNotices, UndoAction, UndoPlan};
+use crate::state::right_panel_store::thread_key;
 use crate::state::command_result::CommandFailure;
 use crate::state::models::{
     EnvironmentProject, EnvironmentThreadShell, RunStatus, ThreadRunSummary, ThreadRuntimeSummary,
@@ -132,6 +133,8 @@ struct FakeCommands {
     world: Shared,
     /// Operation name → message the dispatch fails with.
     fail: HashMap<&'static str, String>,
+    /// Operation names whose dispatch is `CommandFailure::Interrupted`.
+    interrupt: HashSet<&'static str>,
     /// `stopSession` revokes this scope (the permission-revoked-mid-delete case).
     revoke_on_stop: Option<&'static str>,
     /// The session lookup fails (`loadSessionState` is a failure).
@@ -147,6 +150,9 @@ impl FakeCommands {
 
     fn dispatch(&self, op: &'static str, line: String) -> DispatchResult {
         self.record(line);
+        if self.interrupt.contains(op) {
+            return Err(CommandFailure::Interrupted);
+        }
         match self.fail.get(op) {
             Some(message) => Err(CommandFailure::Failed(message.clone())),
             None => Ok(()),
@@ -761,6 +767,106 @@ fn settle_expires_an_older_unpin_undo() {
     actions.settle_thread(&target()).unwrap();
     actions.undo_notice(&stale);
     assert!(!calls(&harness.world).iter().any(|c| c.starts_with("pin ")));
+}
+
+/// Offer one archive Undo whose claim the test still holds, matching
+/// `showThreadUndoNotice.test.ts`'s `setup` + `showThreadUndoNotice`.
+fn offer_archive_restore(harness: &Harness) -> ThreadUndoClaim {
+    let claim = harness.undo.begin("archive", &thread_key(&target()));
+    harness.notices.show(
+        UndoAction::Archived,
+        claim.clone(),
+        UndoPlan::Unarchive {
+            thread: target(),
+            navigate: false,
+        },
+        "Restore failed",
+    );
+    claim
+}
+
+fn actions_with_unarchive(
+    harness: &Harness,
+    fail: Option<&str>,
+    interrupt: bool,
+) -> ThreadActions<FakeCommands, FakeHost> {
+    let mut commands = FakeCommands {
+        world: harness.world.clone(),
+        ..FakeCommands::default()
+    };
+    if let Some(message) = fail {
+        commands.fail.insert("unarchive", message.to_owned());
+    }
+    if interrupt {
+        commands.interrupt.insert("unarchive");
+    }
+    ThreadActions::new(
+        commands,
+        FakeHost {
+            world: harness.world.clone(),
+            threads: vec![shell("undo-env", "thread")],
+            ..FakeHost::default()
+        },
+        harness.undo.clone(),
+        harness.notices.clone(),
+    )
+}
+
+fn granted_restore_harness() -> Harness {
+    let harness = Harness::new();
+    grant(
+        &harness.world,
+        "undo-env",
+        &[AUTH_ORCHESTRATION_OPERATE_SCOPE],
+    );
+    harness
+}
+
+/// `showThreadUndoNotice.test.ts`: "reports a failed restore and releases its claim".
+#[test]
+fn a_failed_restore_toasts_and_releases_its_claim() {
+    let harness = granted_restore_harness();
+    let claim = offer_archive_restore(&harness);
+    let mut actions = actions_with_unarchive(&harness, Some("offline"), false);
+    actions.undo_notice(&current_ids(&harness.notices));
+    assert_eq!(
+        harness.world.borrow().toasts,
+        vec![ErrorToast {
+            title: "Restore failed".into(),
+            description: "offline".into(),
+        }]
+    );
+    assert!(!claim.is_current());
+}
+
+/// `showThreadUndoNotice.test.ts`: "reports a rejected restore promise".
+/// Commands return `Result`, so a thrown restore is a failed dispatch.
+#[test]
+fn a_rejected_restore_toasts_the_error_message() {
+    let harness = granted_restore_harness();
+    offer_archive_restore(&harness);
+    let mut actions = actions_with_unarchive(&harness, Some("disconnected"), false);
+    actions.undo_notice(&current_ids(&harness.notices));
+    let toasts = harness.world.borrow().toasts.clone();
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(toasts[0].description, "disconnected");
+}
+
+/// `showThreadUndoNotice.test.ts`: "does not report interrupted restores as errors".
+#[test]
+fn an_interrupted_restore_does_not_toast() {
+    let harness = granted_restore_harness();
+    offer_archive_restore(&harness);
+    let mut actions = actions_with_unarchive(&harness, None, true);
+    actions.undo_notice(&current_ids(&harness.notices));
+    assert!(harness.world.borrow().toasts.is_empty());
+    assert_eq!(
+        calls(&harness.world)
+            .iter()
+            .filter(|call| call.starts_with("unarchive "))
+            .count(),
+        1
+    );
 }
 
 #[test]

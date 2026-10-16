@@ -3,6 +3,8 @@
 //! The controller is a record of closures, matching the upstream interface
 //! (optional methods are `None`). Adapters fill in the ones they support.
 
+#![allow(clippy::result_large_err, clippy::type_complexity)]
+
 use std::{any::Any, sync::Arc};
 
 use futures::Stream;
@@ -33,9 +35,63 @@ impl std::fmt::Debug for AdmittedFailure {
     }
 }
 
+/// Lifetime of one admitted task's resources. Finalizers run in reverse order
+/// when the session closes, like upstream `Scope` finalizers. The admitted
+/// task receives a clone and may register cleanup on it.
+#[derive(Clone, Default)]
+pub struct SessionScope {
+    state: Arc<parking_lot::Mutex<SessionState>>,
+}
+
+#[derive(Default)]
+struct SessionState {
+    closed: bool,
+    finalizers: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+impl SessionScope {
+    /// Runs now when the session is already closed.
+    pub fn add_finalizer(&self, finalizer: impl FnOnce() + Send + 'static) {
+        let mut state = self.state.lock();
+        if state.closed {
+            drop(state);
+            finalizer();
+        } else {
+            state.finalizers.push(Box::new(finalizer));
+        }
+    }
+
+    /// Idempotent. Finalizers run synchronously; a task aborted by the owner
+    /// drops its own state when the runtime next polls it.
+    pub fn close(&self) {
+        let finalizers = {
+            let mut state = self.state.lock();
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            std::mem::take(&mut state.finalizers)
+        };
+        for finalizer in finalizers.into_iter().rev() {
+            finalizer();
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.state.lock().closed
+    }
+
+    pub(crate) fn same_session(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
 /// One unit of work a credential gate may run or reject.
 pub struct AdmittedTask {
-    fut: BoxFuture<'static, Result<Box<dyn Any + Send>, AdmittedFailure>>,
+    pub(crate) make: Box<
+        dyn FnOnce(SessionScope) -> BoxFuture<'static, Result<Box<dyn Any + Send>, AdmittedFailure>>
+            + Send,
+    >,
 }
 
 impl AdmittedTask {
@@ -44,12 +100,25 @@ impl AdmittedTask {
         T: Send + 'static,
         E: Send + 'static,
     {
+        Self::scoped(move |_scope| fut)
+    }
+
+    /// A task that registers its resources on the session it is admitted to.
+    pub fn scoped<T, E, F>(make: impl FnOnce(SessionScope) -> F + Send + 'static) -> Self
+    where
+        F: std::future::Future<Output = Result<T, E>> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
         Self {
-            fut: Box::pin(async move {
-                match fut.await {
-                    Ok(value) => Ok(Box::new(value) as Box<dyn Any + Send>),
-                    Err(error) => Err(AdmittedFailure::Other(Box::new(error))),
-                }
+            make: Box::new(move |scope| {
+                let fut = make(scope);
+                Box::pin(async move {
+                    match fut.await {
+                        Ok(value) => Ok(Box::new(value) as Box<dyn Any + Send>),
+                        Err(error) => Err(AdmittedFailure::Other(Box::new(error))),
+                    }
+                })
             }),
         }
     }
@@ -60,17 +129,21 @@ impl AdmittedTask {
         + Send
         + 'static,
     ) -> Self {
-        Self { fut: Box::pin(fut) }
+        Self {
+            make: Box::new(move |_scope| Box::pin(fut)),
+        }
     }
 
+    /// Runs outside any sign-in session. Resources registered on the
+    /// detached scope are never finalized.
     #[allow(clippy::result_large_err)]
     pub async fn run(self) -> Result<Box<dyn Any + Send>, AdmittedFailure> {
-        self.fut.await
+        (self.make)(SessionScope::default()).await
     }
 
     #[allow(clippy::result_large_err)]
     pub async fn wait<T: Send + 'static>(self) -> Result<T, AdmittedFailure> {
-        match self.fut.await {
+        match (self.make)(SessionScope::default()).await {
             Ok(value) => value
                 .downcast::<T>()
                 .map(|boxed| *boxed)
@@ -87,6 +160,7 @@ pub struct ProviderCredentialBinding {
 }
 
 /// Sign-in controller owned by one provider instance.
+#[derive(Clone)]
 #[allow(clippy::type_complexity)]
 pub struct ProviderAuthController {
     /// Equal keys mean these instances share credentials on this environment.

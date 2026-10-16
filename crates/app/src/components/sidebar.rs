@@ -28,6 +28,7 @@ pub mod sidebar_list;
 pub mod sidebar_logic;
 pub mod sidebar_motion;
 pub mod sidebar_pointer;
+pub mod sidebar_provider_update_pill;
 pub mod sidebar_search;
 pub mod sidebar_sections;
 pub mod sidebar_snooze;

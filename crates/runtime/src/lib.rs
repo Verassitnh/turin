@@ -5,4 +5,5 @@ pub mod persistence_reader;
 pub mod server_settings;
 pub mod settings_secrets;
 pub mod shared_keybindings;
+pub mod storage_cleanup;
 pub mod support;

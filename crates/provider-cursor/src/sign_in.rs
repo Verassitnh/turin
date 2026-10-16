@@ -283,13 +283,9 @@ impl Shared {
 
 /// Login on a fresh process: `authenticate` blocks until the browser flow ends.
 async fn run_login(program: &str) -> Result<(), CursorError> {
-    let client: AcpClient = spawn(SpawnCommand {
-        program,
-        args: ACP_ARGS,
-        cwd: None,
-    })
-    .await
-    .map_err(|error| CursorError::from_acp(CursorOperation::Spawn, &error))?;
+    let client: AcpClient = spawn(SpawnCommand::new(program, ACP_ARGS))
+        .await
+        .map_err(|error| CursorError::from_acp(CursorOperation::Spawn, &error))?;
     client
         .initialize(AcpClient::cursor_initialize(
             "turin",

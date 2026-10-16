@@ -4,11 +4,13 @@ pub mod adapter_driver;
 pub mod attachment_paths;
 pub mod attachment_prompt;
 pub mod auth;
+pub mod auth_flow;
 pub mod background_scope;
 pub mod built_in_provider_catalog;
 pub mod collect_stream_text;
 pub mod command_path;
 pub mod credential_store;
+pub mod custom_models;
 pub mod driver;
 pub mod errors;
 pub mod event_ndjson_logger;
@@ -62,6 +64,7 @@ pub mod turn_item;
 pub mod unavailable_provider_snapshot;
 pub mod usage;
 pub mod usage_limits;
+pub mod wire_projection;
 
 pub use adapter_driver::{ProviderAdapterDriver, ProviderAdapterDriverCreateError};
 pub use driver::{

@@ -735,6 +735,21 @@ mod tests {
     }
 
     #[test]
+    fn codex_family_strips_only_the_openai_gpt_prefix() {
+        assert_eq!(codex_model_family("openai.gpt-5.5"), "gpt-5.5");
+        assert_eq!(codex_model_family("openai.other"), "openai.other");
+        assert_eq!(codex_model_family("gpt-5.5"), "gpt-5.5");
+    }
+
+    #[test]
+    fn codex_names_capitalize_gpt_and_dash_letters() {
+        assert_eq!(format_codex_model_name("gpt-5.4-mini"), "GPT-5.4-Mini");
+        assert_eq!(format_codex_model_name("GPT 5"), "GPT 5");
+        assert_eq!(format_codex_model_name("Model-x"), "Model-X");
+        assert_eq!(format_codex_model_name("gp"), "gp");
+    }
+
+    #[test]
     fn keeps_the_codex_catalog_display_formatting() {
         assert_eq!(
             format_codex_model_name("gpt-5.3-codex-spark"),

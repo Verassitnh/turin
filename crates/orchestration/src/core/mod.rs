@@ -1,5 +1,8 @@
-//! Orchestrator core (T13c): the services that connect threads and turns to
-//! provider sessions. Port of upstream/apps/server/src/orchestration-v2.
+//! Orchestrator core. Port of upstream/apps/server/src/orchestration-v2.
+//!
+//! T13c connects threads and turns to provider sessions. R5 reads and hands
+//! off thread context outside the decider: workflow file readers, context
+//! handoff, and checkpoint rollback.
 
 // `SinkError` and `PersistenceError` are large and every write returns them;
 // boxing them would leak into the pipeline API (same reason as `pipeline`).

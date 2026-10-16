@@ -1010,3 +1010,8 @@ Each helper has one copy in `crates/app/src/state`. Its `turin-shared` counterpa
 | `components/ui/preview-card.tsx` | hover-card portal and enter scale | a positioned child of the trigger | no hover portal |
 | `components/ui/alert-dialog.tsx` and `sheet.tsx` | enter/exit translate | the surface appears in place | no element transforms |
 | `components/ui/table.tsx` | an HTML table | flex rows | GPUI has no table layout |
+| `components/ui/combobox.tsx` | `useFilter().contains` with locale collation, chips, and a virtualized list | `ui/combobox.rs` uses an ASCII case-insensitive substring; the popup is a positioned child | locale collation and the virtual list are not in this pass |
+| `components/ui/autocomplete.tsx` | virtualized list and locale filtering | `ui/autocomplete.rs` reuses the combobox padding; the popup is `border bg-popover shadow-lg/5` | same list and collation limit. The popup is `absolute`, not `relative` |
+| `components/ui/select.tsx` | typeahead, scroll arrows, `--available-height`, focus ring, and the invalid outline | `ui/select.rs` caps the list at 24rem | those need a live popup controller |
+| `components/ui/color-picker.tsx` | pointer drag, keyboard on the view, an 80ms thumb transition, and one rainbow gradient | `ui/color_picker.rs` maps pointer and keys as functions; the hue track is six two-stop segments | GPUI gradients take two stops. Drag and keys are not wired on the element |
+| `components/ui/calendar.tsx` | month and year dropdowns, the focus ring, and a today `::after` dot | `ui/calendar.rs` draws a 3px dot as a child | dropdowns and the pseudo-element are not in this pass |

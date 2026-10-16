@@ -3,6 +3,7 @@
 
 use turin_contracts::environment::repository_grouping_key_of;
 use turin_contracts::model_selection::ModelSelection;
+use turin_shared::js_string::utf16_len;
 use turin_shared::prompt_links::{
     NewThreadLinkInput, PROMPT_LINK_MAX_PROMPT_LENGTH, PromptLinkRepository, build_new_thread_link,
     parse_prompt_link_repository,
@@ -18,7 +19,7 @@ pub fn prompt_link_for(
     hosted_app_url: Option<&str>,
 ) -> Option<String> {
     let trimmed = prompt.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > PROMPT_LINK_MAX_PROMPT_LENGTH {
+    if trimmed.is_empty() || utf16_len(trimmed) > PROMPT_LINK_MAX_PROMPT_LENGTH {
         return None;
     }
     let context = context.unwrap_or(PromptLinkContext {
@@ -125,6 +126,15 @@ mod tests {
         let link = prompt_link_for("hello", None, None);
         assert!(link.is_some());
         assert!(link.unwrap().contains("prompt="));
+    }
+
+    #[test]
+    fn rejects_prompts_over_the_js_utf16_length_limit() {
+        let within_limit = "a".repeat(8_000);
+        assert!(prompt_link_for(&within_limit, None, None).is_some());
+        let over_limit = format!("a{}", "😀".repeat(4_000));
+        assert!(utf16_len(&over_limit) > PROMPT_LINK_MAX_PROMPT_LENGTH);
+        assert!(prompt_link_for(&over_limit, None, None).is_none());
     }
 
     #[test]

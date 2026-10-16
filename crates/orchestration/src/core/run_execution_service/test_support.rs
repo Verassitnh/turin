@@ -295,6 +295,12 @@ pub(crate) struct ScriptedSession {
     /// means "no pending work".
     pub pending_background: Mutex<VecDeque<bool>>,
     pub has_background_probe: AtomicBool,
+    /// Decides the thread-scoped probe by provider thread (overrides
+    /// `pending_background`).
+    #[allow(clippy::type_complexity)]
+    pub probe_by_thread: Mutex<Option<Box<dyn Fn(&OrchestrationV2ProviderThread) -> bool + Send>>>,
+    /// The provider threads the thread-scoped probe was asked about.
+    pub probed: Mutex<Vec<turin_contracts::ProviderThreadId>>,
     events: Mutex<Option<ProviderEventStream>>,
     /// Whether `subscribe_events` is offered (manager-owned runtimes).
     pub subscribable: AtomicBool,
@@ -390,6 +396,8 @@ impl ScriptedSession {
             supports_compact: AtomicBool::new(true),
             pending_background: Mutex::default(),
             has_background_probe: AtomicBool::new(false),
+            probe_by_thread: Mutex::new(None),
+            probed: Mutex::default(),
             events: Mutex::new(Some(events)),
             subscribable: AtomicBool::new(false),
             closed: Arc::new(ClosedSignal::default()),
@@ -452,12 +460,16 @@ impl ProviderSessionRuntime for ScriptedSession {
     }
     fn has_pending_background_work_for_thread(
         &self,
-        _provider_thread: &OrchestrationV2ProviderThread,
+        provider_thread: &OrchestrationV2ProviderThread,
     ) -> Option<BoxFuture<'_, Result<bool, ProviderAdapterV2Error>>> {
         if !self.has_background_probe.load(Ordering::SeqCst) {
             return None;
         }
-        let answer = self.pending_background.lock().pop_front().unwrap_or(false);
+        self.probed.lock().push(provider_thread.id.clone());
+        let answer = match self.probe_by_thread.lock().as_ref() {
+            Some(decide) => decide(provider_thread),
+            None => self.pending_background.lock().pop_front().unwrap_or(false),
+        };
         Some(Box::pin(async move { Ok(answer) }))
     }
     async fn ensure_thread(

@@ -8,34 +8,79 @@
 
 use chrono::{DateTime, Utc};
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2NativeRefStrength, OrchestrationV2PendingBackgroundTask,
-    OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
-    OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadStatus,
+    OrchestrationV2AppThread, OrchestrationV2NativeRefStrength,
+    OrchestrationV2PendingBackgroundTask, OrchestrationV2ProviderSession,
+    OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
+    OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
     OrchestrationV2ResponseCapability, OrchestrationV2Run, OrchestrationV2RunStatus,
-    OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-    OrchestrationV2SecretRequestStatus, OrchestrationV2SettleOverride,
-    OrchestrationV2SubagentOrigin, OrchestrationV2ThreadProjection, OrchestrationV2TurnItem,
-    OrchestrationV2TurnItemStatus, latest_provider_turn_for_attempt,
+    OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
+    OrchestrationV2RuntimeRequestStatus, OrchestrationV2SecretRequestStatus,
+    OrchestrationV2SettleOverride, OrchestrationV2SubagentOrigin, OrchestrationV2ThreadProjection,
+    OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus, latest_provider_turn_for_attempt,
 };
 
 use super::restart_background_note::{
     cancelled_roster_task_work, cancelled_turn_item_work, is_awaited_work,
 };
+use crate::projection::store::runtime_recovery::RuntimeRecoveryState;
 use crate::projection::turn_item;
 use turin_shared::orchestration_v2_thread_error::run_ran_after;
+
+/// The slice of a projection the restart selection reads. Upstream types these
+/// functions as a `Pick` of `ProjectionRuntimeRecoveryState`, so the full thread
+/// projection and the recovery projection both fit.
+#[derive(Debug, Clone, Copy)]
+pub struct RestartProjection<'a> {
+    pub thread: &'a OrchestrationV2AppThread,
+    pub runs: &'a [OrchestrationV2Run],
+    pub provider_sessions: &'a [OrchestrationV2ProviderSession],
+    pub provider_threads: &'a [OrchestrationV2ProviderThread],
+    pub provider_turns: &'a [OrchestrationV2ProviderTurn],
+    pub runtime_requests: &'a [OrchestrationV2RuntimeRequest],
+    pub turn_items: &'a [OrchestrationV2TurnItem],
+}
+
+impl<'a> From<&'a OrchestrationV2ThreadProjection> for RestartProjection<'a> {
+    fn from(projection: &'a OrchestrationV2ThreadProjection) -> Self {
+        Self {
+            thread: &projection.thread,
+            runs: &projection.runs,
+            provider_sessions: &projection.provider_sessions,
+            provider_threads: &projection.provider_threads,
+            provider_turns: &projection.provider_turns,
+            runtime_requests: &projection.runtime_requests,
+            turn_items: &projection.turn_items,
+        }
+    }
+}
+
+impl<'a> From<&'a RuntimeRecoveryState> for RestartProjection<'a> {
+    fn from(projection: &'a RuntimeRecoveryState) -> Self {
+        Self {
+            thread: &projection.thread,
+            runs: &projection.runs,
+            provider_sessions: &projection.provider_sessions,
+            provider_threads: &projection.provider_threads,
+            provider_turns: &projection.provider_turns,
+            runtime_requests: &projection.runtime_requests,
+            turn_items: &projection.turn_items,
+        }
+    }
+}
 
 /// Whether a restart must leave this run for the user: the thread is put away,
 /// the provider turn already ended, or the user owes an answer. Checked when
 /// intent is recorded and again when the continuation is delivered. A `settled`
 /// run is woken for the awaited work it lost, so its ended provider turn does
 /// not block it.
-pub fn restart_continuation_blocked(
-    projection: &OrchestrationV2ThreadProjection,
+pub fn restart_continuation_blocked<'a>(
+    projection: impl Into<RestartProjection<'a>>,
     source: &OrchestrationV2Run,
     now: DateTime<Utc>,
     settled: bool,
 ) -> bool {
-    let thread = &projection.thread;
+    let projection = projection.into();
+    let thread = projection.thread;
     let snoozed = thread
         .snoozed_until
         .flatten()
@@ -48,7 +93,7 @@ pub fn restart_continuation_blocked(
         return true;
     }
     let turn = latest_provider_turn_for_attempt(
-        &projection.provider_turns,
+        projection.provider_turns,
         source.active_attempt_id.as_ref(),
     );
     if !settled
@@ -107,10 +152,11 @@ pub fn restart_continuation_blocked(
 
 /// Open awaited work (see `is_awaited_work`) on a provider thread. App-owned
 /// delegations are not counted: their own threads continue and report back.
-pub fn has_open_awaited_work(
-    projection: &OrchestrationV2ThreadProjection,
+pub fn has_open_awaited_work<'a>(
+    projection: impl Into<RestartProjection<'a>>,
     provider_thread: &OrchestrationV2ProviderThread,
 ) -> bool {
+    let projection = projection.into();
     let open_item = projection.turn_items.iter().any(|item| {
         let common = turn_item::common(item);
         if !matches!(
@@ -158,10 +204,11 @@ pub fn has_open_awaited_work(
 /// waiting on awaited work that the restart cancels. A settled run needs a live
 /// session, so stale records from an older crash never wake it. Other leftover
 /// work is cleaned up and reported on the next user turn.
-pub fn restart_continuation_run(
-    projection: &OrchestrationV2ThreadProjection,
+pub fn restart_continuation_run<'a>(
+    projection: impl Into<RestartProjection<'a>>,
     now: DateTime<Utc>,
-) -> Option<&OrchestrationV2Run> {
+) -> Option<&'a OrchestrationV2Run> {
+    let projection = projection.into();
     // Queued runs never started; recovery holds them behind the cut run.
     let run = projection
         .runs
@@ -452,6 +499,37 @@ mod tests {
                     "{project_id} {status}"
                 );
             }
+        }
+    }
+    #[test]
+    fn does_not_wake_a_settled_run_for_work_left_by_a_session_that_already_stopped() {
+        let mut value = base();
+        value["runs"][0]["status"] = json!("completed");
+        value["providerThreads"][0]["status"] = json!("idle");
+        value["turnItems"] = json!([test_support::turn_item(
+            THREAD,
+            "turn-item:background-subagent",
+            Some(RUN),
+            1,
+            "subagent",
+            "running",
+            json!({
+                "providerThreadId": PROVIDER_THREAD, "nodeId": null,
+                "subagentId": "subagent:background", "origin": "provider_native",
+                "driver": "codex", "providerInstanceId": INSTANCE, "childThreadId": null,
+                "prompt": "Review", "progress": null, "result": null, "title": "Background reviewer",
+            }),
+        )]);
+        assert_eq!(
+            restart_continuation_run(&projection(value.clone()), now()).map(|run| run.id.as_str()),
+            Some(RUN)
+        );
+        for status in ["stopped", "error"] {
+            value["providerSessions"][0]["status"] = json!(status);
+            assert!(
+                restart_continuation_run(&projection(value.clone()), now()).is_none(),
+                "{status}"
+            );
         }
     }
 }

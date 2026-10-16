@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod code_block;
 pub mod code_languages;
 pub mod command_items;
+pub mod composer_context_records;
 pub mod context_meter;
 pub mod dispatch;
 pub mod draft_store;

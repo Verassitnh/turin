@@ -532,7 +532,7 @@ async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes(
                     &RecordFilter::default(),
                 )
                 .await
-            );
+                .expect("records");
             let Some(request) = records
                 .runtime_requests
                 .iter()
@@ -567,4 +567,126 @@ async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes(
     .expect("run settled in time");
     assert!(answered, "a question was raised");
     assert_eq!(status, OrchestrationV2RunStatus::Completed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_runs_can_be_reordered_edited_and_cancelled() {
+    use turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole as Role;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    // The CLI never answers the first prompt, so later sends queue behind it.
+    let harness = harness_with("claude_turn_interrupt.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let send = |text: &'static str, delivery: Delivery| {
+        let commands = harness.commands.clone();
+        let thread_id = thread.clone();
+        async move {
+            commands
+                .send_message(SendMessage {
+                    thread_id,
+                    text: text.into(),
+                    attachments: vec![],
+                    model_selection: None,
+                    delivery,
+                    title_seed: None,
+                })
+                .await
+                .expect("send")
+        }
+    };
+    send("first", Delivery::StartImmediately).await;
+    send("second", Delivery::QueueAfterActive).await;
+    send("third", Delivery::QueueAfterActive).await;
+
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    // Queued runs in queue order, as `(run id, message text)`.
+    let queue = || {
+        let orchestrator = orchestrator.clone();
+        let thread = thread.clone();
+        async move {
+            let records = orchestrator
+                .get_thread_records(
+                    &thread,
+                    &[RecordField::Runs, RecordField::Messages],
+                    &RecordFilter::default(),
+                )
+                .await
+                .expect("records");
+            let mut queued: Vec<_> = records
+                .runs
+                .iter()
+                .filter(|run| run.status == OrchestrationV2RunStatus::Queued)
+                .collect();
+            queued.sort_by_key(|run| {
+                let ordinal = run.ordinal.get();
+                (
+                    run.queue_position
+                        .flatten()
+                        .map_or(ordinal, |position| position.get()),
+                    ordinal,
+                )
+            });
+            queued
+                .into_iter()
+                .map(|run| {
+                    let text = records
+                        .messages
+                        .iter()
+                        .find(|message| {
+                            message.run_id.as_ref() == Some(&run.id) && message.role == Role::User
+                        })
+                        .map(|message| message.text.clone())
+                        .unwrap_or_default();
+                    (run.id.to_string(), text)
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    let initial = queue().await;
+    assert_eq!(
+        initial
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["second", "third"]
+    );
+    let (second, third) = (initial[0].0.clone(), initial[1].0.clone());
+
+    // Move the third run in front of the second.
+    harness
+        .commands
+        .thread_command(
+            "queued-run.reorder",
+            &thread,
+            json!({"runId": third, "beforeRunId": second}),
+        )
+        .await
+        .expect("reorder");
+    let reordered = queue().await;
+    assert_eq!(
+        reordered
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["third", "second"]
+    );
+
+    harness
+        .commands
+        .thread_command(
+            "queued-run.edit",
+            &thread,
+            json!({"runId": second, "text": "second, edited"}),
+        )
+        .await
+        .expect("edit");
+    harness
+        .commands
+        .thread_command("queued-run.cancel", &thread, json!({"runId": third}))
+        .await
+        .expect("cancel");
+    let remaining = queue().await;
+    assert_eq!(remaining, vec![(second, "second, edited".to_owned())]);
 }

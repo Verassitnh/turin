@@ -13,6 +13,8 @@ mod dock_icon;
 mod hooks;
 mod logical_project;
 mod project_favicon_cache;
+mod project_favicon_images;
+mod project_favicon_storage;
 mod project_icon_colors;
 mod project_icon_options;
 mod project_identity;
@@ -101,6 +103,7 @@ fn main() {
     let _feeds = tokio_util::task::AbortOnDropHandle::new(runtime.handle().spawn(
         app_runtime::run(app_runtime::data_dir::resolve_data_dir(), sender, requests),
     ));
+    let favicon_runtime = runtime.handle().clone();
     gpui_kit::application()
         .with_assets(assets::AppAssets)
         .run(move |cx| {
@@ -108,6 +111,24 @@ fn main() {
             #[cfg(target_os = "macos")]
             dock_icon::set_unbundled_app_icon();
             theme::init(cx);
+            // Project icons: found on disk, cached under the data dir, drawn by `ProjectFavicon`.
+            project_favicon_images::ProjectFaviconImages::install(
+                project_favicon_storage::project_favicon_cache(
+                    app_runtime::data_dir::resolve_data_dir().as_deref(),
+                ),
+                std::sync::Arc::new(
+                    turin_projects::project_favicon_resolver::ProjectFaviconResolver::new(
+                        std::sync::Arc::new(
+                            turin_git::workspace::workspace_paths::WorkspacePaths::new(
+                                std::env::var("HOME").unwrap_or_default(),
+                            ),
+                        ),
+                        None,
+                    ),
+                ),
+                favicon_runtime.clone(),
+                cx,
+            );
             let store = state::store::bind_client_store(handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);

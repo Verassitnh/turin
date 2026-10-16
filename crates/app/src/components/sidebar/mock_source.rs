@@ -18,8 +18,8 @@ use super::runtime::thread_sort::pin_order_key_between;
 use super::sidebar_logic::CommandOutcome;
 use super::view_model::{
     ProviderDriverKind, ProviderEntry, Shelf, SidebarBackend, SidebarDraft, SidebarEnvironment,
-    SidebarProjectGroup, SidebarSettings, SidebarSnapshot, SidebarStore, ThreadCapabilities,
-    ThreadRef, ThreadSearchMatch,
+    SidebarSettings, SidebarSnapshot, SidebarStore, ThreadCapabilities, ThreadRef,
+    ThreadSearchMatch,
 };
 use crate::components::thread_search_match::SearchMatchSource;
 use turin_contracts::orchestration_v2::{
@@ -32,6 +32,7 @@ use crate::state::models::{
     PullRequestState, RunStatus, SettledOverride, ThreadPullRequestLink, ThreadRunSummary,
     ThreadRuntimeSummary, TitleRegeneration,
 };
+use crate::state::project_grouping::ProjectGroupingSettings;
 use crate::timestamp_format::{now_ms, to_iso_string};
 
 const MINUTE: i64 = 60_000;
@@ -142,7 +143,14 @@ fn pr(number: u64, title: &str, state: PullRequestState) -> ThreadPullRequestLin
 pub fn mock_snapshot() -> SidebarSnapshot {
     let f = Fixture { now: now_ms() };
     let projects = vec![
-        project("turin", "turin", "/Users/dev/code/turin", None),
+        // Dev hook for screenshots: a workspace that really holds an icon file.
+        project(
+            "turin",
+            "turin",
+            &std::env::var("TURIN_MOCK_FAVICON_ROOT")
+                .unwrap_or_else(|_| "/Users/dev/code/turin".to_owned()),
+            None,
+        ),
         project("t3code", "t3code", "/Users/dev/code/t3code", None),
         project(
             "website",
@@ -154,17 +162,6 @@ pub fn mock_snapshot() -> SidebarSnapshot {
             }),
         ),
     ];
-    let project_groups = projects
-        .iter()
-        .map(|project| SidebarProjectGroup {
-            project_key: project.key(),
-            display_name: project.title.clone(),
-            created_at: project.created_at.clone(),
-            updated_at: project.updated_at.clone(),
-            member_project_keys: vec![project.key()],
-        })
-        .collect();
-
     let mut threads = Vec::new();
 
     // Pinned: a long-running goal and a keyless legacy pin.
@@ -389,7 +386,7 @@ pub fn mock_snapshot() -> SidebarSnapshot {
     threads.push(t);
 
     let mut snapshot = SidebarSnapshot {
-        project_groups,
+        project_groups: Vec::new(),
         projects,
         threads,
         environments: vec![SidebarEnvironment {
@@ -436,7 +433,7 @@ pub fn mock_snapshot() -> SidebarSnapshot {
         snoozed_shelf_expanded: false,
         working_shelf_expanded: false,
     };
-    snapshot.sort_project_groups();
+    snapshot.refresh_project_groups(&[], &ProjectGroupingSettings::default());
     snapshot
 }
 

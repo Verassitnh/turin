@@ -16,6 +16,10 @@ turin-provider-core.workspace = true
 turin-runtime.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
+image.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
 chrono.workspace = true
 futures.workspace = true
 indexmap.workspace = true
@@ -34,6 +38,8 @@ turin-persistence.workspace = true
 turin-orchestration.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 turin-launcher.workspace = true
+turin-projects.workspace = true
+turin-git.workspace = true
 gpui-kit = { workspace = true, features = [
     # Code block highlighting (ChatMarkdown). Not `tree-sitter-languages`:
     # its SQL grammar pins `cc ~1.2`, which conflicts with rusqlite.

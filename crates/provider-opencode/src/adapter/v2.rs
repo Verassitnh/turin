@@ -83,6 +83,10 @@ const GONE_FORM: [&str; 3] = [
 ];
 /// The turn failure when a request could not be answered (upstream `abandonRequest`).
 const REQUEST_ABANDONED: &str = "OpenCode is waiting on a request T3 Code couldn't answer.";
+/// A background subagent's result when its end was lost with the event stream (upstream
+/// `LOST_BACKGROUND`).
+const LOST_BACKGROUND: &str =
+    "T3 Code lost its connection to OpenCode while this subagent ran, so its result is not shown.";
 
 struct V2Turn {
     provider_turn: OrchestrationV2ProviderTurn,
@@ -98,6 +102,8 @@ struct V2Turn {
     text_blocks: HashMap<String, TextBlockState>,
     /// When each tool call was first seen, for its node and item start.
     tool_started: HashMap<String, UtcDateTime>,
+    /// Tool calls still open on this turn (upstream `turn.tools`).
+    open_tools: HashSet<String>,
     /// The compaction running in this turn: its native id, and when it started.
     compaction: Option<(String, UtcDateTime)>,
     compactions: u64,
@@ -126,6 +132,9 @@ struct V2Thread {
     turns: Vec<OrchestrationV2ProviderTurn>,
     requests: Vec<OrchestrationV2RuntimeRequest>,
     unsettled: bool,
+    /// A running wake is replaying into this turn; live events defer until replay finishes.
+    replaying: bool,
+    replay_deferred: Vec<(String, Value)>,
 }
 
 #[derive(Clone)]
@@ -195,6 +204,7 @@ struct V2Inner {
 
 /// A background subagent whose launch returned while it still runs (upstream's background
 /// `SubagentCall`). Its item stays running until its report settles it.
+#[derive(Clone)]
 struct OpenSubagent {
     /// The session that launched the call. A Stop of this session stops the call.
     parent_session: String,
@@ -464,6 +474,37 @@ impl OpenCodeV2Session {
                 }
             }
         }
+        let lost: Vec<OpenSubagent> = {
+            let mut guard = self.inner.lock();
+            let lost: Vec<OpenSubagent> = guard
+                .background
+                .iter()
+                .filter(|(child, _)| !active.contains_key(*child))
+                .map(|(_, open)| open.clone())
+                .collect();
+            for open in &lost {
+                guard.background.remove(&open.child_session);
+                guard.background_calls.remove(&open.native_item_id);
+            }
+            for session_id in guard.threads.keys().cloned().collect::<Vec<_>>() {
+                if let Some(wakes) = guard.wakes.remove(&session_id) {
+                    for wake in wakes {
+                        wake.dropped.store(true, Ordering::SeqCst);
+                    }
+                }
+                guard.reports.remove(&session_id);
+            }
+            lost
+        };
+        for open in lost {
+            for event in self.settle_background(
+                open,
+                OrchestrationV2TurnItemStatus::Interrupted,
+                Some(LOST_BACKGROUND.to_owned()),
+            ) {
+                self.emit(event);
+            }
+        }
         Ok(())
     }
 
@@ -519,6 +560,11 @@ impl OpenCodeV2Session {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::adapter) async fn test_fail_stream(&self, message: &str) {
+        self.fail_stream(message).await;
+    }
+
     async fn fail_stream(&self, message: &str) {
         let mut guard = self.inner.lock();
         guard.stream_dead = Some(message.to_owned());
@@ -538,6 +584,17 @@ impl OpenCodeV2Session {
                 terminals.push(id);
             }
         }
+        let backgrounds: Vec<OpenSubagent> =
+            guard.background.drain().map(|(_, open)| open).collect();
+        guard.background_calls.clear();
+        let child_turns: Vec<String> = guard.child_turns.keys().cloned().collect();
+        for wakes in guard.wakes.values() {
+            for wake in wakes {
+                wake.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+        guard.wakes.clear();
+        guard.reports.clear();
         drop(guard);
         self.emit(ProviderAdapterV2Event::ProviderSessionUpdated {
             driver: self.driver.clone(),
@@ -550,6 +607,19 @@ impl OpenCodeV2Session {
                 &id,
                 ProviderAdapterV2TurnTerminalStatus::Failed,
                 Some(message.to_owned()),
+            );
+        }
+        for open in backgrounds {
+            for event in self.settle_background(open, OrchestrationV2TurnItemStatus::Failed, None) {
+                self.emit(event);
+            }
+        }
+        for child in child_turns {
+            let mut guard = self.inner.lock();
+            self.finish_child_turn(
+                &mut guard,
+                &child,
+                ProviderAdapterV2TurnTerminalStatus::Failed,
             );
         }
     }
@@ -581,6 +651,23 @@ impl OpenCodeV2Session {
 
     fn on_event(&self, event_type: &str, data: &Value) {
         let session_id = str_field(data, "sessionID");
+        if let Some(session_id) = &session_id {
+            let mut guard = self.inner.lock();
+            if guard
+                .threads
+                .get(session_id)
+                .is_some_and(|thread| thread.replaying)
+            {
+                guard
+                    .threads
+                    .get_mut(session_id)
+                    .expect("thread exists")
+                    .replay_deferred
+                    .push((event_type.to_owned(), data.clone()));
+                return;
+            }
+            drop(guard);
+        }
         if let Some(session_id) = &session_id
             && self.child_execution(session_id, event_type)
         {
@@ -610,7 +697,7 @@ impl OpenCodeV2Session {
             }
             "session.created" => {
                 let parent = str_field(data, "parentID");
-                let id = str_field(data, "id");
+                let id = str_field(data, "sessionID").or_else(|| str_field(data, "id"));
                 if let (Some(id), Some(parent)) = (id, parent) {
                     self.link_child(&id, &parent);
                 }
@@ -939,22 +1026,58 @@ impl OpenCodeV2Session {
             let Some(turn) = turn else {
                 return;
             };
-            let status_name = state
-                .get("status")
-                .or_else(|| state.pointer("/state/status"))
-                .or_else(|| state.pointer("/metadata/status"))
-                .or_else(|| state.pointer("/state/metadata/status"))
-                .and_then(Value::as_str);
-            let status = match status_name {
-                Some("completed" | "success") => OrchestrationV2TurnItemStatus::Completed,
-                Some("error" | "failed") => OrchestrationV2TurnItemStatus::Failed,
-                Some("running") => OrchestrationV2TurnItemStatus::Running,
-                _ => match event_type {
-                    "session.tool.success" => OrchestrationV2TurnItemStatus::Completed,
-                    "session.tool.failed" => OrchestrationV2TurnItemStatus::Failed,
-                    _ => OrchestrationV2TurnItemStatus::Running,
-                },
+            let is_subagent = name == "task" || name == "subagent";
+            let status_name = if is_subagent {
+                state
+                    .get("status")
+                    .or_else(|| state.pointer("/state/status"))
+                    .or_else(|| state.pointer("/metadata/status"))
+                    .or_else(|| state.pointer("/state/metadata/status"))
+                    .and_then(Value::as_str)
+            } else {
+                None
             };
+            let aborted = event_type == "session.tool.failed"
+                && state.pointer("/error/type").and_then(Value::as_str) == Some("aborted");
+            let status = if is_subagent {
+                match status_name {
+                    Some("completed" | "success") => OrchestrationV2TurnItemStatus::Completed,
+                    Some("error" | "failed") => OrchestrationV2TurnItemStatus::Failed,
+                    Some("running") => OrchestrationV2TurnItemStatus::Running,
+                    _ => match event_type {
+                        "session.tool.success" => OrchestrationV2TurnItemStatus::Completed,
+                        "session.tool.failed" => OrchestrationV2TurnItemStatus::Failed,
+                        _ => OrchestrationV2TurnItemStatus::Running,
+                    },
+                }
+            } else {
+                match event_type {
+                    "session.tool.success" => OrchestrationV2TurnItemStatus::Completed,
+                    "session.tool.failed" => {
+                        if aborted {
+                            OrchestrationV2TurnItemStatus::Interrupted
+                        } else {
+                            OrchestrationV2TurnItemStatus::Failed
+                        }
+                    }
+                    _ => OrchestrationV2TurnItemStatus::Running,
+                }
+            };
+            let background_launch = is_subagent
+                && (state
+                    .get("input")
+                    .or_else(|| state.pointer("/state/input"))
+                    .and_then(|input| input.get("background"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                    || (event_type == "session.tool.success"
+                        && state.pointer("/metadata/status").and_then(Value::as_str)
+                            == Some("running")));
+            if status == OrchestrationV2TurnItemStatus::Running || background_launch {
+                turn.open_tools.insert(call_id.to_owned());
+            } else {
+                turn.open_tools.remove(call_id);
+            }
             if status != OrchestrationV2TurnItemStatus::Running {
                 inner.tool_names.remove(call_id);
             }
@@ -962,7 +1085,9 @@ impl OpenCodeV2Session {
             let started_at = *turn.tool_started.entry(call_id.to_owned()).or_insert(now);
             let completed_at = matches!(
                 status,
-                OrchestrationV2TurnItemStatus::Completed | OrchestrationV2TurnItemStatus::Failed
+                OrchestrationV2TurnItemStatus::Completed
+                    | OrchestrationV2TurnItemStatus::Failed
+                    | OrchestrationV2TurnItemStatus::Interrupted
             )
             .then_some(now);
             let thread_id = turn.thread_id.clone();
@@ -1325,27 +1450,60 @@ impl OpenCodeV2Session {
             return false;
         }
         let mut guard = self.inner.lock();
-        let Some(thread) = guard.threads.get(session_id) else {
-            return false;
+        let holder_session = if guard.threads.contains_key(session_id) {
+            let thread = guard.threads.get(session_id).expect("session in threads");
+            if thread.active.is_some() || thread.replaying {
+                return false;
+            }
+            if guard
+                .wakes
+                .get(session_id)
+                .and_then(|wakes| wakes.last())
+                .is_some_and(|wake| wake.running)
+            {
+                Some(session_id.to_owned())
+            } else {
+                None
+            }
+        } else if let Some(parent) =
+            str_field(data, "parentID").or_else(|| guard.children.get(session_id).cloned())
+        {
+            if guard
+                .threads
+                .get(&parent)
+                .is_some_and(|thread| thread.active.is_some() || thread.replaying)
+            {
+                return false;
+            }
+            if guard
+                .wakes
+                .get(&parent)
+                .is_some_and(|wakes| !wakes.is_empty())
+            {
+                Some(parent)
+            } else {
+                None
+            }
+        } else {
+            None
         };
-        if thread.active.is_some() {
-            return false;
-        }
-        let route = thread.provider_thread.app_thread_id.clone();
-        let provider_thread_id = thread.provider_thread.id.clone();
-        // Only the newest wake holds events, and only while its execution runs.
-        if let Some(held) = guard
-            .wakes
-            .get_mut(session_id)
-            .and_then(|wakes| wakes.last_mut())
-            && held.running
+        if let Some(holder_session) = holder_session
+            && let Some(held) = guard
+                .wakes
+                .get_mut(&holder_session)
+                .and_then(|wakes| wakes.last_mut())
         {
             held.events.push((event_type.to_owned(), data.clone()));
-            if is_execution_end(event_type) {
+            if holder_session == session_id && is_execution_end(event_type) {
                 held.running = false;
             }
             return true;
         }
+        let Some(thread) = guard.threads.get(session_id) else {
+            return false;
+        };
+        let route = thread.provider_thread.app_thread_id.clone();
+        let provider_thread_id = thread.provider_thread.id.clone();
         if event_type != "session.execution.started" {
             return false;
         }
@@ -1470,6 +1628,7 @@ impl OpenCodeV2Session {
             ),
             None => (metadata("description").map(str::to_owned), None),
         };
+        let stopped = guard.stopped_children.contains(child);
         // The report is the end of a background subagent: its item settles with it.
         let settled = guard.background.remove(child);
         if let Some(open) = &settled {
@@ -1489,12 +1648,24 @@ impl OpenCodeV2Session {
             });
         drop(guard);
         if let Some(open) = settled {
-            let status = match outcome {
-                OrchestrationV2NotificationOutcome::Failed => OrchestrationV2TurnItemStatus::Failed,
-                OrchestrationV2NotificationOutcome::Cancelled => {
-                    OrchestrationV2TurnItemStatus::Cancelled
+            let status = if stopped
+                || self
+                    .inner
+                    .lock()
+                    .stopped_children
+                    .contains(&open.child_session)
+            {
+                OrchestrationV2TurnItemStatus::Interrupted
+            } else {
+                match outcome {
+                    OrchestrationV2NotificationOutcome::Failed => {
+                        OrchestrationV2TurnItemStatus::Failed
+                    }
+                    OrchestrationV2NotificationOutcome::Cancelled => {
+                        OrchestrationV2TurnItemStatus::Cancelled
+                    }
+                    _ => OrchestrationV2TurnItemStatus::Completed,
                 }
-                _ => OrchestrationV2TurnItemStatus::Completed,
             };
             for event in self.settle_background(open, status, Some(subagent_output(text))) {
                 self.emit(event);
@@ -1698,6 +1869,7 @@ impl OpenCodeV2Session {
                 next_item_ordinal: 1,
                 text_blocks: HashMap::new(),
                 tool_started: HashMap::new(),
+                open_tools: HashSet::new(),
                 compaction: None,
                 compactions: 0,
                 app_thread: child_app_thread,
@@ -2026,21 +2198,36 @@ impl OpenCodeV2Session {
     /// answered (upstream `abandonRequest`). The stopped run is interrupted, so it is not the
     /// next turn's.
     fn abandon_request(&self, guard: &mut V2Inner, session_id: &str) {
-        if !guard
+        if guard
             .threads
             .get(session_id)
             .is_some_and(|thread| thread.active.is_some())
         {
+            if let Some(thread) = guard.threads.get_mut(session_id) {
+                thread.unsettled = true;
+            }
+            self.finish(
+                guard,
+                session_id,
+                ProviderAdapterV2TurnTerminalStatus::Failed,
+                Some(REQUEST_ABANDONED.to_owned()),
+            );
+            let client = self.client.clone();
+            let session = session_id.to_owned();
+            tokio::spawn(async move {
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(2), client.interrupt(&session, None))
+                        .await;
+            });
             return;
         }
-        if let Some(thread) = guard.threads.get_mut(session_id) {
-            thread.unsettled = true;
+        if !guard.child_turns.contains_key(session_id) {
+            return;
         }
-        self.finish(
+        self.finish_child_turn(
             guard,
             session_id,
             ProviderAdapterV2TurnTerminalStatus::Failed,
-            Some(REQUEST_ABANDONED.to_owned()),
         );
         let client = self.client.clone();
         let session = session_id.to_owned();
@@ -2101,6 +2288,7 @@ impl OpenCodeV2Session {
     ) {
         // `finishTurn`: OpenCode drops a request its session asked when the execution
         // ends, so the request cancels with the turn.
+        let terminal_failed = matches!(status, ProviderAdapterV2TurnTerminalStatus::Failed);
         if guard
             .threads
             .get(session_id)
@@ -2110,11 +2298,17 @@ impl OpenCodeV2Session {
                 .pending
                 .iter()
                 .filter(|(_, pending)| {
-                    pending.session_id == session_id
-                        || guard
-                            .children
-                            .get(&pending.session_id)
-                            .is_some_and(|owner| owner == session_id)
+                    if pending.session_id == session_id {
+                        return true;
+                    }
+                    guard
+                        .children
+                        .get(&pending.session_id)
+                        .is_some_and(|owner| {
+                            owner == session_id
+                                && !(guard.background.contains_key(&pending.session_id)
+                                    && !terminal_failed)
+                        })
                 })
                 .map(|(native, _)| native.clone())
                 .collect();
@@ -2143,6 +2337,100 @@ impl OpenCodeV2Session {
         }
         turn.finalized = true;
         thread.unsettled = false;
+        let mut close_events = Vec::new();
+        let item_status = match status {
+            ProviderAdapterV2TurnTerminalStatus::Completed => {
+                OrchestrationV2TurnItemStatus::Completed
+            }
+            ProviderAdapterV2TurnTerminalStatus::Failed => OrchestrationV2TurnItemStatus::Failed,
+            _ => OrchestrationV2TurnItemStatus::Interrupted,
+        };
+        let tool_status = match status {
+            ProviderAdapterV2TurnTerminalStatus::Completed => {
+                OrchestrationV2TurnItemStatus::Completed
+            }
+            _ => OrchestrationV2TurnItemStatus::Interrupted,
+        };
+        let now_close = UtcDateTime::now();
+        let open_text: Vec<(String, TextBlockState)> = turn.text_blocks.drain().collect();
+        for (native, block) in open_text {
+            let reasoning = native.contains(":reasoning:");
+            self.block_events(
+                &mut turn,
+                &native,
+                reasoning,
+                &block.text,
+                true,
+                block.started_at,
+                now_close,
+                &mut close_events,
+            );
+        }
+        let open_calls: Vec<String> = turn.open_tools.drain().collect();
+        for call_id in open_calls {
+            let name = guard
+                .tool_names
+                .get(&call_id)
+                .cloned()
+                .unwrap_or_else(|| "tool".to_owned());
+            if name == "task" || name == "subagent" {
+                let child_session = guard.background.iter().find_map(|(child, open)| {
+                    (open.native_item_id == call_id).then_some(child.clone())
+                });
+                if let Some(child_session) = child_session {
+                    if !terminal_failed && guard.background.contains_key(&child_session) {
+                        continue;
+                    }
+                    if let Some(open) = guard.background.remove(&child_session) {
+                        guard.background_calls.remove(&call_id);
+                        close_events.extend(self.settle_background(open, item_status, None));
+                    }
+                }
+                continue;
+            }
+            let started_at = turn
+                .tool_started
+                .get(&call_id)
+                .copied()
+                .unwrap_or(now_close);
+            let thread_id = turn.thread_id.clone();
+            let root_node_id = turn.provider_turn.node_id.clone();
+            let provider_thread_id = turn.provider_turn.provider_thread_id.clone();
+            let provider_turn_id = turn.provider_turn.id.clone();
+            let of = NodeOf {
+                thread_id: &thread_id,
+                root_node_id: &root_node_id,
+                provider_thread_id: &provider_thread_id,
+                provider_turn_id: &provider_turn_id,
+                native_item_id: &call_id,
+                weak_ref: false,
+            };
+            close_events.push(ProviderAdapterV2Event::NodeUpdated {
+                driver: self.driver.clone(),
+                node: execution_node(
+                    &self.driver,
+                    &of,
+                    NodeTiming {
+                        kind: OrchestrationV2ExecutionNodeKind::ToolCall,
+                        status: node_status_of(tool_status),
+                        started_at,
+                        completed_at: Some(now_close),
+                    },
+                ),
+            });
+            let base = tool_base(
+                &mut turn,
+                &self.driver,
+                &call_id,
+                tool_status,
+                started_at,
+                Some(now_close),
+            );
+            close_events.push(ProviderAdapterV2Event::TurnItemUpdated {
+                driver: self.driver.clone(),
+                turn_item: open_code_tool_turn_item(base, &name, &json!({}), None, None),
+            });
+        }
         turn.provider_turn.status = match status {
             ProviderAdapterV2TurnTerminalStatus::Completed => {
                 OrchestrationV2ProviderTurnStatus::Completed
@@ -2212,6 +2500,9 @@ impl OpenCodeV2Session {
         thread.provider_thread.updated_at = UtcDateTime::now();
         let provider_thread = thread.provider_thread.clone();
         let driver = self.driver.clone();
+        for event in close_events {
+            self.emit(event);
+        }
         self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
             driver: driver.clone(),
             thread_id: Some(thread_id),
@@ -2394,6 +2685,8 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 grants: Vec::new(),
                 instructions: None,
                 unsettled: false,
+                replaying: false,
+                replay_deferred: Vec::new(),
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
@@ -2486,6 +2779,8 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 grants: Vec::new(),
                 instructions: None,
                 unsettled: false,
+                replaying: false,
+                replay_deferred: Vec::new(),
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
@@ -2649,7 +2944,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
             token_usage: None,
             turn_token_usage: None,
         };
-        {
+        let running_wake = {
             let mut guard = self.inner.lock();
             let thread = guard.threads.get_mut(&session_id).ok_or_else(|| {
                 ProviderAdapterV2Error::protocol(format!(
@@ -2669,12 +2964,21 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 item_ordinals: HashMap::new(),
                 text_blocks: HashMap::new(),
                 tool_started: HashMap::new(),
+                open_tools: HashSet::new(),
                 compaction: None,
                 compactions: 0,
                 app_thread: input.app_thread.clone(),
                 before: None,
             });
-        }
+            if is_continuation(&input) {
+                None
+            } else {
+                match guard.wakes.get_mut(&session_id) {
+                    Some(wakes) if wakes.last().is_some_and(|wake| wake.running) => wakes.pop(),
+                    _ => None,
+                }
+            }
+        };
         self.emit(ProviderAdapterV2Event::ProviderTurnUpdated {
             driver: self.driver.clone(),
             thread_id: Some(input.thread_id.clone()),
@@ -2684,7 +2988,7 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
         // with no wake to drain it finishes without a submit (upstream `runWake`).
         if is_continuation(&input) {
             match self.drain_wake(&session_id, &input.message.message_id) {
-                Some(wake) => self.replay(&wake),
+                Some(wake) => self.replay_wake_into_turn(&session_id, &wake),
                 None => {
                     let mut guard = self.inner.lock();
                     self.finish(
@@ -2709,16 +3013,8 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
         }
         // A prompt joins the execution OpenCode is running on its own, so the turn takes that
         // wake and replays what it parked (upstream `takeRunningWake`).
-        let running = {
-            let mut guard = self.inner.lock();
-            let held = guard.wakes.get_mut(&session_id);
-            match held {
-                Some(wakes) if wakes.last().is_some_and(|wake| wake.running) => wakes.pop(),
-                _ => None,
-            }
-        };
-        if let Some(wake) = running {
-            self.replay(&wake);
+        if let Some(wake) = running_wake {
+            self.replay_wake_into_turn(&session_id, &wake);
         }
         let text =
             turin_provider_core::attachment_prompt::provider_message_text_with_attachment_paths(
@@ -3106,6 +3402,8 @@ impl ProviderSessionRuntime for OpenCodeV2Session {
                 grants: Vec::new(),
                 instructions: None,
                 unsettled: false,
+                replaying: false,
+                replay_deferred: Vec::new(),
                 active: None,
                 turns: Vec::new(),
                 requests: Vec::new(),
@@ -3233,8 +3531,31 @@ impl OpenCodeV2Session {
 impl OpenCodeV2Session {
     /// The parked events of a wake, replayed into the turn that took it.
     fn replay(&self, wake: &Wake) {
+        wake.dropped.store(true, Ordering::SeqCst);
         for (event_type, data) in &wake.events {
             self.on_event(event_type, data);
+        }
+    }
+
+    /// Replays a wake under `replaying`, then drains events that arrived mid-replay.
+    fn replay_wake_into_turn(&self, session_id: &str, wake: &Wake) {
+        {
+            let mut guard = self.inner.lock();
+            if let Some(thread) = guard.threads.get_mut(session_id) {
+                thread.replaying = true;
+            }
+        }
+        self.replay(wake);
+        let deferred = {
+            let mut guard = self.inner.lock();
+            let Some(thread) = guard.threads.get_mut(session_id) else {
+                return;
+            };
+            thread.replaying = false;
+            std::mem::take(&mut thread.replay_deferred)
+        };
+        for (event_type, data) in deferred {
+            self.on_event(&event_type, &data);
         }
     }
 
@@ -3273,10 +3594,14 @@ impl OpenCodeV2Session {
             .collect();
         for child in children {
             self.inner.lock().stopped_children.insert(child.clone());
-            let reached = matches!(
-                tokio::time::timeout(INTERRUPT_TIMEOUT, self.client.interrupt(&child, None)).await,
-                Ok(Ok(_))
-            );
+            let reached =
+                match tokio::time::timeout(INTERRUPT_TIMEOUT, self.client.interrupt(&child, None))
+                    .await
+                {
+                    Ok(Ok(_)) => true,
+                    Ok(Err(err)) if err.detail.contains("SessionNotFoundError") => true,
+                    _ => false,
+                };
             if !reached {
                 continue;
             }

@@ -86,6 +86,8 @@ pub struct PullRequestListSnapshot {
     pub projects_known: bool,
     /// Whether the servers advertise pull requests at all.
     pub supported: bool,
+    /// Whether the viewer may act on listed rows (`pullRequestEnvironment.runAction.permissionAtom`).
+    pub can_write: bool,
 }
 
 impl Default for PullRequestListSnapshot {
@@ -98,6 +100,7 @@ impl Default for PullRequestListSnapshot {
             projects: Vec::new(),
             projects_known: false,
             supported: true,
+            can_write: true,
         }
     }
 }

@@ -66,10 +66,11 @@ use super::pull_request_presentation::{
 };
 use super::summary_tab::{SummaryTab, SummaryTabEvent};
 use super::timeline_tab::TimelineTab;
+use super::toast::{ToastKind, ToastQueue, render_toasts};
 use super::view_model::{Loadable, PullRequestStore, pull_request_key};
 use crate::state::helpers::source_control_clients::SOURCE_CONTROL_CLIENTS;
 use crate::theme::ActiveAppTheme;
-use crate::theme::tokens::{RADIUS_LG, TEXT_BASE, TEXT_SM, TEXT_XS, shadow_md};
+use crate::theme::tokens::{TEXT_BASE, TEXT_XS};
 use crate::ui::{
     Badge, BadgeSize, BadgeVariant, Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip,
 };
@@ -382,21 +383,6 @@ impl HeaderState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToastKind {
-    Success,
-    Error,
-}
-
-struct Toast {
-    id: u64,
-    kind: ToastKind,
-    title: SharedString,
-    description: Option<SharedString>,
-}
-
-/// How long a toast stays (the app's `toastManager` default is five seconds).
-const TOAST_FOR: Duration = Duration::from_secs(5);
 /// `window.setTimeout(disarm, 3000)` of `useInlineActionConfirm`.
 const CONFIRM_FOR: Duration = Duration::from_secs(3);
 
@@ -435,8 +421,7 @@ pub struct PullRequestDetailPanel {
     last_merge_method: PullRequestMergeMethod,
     title_edit: Option<Entity<InputState>>,
     title_saving: bool,
-    toasts: Vec<Toast>,
-    next_toast: u64,
+    toasts: ToastQueue,
     seen_error: Option<String>,
     /// The action last sent, so a failure can be said in its own words.
     last_action: Option<(PullRequestAction, Option<PullRequestUpdateMethod>)>,
@@ -520,8 +505,7 @@ impl PullRequestDetailPanel {
             last_merge_method: PullRequestMergeMethod::Merge,
             title_edit: None,
             title_saving: false,
-            toasts: Vec::new(),
-            next_toast: 0,
+            toasts: ToastQueue::default(),
             seen_error: None,
             last_action: None,
             _subscriptions: subscriptions,
@@ -645,26 +629,8 @@ impl PullRequestDetailPanel {
         description: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let id = self.next_toast;
-        self.next_toast += 1;
-        self.toasts.push(Toast {
-            id,
-            kind,
-            title: title.into(),
-            description: description.map(Into::into),
-        });
-        let panel = cx.entity().downgrade();
-        cx.spawn(async move |_, cx| {
-            cx.background_executor().timer(TOAST_FOR).await;
-            panel
-                .update(cx, |panel, cx| {
-                    panel.toasts.retain(|toast| toast.id != id);
-                    cx.notify();
-                })
-                .ok();
-        })
-        .detach();
-        cx.notify();
+        self.toasts
+            .push(cx, |panel| &mut panel.toasts, kind, title, description);
     }
 
     fn scope_key(&self) -> String {
@@ -858,67 +824,6 @@ fn header_icon_button(id: &'static str, icon: IconName, label: &'static str) -> 
         .variant(ButtonVariant::GhostMuted)
         .icon(icon)
         .tooltip(Tooltip::new(label))
-}
-
-impl PullRequestDetailPanel {
-    fn render_toasts(&self, cx: &App) -> Option<AnyElement> {
-        if self.toasts.is_empty() {
-            return None;
-        }
-        let theme = cx.app_theme();
-        Some(
-            div()
-                .absolute()
-                .bottom(rems(0.75))
-                .left(rems(1.))
-                .right(rems(1.))
-                .flex()
-                .flex_col()
-                .gap_2()
-                .children(self.toasts.iter().map(|toast| {
-                    let (icon, color) = match toast.kind {
-                        ToastKind::Success => (
-                            IconName::CircleCheck,
-                            tone_color("text-emerald-600 dark:text-emerald-300/90", theme),
-                        ),
-                        ToastKind::Error => (IconName::CircleAlert, theme.destructive),
-                    };
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .rounded(RADIUS_LG)
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.popover)
-                        .shadow(shadow_md(0.05))
-                        .px_3()
-                        .py_2()
-                        .child(Icon::new(icon).size(rems(1.)).color(color))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .min_w_0()
-                                .gap(px(2.))
-                                .child(
-                                    div()
-                                        .text_size(TEXT_SM.size)
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.foreground)
-                                        .child(toast.title.clone()),
-                                )
-                                .children(toast.description.clone().map(|description| {
-                                    div()
-                                        .text_size(TEXT_XS.size)
-                                        .text_color(theme.muted_foreground)
-                                        .child(description)
-                                })),
-                        )
-                }))
-                .into_any_element(),
-        )
-    }
 }
 
 impl Render for PullRequestDetailPanel {
@@ -1493,7 +1398,7 @@ impl PullRequestDetailPanel {
                             .child(self.composer.clone()),
                     ),
             )
-            .children(self.render_toasts(cx))
+            .children(render_toasts(&self.toasts, cx))
             .into_any_element()
     }
 

@@ -6,43 +6,61 @@
 //! page. Rows come from the [`PullRequestStore`]; the narrowing, grouping and sorting are
 //! upstream's pure functions applied in the route's order.
 //!
-//! Not ported: the condensed topbar that replaces the controls once they scroll away, speed mode
-//! and the close sweep, line-count (stats) lazy reads, optimistic overrides, the right-panel
-//! surface store (the host of this page opens the detail panel on [`PullRequestsPageEvent::Select`]).
+//! Speed mode (hold shift) offers the row actions of `PullRequestSpeedActions`; Close can be
+//! dragged down the list to close a run of rows (`list_close_sweep`). What an action did shows on
+//! its row at once (`overrides`) until a read of the list agrees.
+//!
+//! Not ported: the condensed topbar that replaces the controls once they scroll away, line-count
+//! (stats) lazy reads, the right-panel surface store (the host of this page opens the detail
+//! panel on [`PullRequestsPageEvent::Select`]).
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
-    px, rems,
+    Anchor, App, AppContext as _, Context, DispatchPhase, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, Window, canvas, div, px, rems,
 };
+use indexmap::IndexMap;
 use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::{
-    PullRequestInvolvement, PullRequestListFilters, PullRequestListState, PullRequestRef,
+    PullRequestAction, PullRequestInvolvement, PullRequestListFilters, PullRequestListState,
+    PullRequestRef, PullRequestState,
 };
 
+use super::action_runner::{
+    MergeMethodSettings, PullRequestActionRunner, PullRequestActionRunnerEvent, entry_key,
+};
+use super::list_close_sweep::CloseSweep;
 use super::list_filters::{
     FilterOption, FiltersMenuInput, OnScopeChange, ScopeChange, compact_filter_menu, filters_menu,
     involvement_tabs, sort_options, state_tabs,
 };
-use super::list_row::PullRequestRow;
+use super::list_row::{PullRequestRow, RowBounds, RowSpeed};
 use super::list_states::{
     PullRequestListEmptyState, PullRequestsUnavailableState, group_header, list_ghost,
 };
 use super::presentation_view::Spinner;
 use super::pull_request_list_logic::{
-    EnvironmentPullRequestEntry, PullRequestGroup, collect_pull_request_list_facets,
+    EnvironmentPullRequestEntry, PullRequestGroup, PullRequestListOverride,
+    apply_pull_request_overrides, collect_pull_request_list_facets,
     filter_pull_requests_by_involvement, group_pull_requests_by_involvement,
     matches_pull_request_filters, matches_pull_request_query, parse_pull_request_query,
-    pull_request_entry_key, pull_request_entry_viewer, rank_pull_request_matches,
-    score_pull_request_match, sort_pull_request_groups,
+    pull_request_entry_key, pull_request_entry_key_of, pull_request_entry_viewer,
+    pull_request_host_actions, pull_request_override_after_action, rank_pull_request_matches,
+    score_pull_request_match, settle_pull_request_overrides, sort_pull_request_groups,
 };
 use super::pull_request_list_preferences::{PullRequestListPreferences, PullRequestListSort};
+use super::toast::render_toasts;
 use super::view_model::PullRequestStore;
 use crate::components::drag_region::DragRegion as _;
+use crate::components::sidebar::sidebar_logic::sidebar_thread_key_at_y;
+use crate::components::sidebar::sidebar_pointer::Point as PointerPoint;
 use crate::components::workspace_breadcrumb::{WorkspaceBreadcrumb, WorkspaceBreadcrumbItem};
 use crate::components::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
@@ -70,10 +88,31 @@ pub struct PullRequestsPage {
     sidebar_open: bool,
     /// Width of the list column, for the row's label slots.
     column_width: f32,
+    /// `speedMode`: shift held on its own.
+    speed_mode: bool,
+    runner: Entity<PullRequestActionRunner>,
+    /// What the reader just did to a row, shown before any host confirms it.
+    overrides: IndexMap<String, PullRequestListOverride>,
+    override_token: u64,
+    /// Where each row last laid out, for the close sweep.
+    row_bounds: RowBounds,
+    sweep: Option<CloseSweep>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<PullRequestsPageEvent> for PullRequestsPage {}
+
+/// A window-level pointer event forwarded to the live close sweep.
+enum SweepPointer {
+    Moved {
+        position: PointerPoint,
+        primary: bool,
+    },
+    Released {
+        position: PointerPoint,
+    },
+    Cancelled,
+}
 
 impl PullRequestsPage {
     pub fn new(
@@ -84,8 +123,19 @@ impl PullRequestsPage {
         let search = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search pull requests, or label:bug")
         });
+        let runner = cx.new(|cx| {
+            PullRequestActionRunner::new(store.clone(), MergeMethodSettings::default(), cx)
+        });
         let subscriptions = vec![
-            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&store, |this, _, cx| {
+                this.settle_overrides(cx);
+                cx.notify();
+            }),
+            cx.observe(&runner, |_, _, cx| cx.notify()),
+            cx.subscribe(&runner, |this, _, event, cx| {
+                let PullRequestActionRunnerEvent::Acted { entry, action } = event;
+                this.acted(entry, *action, cx);
+            }),
             cx.subscribe_in(&search, window, |this, state, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     let text = state.read(cx).value().to_string();
@@ -101,6 +151,12 @@ impl PullRequestsPage {
             selected_key: None,
             sidebar_open: true,
             column_width: 720.,
+            speed_mode: false,
+            runner,
+            overrides: IndexMap::new(),
+            override_token: 0,
+            row_bounds: Rc::new(RefCell::new(HashMap::new())),
+            sweep: None,
             _subscriptions: subscriptions,
         }
     }
@@ -158,6 +214,257 @@ impl PullRequestsPage {
             reference,
         });
         cx.notify();
+    }
+
+    /// `speedActionRef.current`: writes the outcome of an accepted action onto its row.
+    fn acted(
+        &mut self,
+        entry: &EnvironmentPullRequestEntry,
+        action: PullRequestAction,
+        cx: &mut Context<Self>,
+    ) {
+        // Some hosts accept a merge before it completes. Let the next host read declare it merged.
+        if action == PullRequestAction::Merge {
+            return;
+        }
+        self.override_token += 1;
+        if let Some(applied) = pull_request_override_after_action(
+            &entry.entry,
+            action,
+            crate::timestamp_format::now_ms(),
+            self.override_token,
+        ) {
+            self.overrides.insert(entry_key(entry), applied);
+            cx.notify();
+        }
+    }
+
+    /// The host's word outranks the reader's, once it has actually said it: an override is cleared
+    /// by an answer that agrees with it, not by any answer that happens to land.
+    fn settle_overrides(&mut self, cx: &App) {
+        if self.overrides.is_empty() {
+            return;
+        }
+        let store = self.store.read(cx);
+        self.overrides = settle_pull_request_overrides(
+            &self.overrides,
+            store.entries(),
+            pull_request_entry_key_of,
+            crate::timestamp_format::now_ms(),
+        );
+    }
+
+    /// `modifiers.shiftKey && !metaKey && !ctrlKey && !altKey`.
+    pub fn set_modifiers(&mut self, modifiers: &gpui_kit::Modifiers, cx: &mut Context<Self>) {
+        let speed = modifiers.shift && !modifiers.platform && !modifiers.control && !modifiers.alt;
+        if speed != self.speed_mode {
+            self.speed_mode = speed;
+            cx.notify();
+        }
+    }
+
+    pub fn speed_mode(&self) -> bool {
+        self.speed_mode
+    }
+
+    /// `startCloseSweep`: a press on a row's Close in speed mode.
+    fn start_close_sweep(
+        &mut self,
+        entry: &EnvironmentPullRequestEntry,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let origin_key = entry_key(entry);
+        if self.runner.read(cx).closing(&origin_key) {
+            return;
+        }
+        let (groups, _) = self.display_groups(cx);
+        let Some(group) = groups
+            .iter()
+            .find(|group| group.entries.iter().any(|row| entry_key(row) == origin_key))
+        else {
+            return;
+        };
+        let host_actions_of = self.host_actions_of(cx);
+        let runner = self.runner.read(cx);
+        let closable: HashSet<String> = group
+            .entries
+            .iter()
+            .filter(|row| {
+                let key = entry_key(row);
+                row.state == PullRequestState::Open
+                    && host_actions_of(&row.entry).contains(&PullRequestAction::Close)
+                    && !runner.closing(&key)
+                    && !runner.action_pending(&key)
+            })
+            .map(entry_key)
+            .collect();
+        let ordered_keys: Vec<String> = groups
+            .iter()
+            .flat_map(|group| group.entries.iter().map(entry_key))
+            .collect();
+        self.sweep = Some(CloseSweep::new(
+            origin_key,
+            PointerPoint::new(f32::from(event.position.x), f32::from(event.position.y)),
+            ordered_keys,
+            closable,
+        ));
+        cx.notify();
+    }
+
+    fn host_actions_of(
+        &self,
+        cx: &App,
+    ) -> impl Fn(&turin_contracts::pull_request::PullRequestListEntry) -> HashSet<PullRequestAction>
+    + use<> {
+        let providers = self
+            .store
+            .read(cx)
+            .list()
+            .merged
+            .as_ref()
+            .map(|merged| merged.providers.clone())
+            .unwrap_or_default();
+        pull_request_host_actions(&providers)
+    }
+
+    /// The tops of the rows laid out, in list order (`[data-pull-request-key]` rects).
+    fn row_tops(&self, sweep_order: &[String]) -> Vec<(String, f32)> {
+        let bounds = self.row_bounds.borrow();
+        sweep_order
+            .iter()
+            .filter_map(|key| {
+                bounds
+                    .get(key)
+                    .map(|bounds| (key.clone(), f32::from(bounds.origin.y)))
+            })
+            .collect()
+    }
+
+    fn sweep_pointer(&mut self, event: SweepPointer, cx: &mut Context<Self>) {
+        let Some(mut sweep) = self.sweep.take() else {
+            return;
+        };
+        if sweep.is_finished() {
+            self.sweep = Some(sweep);
+            return;
+        }
+        let order = self.sweep_order(cx);
+        let rows = self.row_tops(&order);
+        let row_at = |y: f32| sidebar_thread_key_at_y(&rows, y, None);
+        let progress = match event {
+            SweepPointer::Moved { position, primary } => {
+                sweep.pointer_moved(position, primary, row_at)
+            }
+            SweepPointer::Released { position } => sweep.pointer_released(position, row_at),
+            SweepPointer::Cancelled => sweep.cancel(),
+        };
+        // Kept after it ends so the release click can be told from a plain one.
+        self.sweep = Some(sweep);
+        if let Some(batch) = progress.close {
+            let (groups, _) = self.display_groups(cx);
+            let by_key: HashMap<String, EnvironmentPullRequestEntry> = groups
+                .into_iter()
+                .flat_map(|group| group.entries)
+                .map(|entry| (entry_key(&entry), entry))
+                .collect();
+            let entries: Vec<EnvironmentPullRequestEntry> = batch
+                .iter()
+                .filter_map(|key| by_key.get(key).cloned())
+                .collect();
+            self.runner
+                .update(cx, |runner, cx| runner.close_batch(&entries, cx));
+        }
+        if progress.changed || progress.done {
+            cx.notify();
+        }
+    }
+
+    fn sweep_order(&self, cx: &App) -> Vec<String> {
+        let (groups, _) = self.display_groups(cx);
+        groups
+            .iter()
+            .flat_map(|group| group.entries.iter().map(entry_key))
+            .collect()
+    }
+
+    /// The click that follows a sweep's release is the sweep's own.
+    fn consume_sweep_click(&mut self) -> bool {
+        match self.sweep.take() {
+            Some(mut sweep) => {
+                let consumed = sweep.consume_click();
+                if !sweep.is_finished() {
+                    self.sweep = Some(sweep);
+                }
+                consumed
+            }
+            None => false,
+        }
+    }
+
+    /// Window-level pointer and Escape listeners while a sweep is live (upstream: document
+    /// listeners owned by the sensor).
+    fn sweep_listeners(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let live = self
+            .sweep
+            .as_ref()
+            .is_some_and(|sweep| !sweep.is_finished());
+        if !live {
+            return None;
+        }
+        let page = cx.entity().downgrade();
+        Some(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let on_move = page.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture {
+                            return;
+                        }
+                        let position = PointerPoint::new(
+                            f32::from(event.position.x),
+                            f32::from(event.position.y),
+                        );
+                        let primary = event.pressed_button == Some(MouseButton::Left);
+                        on_move
+                            .update(cx, |this, cx| {
+                                this.sweep_pointer(SweepPointer::Moved { position, primary }, cx)
+                            })
+                            .ok();
+                    });
+                    let on_up = page.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                            return;
+                        }
+                        let position = PointerPoint::new(
+                            f32::from(event.position.x),
+                            f32::from(event.position.y),
+                        );
+                        on_up
+                            .update(cx, |this, cx| {
+                                this.sweep_pointer(SweepPointer::Released { position }, cx)
+                            })
+                            .ok();
+                    });
+                    let on_key = page.clone();
+                    window.on_key_event(move |event: &KeyDownEvent, phase, _, cx| {
+                        if phase != DispatchPhase::Capture || event.keystroke.key != "escape" {
+                            return;
+                        }
+                        on_key
+                            .update(cx, |this, cx| {
+                                this.sweep_pointer(SweepPointer::Cancelled, cx)
+                            })
+                            .ok();
+                    });
+                },
+            )
+            .absolute()
+            .size_0()
+            .into_any_element(),
+        )
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
@@ -237,6 +544,36 @@ impl PullRequestsPage {
         } else {
             group_pull_requests_by_involvement(&entries, viewers)
         };
+        // The reader's pending answers go on here, after grouping: a row closed a moment ago has
+        // to leave whichever group it was in. A row whose draft flag just changed has to pass the
+        // local filters again.
+        let groups: Vec<PullRequestGroup<EnvironmentPullRequestEntry>> = groups
+            .into_iter()
+            .map(|group| {
+                let applied = apply_pull_request_overrides(
+                    &group.entries,
+                    &self.overrides,
+                    pull_request_entry_key_of,
+                    self.scope.state,
+                );
+                let entries = if self.overrides.is_empty() {
+                    applied
+                } else {
+                    applied
+                        .into_iter()
+                        .filter(|entry| {
+                            !self.overrides.contains_key(&entry_key(entry))
+                                || matches_pull_request_filters(
+                                    entry,
+                                    &local_filters,
+                                    pull_request_entry_viewer(entry, viewers).as_deref(),
+                                )
+                        })
+                        .collect()
+                };
+                PullRequestGroup { entries, ..group }
+            })
+            .collect();
         let sorted = sort_pull_request_groups(
             &groups,
             self.scope.sort.unwrap_or(PullRequestListSort::Ready),
@@ -513,6 +850,22 @@ impl Render for PullRequestsPage {
                     page.update(cx, |this, cx| this.select(&entry, cx)).ok();
                 })
             };
+            let host_actions_of = self.host_actions_of(cx);
+            let can_write = list.can_write;
+            let speed_mode = self.speed_mode;
+            let runner = self.runner.read(cx);
+            // The row-level state speed mode reads, taken before the rows are built.
+            let busy_rows: HashSet<String> = groups
+                .iter()
+                .flat_map(|group| group.entries.iter())
+                .map(entry_key)
+                .filter(|key| {
+                    runner.action_pending(key)
+                        || runner.closing(key)
+                        || self.sweep.as_ref().is_some_and(|sweep| sweep.contains(key))
+                })
+                .collect();
+            let row_bounds = self.row_bounds.clone();
             div()
                 .flex()
                 .flex_col()
@@ -547,7 +900,47 @@ impl Render for PullRequestsPage {
                                     .ok();
                                 })
                             };
+                            let on_perform: super::speed_actions::PerformAction = {
+                                let page = page.clone();
+                                let entry = entry.clone();
+                                Rc::new(move |action, _, cx| {
+                                    let entry = entry.clone();
+                                    page.update(cx, |this, cx| {
+                                        // A drag from Close ends in a click on it: that click is
+                                        // the sweep's, not a second close of the pressed row.
+                                        if action == PullRequestAction::Close
+                                            && this.consume_sweep_click()
+                                        {
+                                            return;
+                                        }
+                                        this.runner.update(cx, |runner, cx| {
+                                            runner.perform(&entry, action, cx)
+                                        });
+                                    })
+                                    .ok();
+                                })
+                            };
+                            let on_close_sweep_start: super::speed_actions::SweepStart = {
+                                let page = page.clone();
+                                let entry = entry.clone();
+                                Rc::new(move |event, _, cx| {
+                                    let entry = entry.clone();
+                                    page.update(cx, |this, cx| {
+                                        this.start_close_sweep(&entry, event, cx)
+                                    })
+                                    .ok();
+                                })
+                            };
                             PullRequestRow::new(entry.clone(), on_select.clone())
+                                .speed(RowSpeed {
+                                    host_actions: host_actions_of(&entry.entry),
+                                    visible: speed_mode,
+                                    can_write,
+                                    busy: busy_rows.contains(&key),
+                                    on_perform,
+                                    on_close_sweep_start: Some(on_close_sweep_start),
+                                })
+                                .record_bounds(row_bounds.clone())
                                 .stack_popover(self.store.clone(), stack_select)
                                 .selected(selected_key.as_deref() == Some(key.as_str()))
                                 .show_provider(show_provider)
@@ -605,6 +998,8 @@ impl Render for PullRequestsPage {
         };
         let narrow = self.column_width < 512.;
 
+        let toasts = render_toasts(self.runner.read(cx).toasts(), cx);
+        let sweep_listeners = self.sweep_listeners(cx);
         div()
             .relative()
             .flex()
@@ -614,7 +1009,13 @@ impl Render for PullRequestsPage {
             .min_h_0()
             .overflow_hidden()
             .bg(theme.background)
+            .on_modifiers_changed(cx.listener(
+                |this, event: &gpui_kit::ModifiersChangedEvent, _, cx| {
+                    this.set_modifiers(&event.modifiers, cx)
+                },
+            ))
             .child(measure)
+            .children(sweep_listeners)
             .child(
                 div()
                     .id("pr-list-header")
@@ -673,5 +1074,6 @@ impl Render for PullRequestsPage {
                     ),
                 ),
             )
+            .children(toasts)
     }
 }

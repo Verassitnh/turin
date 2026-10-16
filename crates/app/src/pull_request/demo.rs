@@ -4,7 +4,7 @@
 //!
 //! Scenarios (combine with `TURIN_APPEARANCE=light|dark`):
 //! - `list` — the pull request page.
-//! - `list:<preset>` — `all`, `filters`, `empty`, `loading`, `error`.
+//! - `list:<preset>` — `all`, `filters`, `authored`, `speed`, `empty`, `loading`, `error`.
 //! - `detail[:<tab>[:<number>]]` — the page with the detail panel open on `summary`, `timeline`,
 //!   `code` or `guide`.
 
@@ -201,6 +201,16 @@ fn apply_list_preset(
             scope.draft = Some(turin_contracts::pull_request::PullRequestDraftFilter::Hide);
         }
         Some("authored") => scope.involvement = PullRequestInvolvement::Authored,
+        // Shift held: the rows offer their speed actions.
+        Some("speed") => page.update(cx, |page, cx| {
+            page.set_modifiers(
+                &gpui_kit::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+        }),
         Some("empty") => scope.q = Some("zzzz-no-match".into()),
         Some("error") => {
             store.update(cx, |store, cx| {

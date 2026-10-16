@@ -1876,7 +1876,7 @@ impl PullRequestQuickAction {
 /// these on GitHub, so that is what it keeps getting.
 pub fn pull_request_host_actions(
     providers: &[PullRequestProviderSummary],
-) -> impl Fn(&PullRequestListEntry) -> HashSet<PullRequestAction> {
+) -> impl Fn(&PullRequestListEntry) -> HashSet<PullRequestAction> + use<> {
     let by_host: IndexMap<String, HashSet<PullRequestAction>> = providers
         .iter()
         .filter_map(|provider| {

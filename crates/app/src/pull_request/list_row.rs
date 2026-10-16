@@ -5,17 +5,21 @@
 //! number and title with the diff counts on the right; author and whatever else the caller shows
 //! under them with the time on the right. The page row keeps `px-3 py-2.5` around those lines.
 //!
-//! Not ported: speed mode actions (`PullRequestSpeedActions`) and the close sweep, the
-//! `content-visibility` skip (GPUI lists virtualize instead), and the container-query label slots,
-//! which are decided from the width the page hands in (`meta_width`).
+//! Speed mode's buttons ride at the row's end ([`RowSpeed`]); the page owns what they do.
+//!
+//! Not ported: the `content-visibility` skip (GPUI lists virtualize instead), and the
+//! container-query label slots, which are decided from the width the page hands in
+//! (`meta_width`).
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, CursorStyle, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
-    Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
-    rems,
+    AnyElement, App, Bounds, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, div, px, rems,
 };
 
 use super::presentation_view::{
@@ -25,16 +29,34 @@ use super::presentation_view::{
 };
 use super::pull_request_list_logic::{EnvironmentPullRequestEntry, pull_request_entry_key};
 use super::relative_time::format_relative_time_label;
+use super::speed_actions::{PerformAction, PullRequestSpeedActions, SweepStart};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM, TEXT_XS};
 use crate::ui::{BadgeSize, Icon, IconName};
+use turin_contracts::pull_request::PullRequestAction;
 
 /// `@xl/pr-row-meta` (36rem) and `@3xl/pr-row-meta` (48rem): the meta line widths at which the
 /// second and third label pills appear.
 const LABEL_SLOT_WIDTHS: [f32; 3] = [0., 576., 768.];
 /// `@xs/pr-row-meta` (20rem): below it the author shows only the avatar.
 const AUTHOR_LABEL_MIN_WIDTH: f32 = 320.;
+
+/// Where each row last laid out, by row key: what the close sweep finds the row under the
+/// pointer from (`[data-pull-request-key]` in upstream).
+pub type RowBounds = Rc<RefCell<HashMap<String, Bounds<Pixels>>>>;
+
+/// What a row needs to offer speed mode (`hostActions`, `speedMode`, `closing`, `sweeping`).
+#[derive(Clone)]
+pub struct RowSpeed {
+    pub host_actions: HashSet<PullRequestAction>,
+    pub visible: bool,
+    pub can_write: bool,
+    /// `actionPending || closing || sweeping`.
+    pub busy: bool,
+    pub on_perform: PerformAction,
+    pub on_close_sweep_start: Option<SweepStart>,
+}
 
 pub type SelectRow = Rc<dyn Fn(&EnvironmentPullRequestEntry, &mut Window, &mut App)>;
 
@@ -85,6 +107,8 @@ pub struct PullRequestRow {
     matched_elsewhere: bool,
     meta_width: Pixels,
     on_select: SelectRow,
+    speed: Option<RowSpeed>,
+    bounds: Option<RowBounds>,
     /// The store and layer callback the stack trigger opens its menu with.
     stack: Option<(
         gpui_kit::Entity<super::view_model::PullRequestStore>,
@@ -102,8 +126,22 @@ impl PullRequestRow {
             matched_elsewhere: false,
             meta_width: px(640.),
             on_select,
+            speed: None,
+            bounds: None,
             stack: None,
         }
+    }
+
+    /// Speed mode's actions at the end of the row.
+    pub fn speed(mut self, speed: RowSpeed) -> Self {
+        self.speed = Some(speed);
+        self
+    }
+
+    /// Records the row's laid-out bounds under its key on every frame.
+    pub fn record_bounds(mut self, bounds: RowBounds) -> Self {
+        self.bounds = Some(bounds);
+        self
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
@@ -358,9 +396,41 @@ impl RenderOnce for PullRequestRow {
         let selected = self.selected;
         let on_select = self.on_select;
         let target = entry.clone();
+        let row_key = key.clone();
+        let sink = self.bounds;
+        let speed = self
+            .speed
+            .filter(|speed| !speed.host_actions.is_empty())
+            .map(|speed| {
+                let mut actions = PullRequestSpeedActions::new(
+                    entry.clone(),
+                    speed.host_actions,
+                    speed.on_perform,
+                )
+                .visible(speed.visible)
+                .can_write(speed.can_write)
+                .busy(speed.busy);
+                if let Some(start) = speed.on_close_sweep_start {
+                    actions = actions.on_close_sweep_start(start);
+                }
+                actions
+            });
         div()
+            .relative()
             .flex()
             .items_center()
+            .when_some(sink, |this, sink| {
+                this.child(
+                    gpui_kit::canvas(
+                        move |bounds, _, _| {
+                            sink.borrow_mut().insert(row_key.clone(), bounds);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             .rounded(RADIUS_MD)
             .when(selected, |this| this.bg(theme.accent))
             .when(!selected, |this| {
@@ -391,6 +461,7 @@ impl RenderOnce for PullRequestRow {
                             .child(line_two),
                     ),
             )
+            .children(speed)
             .font_weight(FontWeight::NORMAL)
     }
 }

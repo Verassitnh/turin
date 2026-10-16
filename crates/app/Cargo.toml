@@ -64,6 +64,11 @@ percent-encoding.workspace = true
 markdown.workspace = true
 similar = "2"
 csscolorparser.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+zip.workspace = true
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

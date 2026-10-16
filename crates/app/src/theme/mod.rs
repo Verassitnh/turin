@@ -25,6 +25,8 @@ pub mod appearance_contrast;
 pub mod appearance_fonts;
 pub mod color;
 pub mod component_theme;
+pub mod open_vsx;
+pub mod open_vsx_themes;
 pub mod sidebar_scope;
 pub mod theme_inspector;
 pub mod theme_palette;
@@ -40,6 +42,17 @@ use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, px};
 use appearance_contrast::AppearanceContrast;
 use appearance_fonts::{AppearanceFontPreferences, ResolvedFonts, resolve_appearance_fonts};
 use color::{MixSpace, color, color_mix, with_alpha};
+#[allow(unused_imports)]
+pub use open_vsx::{
+    FakeOpenVsxClient, OpenVsxClient, OpenVsxClientError, OpenVsxHeadResponse, OpenVsxHttpResponse,
+    ReqwestOpenVsxClient,
+};
+#[allow(unused_imports)]
+pub use open_vsx_themes::{
+    OpenVsxThemeExtension, OpenVsxThemeSearchOptions, OpenVsxThemeSort,
+    import_open_vsx_theme_extension, import_open_vsx_theme_extension_live, search_open_vsx_themes,
+    search_open_vsx_themes_live,
+};
 use sidebar_scope::SidebarScope;
 use theme_palette::{
     ThemePreferenceMode, get_standard_theme_colors, get_theme_colors_for_mode,

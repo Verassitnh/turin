@@ -733,9 +733,11 @@ pub fn parse_vscode_theme_file(value: Value) -> Result<ThemeDefinition, String> 
     build_theme_file(&name, appearance, id.as_deref(), color_map, None, false)
 }
 
+pub type VsCodeThemePairIdFn = dyn Fn(&ThemeDefinition, &ThemeDefinition) -> String;
+
 pub fn pair_vscode_themes(
     themes: &[ThemeDefinition],
-    paired_id: Option<fn(&ThemeDefinition, &ThemeDefinition) -> String>,
+    paired_id: Option<&VsCodeThemePairIdFn>,
 ) -> Vec<ThemeDefinition> {
     static STRIP: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let strip = STRIP.get_or_init(|| Regex::new(r"(?i)\b(?:light|dark)\b").expect("strip"));

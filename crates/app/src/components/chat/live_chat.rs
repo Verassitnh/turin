@@ -19,6 +19,7 @@ use std::time::Duration;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, WeakEntity};
+use indexmap::IndexMap;
 use serde_json::{Value, json};
 use turin_contracts::ThreadId;
 
@@ -746,6 +747,70 @@ impl ComposerSource for LiveSource {
 }
 
 impl LiveSource {
+    fn deliver_pending_user_input(
+        &self,
+        request_id: &str,
+        answers: IndexMap<String, String>,
+        cx: &mut App,
+    ) -> bool {
+        let environment_id = local_environment_id();
+        let state = self.handle.snapshot();
+        let Some(detail) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.detail.as_ref())
+        else {
+            return false;
+        };
+        let Some(input) = detail
+            .pending_requests
+            .user_inputs
+            .iter()
+            .find(|input| input.request_id.as_str() == request_id)
+        else {
+            return false;
+        };
+        let question_ids: Vec<String> = input
+            .questions
+            .iter()
+            .map(|question| question.id.to_string())
+            .collect();
+        let draft_attachments = super::question_attachment_submit::load_question_drafts(
+            cx,
+            &environment_id,
+            self.thread_id.as_str(),
+            request_id,
+            &question_ids,
+        );
+        let thread_id = self.thread_id.clone();
+        let request_id = request_id.to_owned();
+        let result = self.bus.run_blocking(move |commands| async move {
+            super::question_attachment_submit::respond_to_pending_user_input_with_attachments(
+                &commands,
+                &thread_id,
+                request_id.as_str(),
+                answers,
+                &draft_attachments,
+            )
+            .await
+        });
+        match result {
+            Ok(()) => {
+                super::question_attachment_submit::clear_question_attachment_drafts_for_request(
+                    cx,
+                    &environment_id,
+                    self.thread_id.as_str(),
+                    request_id.as_str(),
+                    &question_ids,
+                );
+                true
+            }
+            Err(error) => {
+                push_error(cx, "Failed to submit your answer", &error.message);
+                false
+            }
+        }
+    }
+
     fn submit_composer_pending_answer(&self, composer_prompt: &str, cx: &mut App) -> bool {
         let state = self.handle.snapshot();
         let Some(detail) = state
@@ -773,31 +838,10 @@ impl LiveSource {
             PendingSubmitPlan::Advanced => true,
             PendingSubmitPlan::Submit { request_id, answers } => {
                 self.update_overrides(cx, |overrides| overrides.pending_input.responding = true);
-                let source = self.me.clone();
-                let (thread_id, request_id) = (self.thread_id.clone(), request_id);
-                self.run_command("Failed to submit your answer", cx, move |commands| async move {
-                    let answers: serde_json::Map<String, Value> = answers
-                        .into_iter()
-                        .map(|(question, answer)| (question, Value::String(answer)))
-                        .collect();
-                    commands
-                        .respond_to_request(&thread_id, &request_id, None, Some(Value::Object(answers)))
-                        .await
-                });
-                cx.spawn(async move |cx| {
-                    cx.background_executor().timer(Duration::from_millis(400)).await;
-                    cx.update(|cx| {
-                        let Some(source) = source.upgrade() else {
-                            return;
-                        };
-                        source.update_overrides(cx, |overrides| {
-                            overrides.pending_input.responding = false;
-                        });
-                    })
-                    .ok();
-                })
-                .detach();
-                true
+                let answers: IndexMap<_, _> = answers.into_iter().collect();
+                let delivered = self.deliver_pending_user_input(request_id.as_str(), answers, cx);
+                self.update_overrides(cx, |overrides| overrides.pending_input.responding = false);
+                delivered
             }
         }
     }
@@ -964,21 +1008,9 @@ impl TimelineSource for LiveSource {
         request_id: &str,
         answers: Vec<(String, String)>,
         cx: &mut App,
-    ) {
-        let (thread_id, request_id) = (self.thread_id.clone(), request_id.to_owned());
-        let answers: serde_json::Map<String, Value> = answers
-            .into_iter()
-            .map(|(question, answer)| (question, Value::String(answer)))
-            .collect();
-        self.run_command(
-            "Failed to submit your answer",
-            cx,
-            move |commands| async move {
-                commands
-                    .respond_to_request(&thread_id, &request_id, None, Some(Value::Object(answers)))
-                    .await
-            },
-        );
+    ) -> bool {
+        let answers: IndexMap<_, _> = answers.into_iter().collect();
+        self.deliver_pending_user_input(request_id, answers, cx)
     }
 
     fn dismiss_user_input(&self, request_id: &str, cx: &mut App) {

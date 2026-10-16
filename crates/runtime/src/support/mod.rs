@@ -3,6 +3,7 @@
 //! Deviations).
 
 pub mod atomic_write;
+pub mod blocking;
 pub mod file_watch;
 pub mod lenient_json;
 pub mod symlink;

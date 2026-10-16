@@ -26,7 +26,7 @@ pub fn dialog_backdrop_color(theme: &AppTheme) -> Hsla {
 }
 
 /// `dialog-glass` without the blur: the popup surface over the backdrop.
-fn dialog_surface(theme: &AppTheme) -> Hsla {
+pub(crate) fn dialog_surface(theme: &AppTheme) -> Hsla {
     let glass = with_alpha(theme.background, 0.8);
     color_mix(MixSpace::Srgb, theme.background, 0.8, glass).into()
 }

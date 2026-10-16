@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use gpui_kit::{App, AppContext as _, Entity, WeakEntity};
 use indexmap::IndexMap;
@@ -49,7 +50,7 @@ struct LiveState {
 }
 
 pub struct LiveSettingsSource {
-    inner: Rc<RefCell<LiveState>>,
+    inner: Arc<Mutex<LiveState>>,
     client: Entity<ClientStore>,
     store: Rc<RefCell<Option<Entity<SettingsStore>>>>,
 }
@@ -82,7 +83,7 @@ impl LiveSettingsSource {
             .storage_cleanup
             .latest_report()
             .map(|report| cleanup_report(&report));
-        let inner = Rc::new(RefCell::new(LiveState {
+        let inner = Arc::new(Mutex::new(LiveState {
             services,
             appearance: super::view_model::AppearanceState::default(),
             providers: initial_providers,
@@ -111,7 +112,8 @@ impl LiveSettingsSource {
     fn publish(&self, cx: &mut App) {
         let path = self
             .inner
-            .borrow()
+            .lock()
+            .expect("live settings state")
             .services
             .keybindings
             .config_path()
@@ -134,7 +136,8 @@ impl LiveSettingsSource {
                     return;
                 };
                 let path = inner
-                    .borrow()
+                    .lock()
+                    .expect("live settings state")
                     .services
                     .keybindings
                     .config_path()
@@ -142,7 +145,7 @@ impl LiveSettingsSource {
                     .to_string();
                 let vm = snapshot_from(&inner, &client, cx, &path);
                 apply_appearance(&vm, cx);
-                store.update(cx, |store, cx| store.publish(vm, cx)).ok();
+                store.update(cx, |store, cx| store.publish(vm, cx));
             })
         };
         cx.observe(&self.client, {
@@ -152,39 +155,45 @@ impl LiveSettingsSource {
         .detach();
 
         let inner = self.inner.clone();
-        let handle = inner.borrow().services.bus.handle().clone();
+        let handle = inner.lock().expect("live settings state").services.bus.handle().clone();
         handle.spawn(async move {
-            let services = inner.borrow().services.clone();
+            let services = inner.lock().expect("live settings state").services.clone();
             let mut changes = services.server_settings.subscribe();
             while let Some(settings) = changes.recv().await {
-                inner.borrow_mut().server = settings;
+                inner.lock().expect("live settings state").server = settings;
             }
         });
         let inner = self.inner.clone();
         handle.spawn(async move {
-            let services = inner.borrow().services.clone();
+            let services = inner.lock().expect("live settings state").services.clone();
             let mut rx = services.keybindings.subscribe();
             while let Some(config) = rx.recv().await {
-                inner.borrow_mut().keybindings = config;
+                inner.lock().expect("live settings state").keybindings = config;
             }
         });
         let inner = self.inner.clone();
         handle.spawn(async move {
-            let services = inner.borrow().services.clone();
+            let services = inner.lock().expect("live settings state").services.clone();
             let mut rx = services.storage_cleanup.subscribe();
             while rx.changed().await.is_ok() {
-                inner.borrow_mut().storage_cleanup =
+                inner.lock().expect("live settings state").storage_cleanup =
                     rx.borrow().clone().map(|report| cleanup_report(&report));
             }
         });
         let inner = self.inner.clone();
+        let bus = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
         handle.spawn(async move {
-            let mut providers = inner.borrow().services.bus.providers();
+            let mut providers = bus.providers();
             loop {
                 if providers.changed().await.is_err() {
                     break;
                 }
-                inner.borrow_mut().providers = providers.borrow().clone();
+                inner.lock().expect("live settings state").providers = providers.borrow().clone();
             }
         });
         let _ = refresh;
@@ -200,12 +209,12 @@ impl LiveSettingsSource {
 }
 
 fn snapshot_from(
-    inner: &RefCell<LiveState>,
+    inner: &Arc<Mutex<LiveState>>,
     client: &Entity<ClientStore>,
     cx: &mut App,
     keybindings_path: &str,
 ) -> SettingsViewModel {
-    let state = inner.borrow();
+    let state = inner.lock().expect("live settings state");
     build_snapshot(LiveSnapshotInput {
         appearance: state.appearance.clone(),
         client: read_client_settings(),
@@ -262,11 +271,12 @@ impl SettingsSource for LiveSettingsSource {
         let inner = self.inner.clone();
         let store_cell = self.store.clone();
         let client = self.client.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
+        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
             persist_client_settings_patch(patch).await;
         });
         let path = inner
-            .borrow()
+            .lock()
+            .expect("live settings state")
             .services
             .keybindings
             .config_path()
@@ -289,8 +299,8 @@ impl SettingsSource for LiveSettingsSource {
         let inner = self.inner.clone();
         let store_cell = self.store.clone();
         let client = self.client.clone();
-        let bus = inner.borrow().services.bus.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
+        let bus = inner.lock().expect("live settings state").services.bus.clone();
+        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
             let Ok(current) = live_commands::server_settings(&bus).await else {
                 return;
             };
@@ -298,12 +308,13 @@ impl SettingsSource for LiveSettingsSource {
                 return;
             };
             if let Ok(settings) = persist_server_settings(&bus, patch).await {
-                inner.borrow_mut().server = settings;
+                inner.lock().expect("live settings state").server = settings;
             }
         });
         if let Some(store) = store_cell.borrow().clone() {
             let path = inner
-                .borrow()
+                .lock()
+                .expect("live settings state")
                 .services
                 .keybindings
                 .config_path()
@@ -329,15 +340,15 @@ impl SettingsSource for LiveSettingsSource {
         };
         let server_patch = patch.and_then(|patch| serde_json::from_value(patch).ok());
         let inner = self.inner.clone();
-        let bus = inner.borrow().services.bus.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
+        let bus = inner.lock().expect("live settings state").services.bus.clone();
+        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
             if let Some(patch) = server_patch {
                 if persist_server_settings(&bus, patch).await.is_err() {
                     return;
                 }
             }
             if let Ok(settings) = persist_provider_instance(&bus, mutation).await {
-                inner.borrow_mut().server = settings;
+                inner.lock().expect("live settings state").server = settings;
             }
         });
         self.publish(cx);
@@ -364,15 +375,24 @@ impl SettingsSource for LiveSettingsSource {
             .ok()
         });
         let inner = self.inner.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
-            inner
-                .borrow()
-                .services
-                .keybindings
-                .upsert_keybinding_rule(UpsertKeybindingInput { rule, replace })
-                .await
-                .map_err(|error| error.to_string())
-        });
+        let keybindings = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .keybindings
+            .clone();
+        inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .spawn(async move {
+                keybindings
+                    .upsert_keybinding_rule(UpsertKeybindingInput { rule, replace })
+                    .await
+                    .map_err(|error| error.to_string())
+            });
         self.publish(cx);
     }
 
@@ -389,36 +409,57 @@ impl SettingsSource for LiveSettingsSource {
             }
         };
         let inner = self.inner.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
-            inner
-                .borrow()
-                .services
-                .keybindings
-                .remove_keybinding_rule(&rule)
-                .await
-                .map_err(|error| error.to_string())
-        });
+        let keybindings = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .keybindings
+            .clone();
+        inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .spawn(async move {
+                keybindings
+                    .remove_keybinding_rule(&rule)
+                    .await
+                    .map_err(|error| error.to_string())
+            });
         self.publish(cx);
     }
 
     fn refresh_providers(&self, cx: &mut App) {
-        self.inner.borrow_mut().providers_refreshing = true;
+        self.inner.lock().expect("live settings state").providers_refreshing = true;
         self.publish(cx);
         let inner = self.inner.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
-            let services = inner.borrow().services.clone();
+        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
+            let services = inner.lock().expect("live settings state").services.clone();
             let _ = services.provider_registry.refresh(None).await;
-            inner.borrow_mut().providers_refreshing = false;
+            inner.lock().expect("live settings state").providers_refreshing = false;
         });
         self.publish(cx);
     }
 
     fn rescan_source_control(&self, cx: &mut App) {
         let inner = self.inner.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
-            let discovery = inner.borrow().services.source_control.discover().await;
-            inner.borrow_mut().source_control = discovery;
-        });
+        let source_control = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .source_control
+            .clone();
+        inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .spawn(async move {
+                let discovery = source_control.discover().await;
+                inner.lock().expect("live settings state").source_control = discovery;
+            });
         self.publish(cx);
     }
 
@@ -428,27 +469,35 @@ impl SettingsSource for LiveSettingsSource {
             return;
         };
         let inner = self.inner.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
-            let provider = inner
-                .borrow()
-                .providers
-                .iter()
-                .find(|entry| entry.instance_id.as_str() == instance_id.as_str())
-                .map(|entry| entry.driver.clone());
-            let Some(provider) = provider else {
-                return;
-            };
-            let _ = inner
-                .borrow()
-                .services
-                .provider_maintenance
-                .update_provider(ProviderUpdateTarget {
-                    provider,
-                    instance_id: Some(instance_id),
-                    target_version,
-                })
-                .await;
-        });
+        let (maintenance, providers) = {
+            let state = inner.lock().expect("live settings state");
+            (
+                state.services.provider_maintenance.clone(),
+                state.providers.clone(),
+            )
+        };
+        inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .spawn(async move {
+                let provider = providers
+                    .iter()
+                    .find(|entry| entry.instance_id.as_str() == instance_id.as_str())
+                    .map(|entry| entry.driver.clone());
+                let Some(provider) = provider else {
+                    return;
+                };
+                let _ = maintenance
+                    .update_provider(ProviderUpdateTarget {
+                        provider,
+                        instance_id: Some(instance_id),
+                        target_version,
+                    })
+                    .await;
+            });
         self.publish(cx);
     }
 
@@ -470,19 +519,29 @@ impl SettingsSource for LiveSettingsSource {
             callback_mode: Some(ProviderAuthCallbackMode::Client),
         };
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_auth
-                .start(&input, SETTINGS_AUTH_OWNER_SESSION)
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let auth = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_auth
+            .clone();
+        let result = handle.block_on(async move {
+            auth.start(&input, SETTINGS_AUTH_OWNER_SESSION)
                 .await
                 .map_err(|error| error.to_string())
         });
         match result {
             Ok(state) => {
                 self.inner
-                    .borrow_mut()
+                    .lock()
+                    .expect("live settings state")
                     .provider_auth
                     .insert(state.instance_id.as_str().to_owned(), state);
                 self.publish(cx);
@@ -497,20 +556,30 @@ impl SettingsSource for LiveSettingsSource {
             return Err("Invalid provider instance.".into());
         };
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_auth
-                .cancel(&instance_id, flow_id, SETTINGS_AUTH_OWNER_SESSION)
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let auth = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_auth
+            .clone();
+        let result = handle.block_on(async move {
+            auth.cancel(&instance_id, flow_id, SETTINGS_AUTH_OWNER_SESSION)
                 .await
                 .map_err(|error| error.to_string())
         });
-        if let Ok(state) = result {
+        if let Ok(ref state) = result {
             self.inner
-                .borrow_mut()
+                .lock()
+                .expect("live settings state")
                 .provider_auth
-                .insert(state.instance_id.as_str().to_owned(), state);
+                .insert(state.instance_id.as_str().to_owned(), state.clone());
             self.publish(cx);
         }
         result.map(|_| ())
@@ -518,18 +587,28 @@ impl SettingsSource for LiveSettingsSource {
 
     fn respond_provider_auth(&self, input: ProviderAuthRespondInput, cx: &mut App) -> SetupResult {
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_auth
-                .respond(input, SETTINGS_AUTH_OWNER_SESSION)
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let auth = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_auth
+            .clone();
+        let result = handle.block_on(async move {
+            auth.respond(input, SETTINGS_AUTH_OWNER_SESSION)
                 .await
                 .map_err(|error| error.to_string())
         });
-        if let Ok(state) = &result {
+        if let Ok(ref state) = result {
             self.inner
-                .borrow_mut()
+                .lock()
+                .expect("live settings state")
                 .provider_auth
                 .insert(state.instance_id.as_str().to_owned(), state.clone());
             self.publish(cx);
@@ -548,25 +627,35 @@ impl SettingsSource for LiveSettingsSource {
             return Err("Invalid provider instance.".into());
         };
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_auth
-                .complete(
-                    &instance_id,
-                    flow_id,
-                    callback_url,
-                    SETTINGS_AUTH_OWNER_SESSION,
-                )
-                .await
-                .map_err(|error| error.to_string())
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let auth = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_auth
+            .clone();
+        let result = handle.block_on(async move {
+            auth.complete(
+                &instance_id,
+                flow_id,
+                callback_url,
+                SETTINGS_AUTH_OWNER_SESSION,
+            )
+            .await
+            .map_err(|error| error.to_string())
         });
-        if let Ok(state) = result {
+        if let Ok(ref state) = result {
             self.inner
-                .borrow_mut()
+                .lock()
+                .expect("live settings state")
                 .provider_auth
-                .insert(state.instance_id.as_str().to_owned(), state);
+                .insert(state.instance_id.as_str().to_owned(), state.clone());
             self.publish(cx);
         }
         result.map(|_| ())
@@ -581,20 +670,30 @@ impl SettingsSource for LiveSettingsSource {
             return Err("Invalid provider instance.".into());
         };
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_auth
-                .logout(&instance_id)
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let auth = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_auth
+            .clone();
+        let result = handle.block_on(async move {
+            auth.logout(&instance_id)
                 .await
                 .map_err(|error| error.to_string())
         });
-        if let Ok(state) = result {
+        if let Ok(ref state) = result {
             self.inner
-                .borrow_mut()
+                .lock()
+                .expect("live settings state")
                 .provider_auth
-                .insert(state.instance_id.as_str().to_owned(), state);
+                .insert(state.instance_id.as_str().to_owned(), state.clone());
             self.publish(cx);
         }
         result.map(|_| ())
@@ -607,17 +706,31 @@ impl SettingsSource for LiveSettingsSource {
         let key = instance_id.as_str().to_owned();
         let input = ProviderSetupInput { instance_id };
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_installation
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let installation = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_installation
+            .clone();
+        let result = handle.block_on(async move {
+            installation
                 .start(&input)
                 .await
                 .map_err(|error| error.to_string())
         });
-        if let Ok(state) = result {
-            self.inner.borrow_mut().provider_install.insert(key, state);
+        if let Ok(ref state) = result {
+            self.inner
+                .lock()
+                .expect("live settings state")
+                .provider_install
+                .insert(key, state.clone());
             self.publish(cx);
         }
         result.map(|_| ())
@@ -640,17 +753,31 @@ impl SettingsSource for LiveSettingsSource {
             operation_id,
         };
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_installation
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let installation = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_installation
+            .clone();
+        let result = handle.block_on(async move {
+            installation
                 .cancel(&input)
                 .await
                 .map_err(|error| error.to_string())
         });
-        if let Ok(state) = result {
-            self.inner.borrow_mut().provider_install.insert(key, state);
+        if let Ok(ref state) = result {
+            self.inner
+                .lock()
+                .expect("live settings state")
+                .provider_install
+                .insert(key, state.clone());
             self.publish(cx);
         }
         result.map(|_| ())
@@ -663,24 +790,38 @@ impl SettingsSource for LiveSettingsSource {
         let key = instance_id.as_str().to_owned();
         let input = ProviderSetupInput { instance_id };
         let inner = self.inner.clone();
-        let result = inner.borrow().services.bus.handle().block_on(async {
-            inner
-                .borrow()
-                .services
-                .provider_installation
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let installation = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .provider_installation
+            .clone();
+        let result = handle.block_on(async move {
+            installation
                 .remove(&input)
                 .await
                 .map_err(|error| error.to_string())
         });
-        if let Ok(state) = result {
-            self.inner.borrow_mut().provider_install.insert(key, state);
+        if let Ok(ref state) = result {
+            self.inner
+                .lock()
+                .expect("live settings state")
+                .provider_install
+                .insert(key, state.clone());
             self.publish(cx);
         }
         result.map(|_| ())
     }
 
     fn acknowledge_chat_gpt_welcome(&self, key: &str, cx: &mut App) {
-        let state = &mut self.inner.borrow_mut();
+        let state = &mut self.inner.lock().expect("live settings state");
         if !state
             .chat_gpt_welcome_acknowledged
             .iter()
@@ -692,18 +833,18 @@ impl SettingsSource for LiveSettingsSource {
     }
 
     fn clear_provider_auth_delivery(&self, cx: &mut App) {
-        self.inner.borrow_mut().pending_provider_auth_delivery = None;
+        self.inner.lock().expect("live settings state").pending_provider_auth_delivery = None;
         self.publish(cx);
     }
 
     fn set_theme(&self, theme: String, cx: &mut App) {
-        let state = &mut self.inner.borrow_mut();
+        let state = &mut self.inner.lock().expect("live settings state");
         state.appearance.theme = theme;
         self.publish(cx);
     }
 
     fn set_appearance_mode(&self, mode: String, cx: &mut App) {
-        let state = &mut self.inner.borrow_mut();
+        let state = &mut self.inner.lock().expect("live settings state");
         if matches!(state.appearance.theme.as_str(), "system" | "light" | "dark") {
             state.appearance.theme = mode.clone();
         }
@@ -714,7 +855,8 @@ impl SettingsSource for LiveSettingsSource {
     fn open_keybindings_file(&self, cx: &mut App) {
         let path = self
             .inner
-            .borrow()
+            .lock()
+            .expect("live settings state")
             .services
             .keybindings
             .config_path()
@@ -728,7 +870,7 @@ impl SettingsSource for LiveSettingsSource {
             self.report("Could not unarchive thread", "Invalid thread id.", cx);
             return;
         };
-        let bus = self.inner.borrow().services.bus.clone();
+        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
         bus.spawn(
             move |commands| async move {
                 commands
@@ -746,7 +888,7 @@ impl SettingsSource for LiveSettingsSource {
             return;
         };
         let title = title.to_owned();
-        let bus = self.inner.borrow().services.bus.clone();
+        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
         bus.spawn(
             move |commands| async move {
                 commands.rename_project(&project_id, &title).await
@@ -761,7 +903,7 @@ impl SettingsSource for LiveSettingsSource {
             self.report("Could not remove project", "Invalid project id.", cx);
             return;
         };
-        let bus = self.inner.borrow().services.bus.clone();
+        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
         bus.spawn(
             move |commands| async move {
                 delete_project(commands.runtime().as_ref(), &project_id).await
@@ -783,7 +925,7 @@ impl SettingsSource for LiveSettingsSource {
             .map(|id| ProjectId::new(id.as_str()))
             .collect();
         let ids = ids.map_err(|_| "Invalid project id.".to_string())?;
-        let bus = self.inner.borrow().services.bus.clone();
+        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
         bus.run_blocking(move |commands| async move {
             set_project_icons(
                 commands.runtime().as_ref(),
@@ -805,7 +947,7 @@ impl SettingsSource for LiveSettingsSource {
         cx: &mut App,
     ) -> Result<Vec<super::project_file_picker_logic::ProjectEntry>, String> {
         use super::project_file_picker_logic::{ProjectEntry, ProjectEntryKind};
-        let bus = self.inner.borrow().services.bus.clone();
+        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
         let cwd = cwd.to_owned();
         let query = query.to_owned();
         let paths = bus
@@ -832,10 +974,10 @@ impl SettingsSource for LiveSettingsSource {
 
     fn run_storage_cleanup(&self, cx: &mut App) {
         let inner = self.inner.clone();
-        let cleanup = inner.borrow().services.storage_cleanup.clone();
-        inner.borrow().services.bus.handle().spawn(async move {
+        let cleanup = inner.lock().expect("live settings state").services.storage_cleanup.clone();
+        inner.lock().expect("live settings state").services.bus.handle().spawn(async move {
             let report = cleanup.run_now().await;
-            inner.borrow_mut().storage_cleanup = Some(cleanup_report(&report));
+            inner.lock().expect("live settings state").storage_cleanup = Some(cleanup_report(&report));
         });
         self.publish(cx);
     }
@@ -845,7 +987,7 @@ impl SettingsSource for LiveSettingsSource {
             self.report("Could not delete thread", "Invalid thread id.", cx);
             return;
         };
-        let bus = self.inner.borrow().services.bus.clone();
+        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
         bus.spawn(
             move |commands| async move {
                 commands

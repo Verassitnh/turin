@@ -248,7 +248,8 @@ impl WriteRuntime {
                 instances.clone(),
                 projection.clone(),
                 sessions.clone(),
-            ),
+            )
+            .with_callback_mode(turin_provider_core::auth::ProviderAuthCallbackMode::Server),
         );
 
         // Turn services.

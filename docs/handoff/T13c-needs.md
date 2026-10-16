@@ -4,7 +4,7 @@
 - `ProviderSessionSink` implementation over `EventSink`: `session_attached`, `session_updated`,
   `session_released` (status via `core::provider_session_manager::release_status_for`, runtime
   request settlement as `writeReleaseRecords`), `ingest_session_scoped_event` (via ingestor, T13c).
-- `OrchestratorPort` implementation (T13c, Orchestrator.ts). Not started.
+- `OrchestratorPort` implementation: done (`core/orchestrator.rs`).
 
 ## From T13a (`projection`)
 - Read seam for detach: running provider turns of a thread+session (`ProviderSessionManager.detach`).
@@ -32,4 +32,4 @@
   in `core/projection_reads.rs` over `ProjectionStore::get_thread_records`, without editing `projection/**`.
 - `ProviderAdapterV2Error: Display`: already present (`provider_adapter.rs`).
 - `ProviderSessionRuntime::close()`: added in provider-core as an additive default (`None`). T08 to reconcile.
-- `OrchestratorPort`: not yet implemented (see docs/handoff/T13c.md item A).
+- `OrchestratorPort`: implemented (`core/orchestrator.rs`, with the deciders under `core/orchestrator/`).

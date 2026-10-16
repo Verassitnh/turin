@@ -25,13 +25,15 @@ use gpui_kit::{
 use super::branch_toolbar::mock_source::MockBranchBackend;
 use super::chat::chat_git_host::{ChatGitBackends, ChatGitHost, RoutedGitThread};
 use super::chat::panel_layout_controls::PanelLayoutControls;
-use super::chat_view::ChatView;
+use super::chat_view::{ChatView, LiveChatTarget};
 use super::command_palette::command_palette_logic::SearchOverlayMode;
+use super::command_palette::live_source::LivePaletteBackend;
 use super::command_palette::mock_source::MockPaletteBackend;
 use super::command_palette::palette_source::PaletteContext;
+use super::command_palette::palette_source::SharedPaletteBackend;
 use super::command_palette::{
     self, CommandPalette, CommandPaletteEvent, CommandPaletteOpenDetail, CycleAppearance,
-    SelectTheme, ToggleCommandPalette, ToggleFilePicker, ToggleProjectSearch,
+    OpenTarget, SelectTheme, ToggleCommandPalette, ToggleFilePicker, ToggleProjectSearch,
 };
 use super::confirm_dialog_host::ConfirmDialogHost;
 use super::git_actions_control::mock_source::MockGitActionsBackend;
@@ -81,7 +83,16 @@ use crate::ui::sidebar::{
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{AppContext as _, Entity, SharedString};
+use turin_contracts::ThreadId;
 use turin_contracts::settings::{ClientSettings, QuitConfirmationMode};
+
+use super::sidebar::live_source::LiveSidebar;
+use super::sidebar::view_model::SharedSidebarBackend;
+use crate::app_runtime::write::bus::{CommandBus, CommandBusGlobal};
+use crate::app_runtime::write::commands::CreateThread;
+use crate::state::local_environment_id;
+use crate::state::models::scoped_thread_key;
+use crate::state::store::{ClientStore, ClientStoreGlobal};
 
 actions!(
     turin,
@@ -100,6 +111,9 @@ actions!(
 );
 
 pub const KEY_CONTEXT: &str = "AppShell";
+
+/// The model a new thread starts on until the default-model setting is read.
+const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-6";
 
 /// Upstream default keybindings (packages/shared/src/keybindings.ts) for the
 /// shell's actions.
@@ -141,6 +155,25 @@ struct UsageRoute {
     _subscription: Subscription,
 }
 
+/// What the shell needs to run against Turin's own data.
+#[derive(Clone)]
+struct LiveShell {
+    client: Entity<ClientStore>,
+    bus: CommandBus,
+}
+
+/// The live bindings, unless `TURIN_MOCK_UI=1` asks for the fixture UI
+/// (screenshots, demos).
+fn live_bindings(cx: &App) -> Option<LiveShell> {
+    if std::env::var("TURIN_MOCK_UI").is_ok_and(|value| value == "1") {
+        return None;
+    }
+    Some(LiveShell {
+        client: cx.try_global::<ClientStoreGlobal>()?.0.clone(),
+        bus: cx.try_global::<CommandBusGlobal>()?.0.clone(),
+    })
+}
+
 pub struct AppSidebarLayout {
     focus_handle: FocusHandle,
     sidebar_open: bool,
@@ -163,6 +196,8 @@ pub struct AppSidebarLayout {
     store: Entity<SidebarStore>,
     palette: Entity<CommandPalette>,
     git_host: Entity<ChatGitHost>,
+    /// The running app's bindings; `None` runs the fixture-driven demo UI.
+    live: Option<LiveShell>,
     thread_details_open: bool,
     /// The routed page when it is not a thread (upstream: the router).
     usage: Option<UsageRoute>,
@@ -194,10 +229,30 @@ impl AppSidebarLayout {
         });
         theme::follow_system_appearance(window, cx);
         let viewport_width = f32::from(window.viewport_size().width);
-        // T14 replaces the mock store/backend with the client view model.
-        let (store, backend) = mock_sidebar(cx);
-        let palette_backend =
-            std::rc::Rc::new(MockPaletteBackend::new(store.clone(), backend.clone()));
+        let live = live_bindings(cx);
+        let (store, backend, palette_backend): (
+            Entity<SidebarStore>,
+            SharedSidebarBackend,
+            SharedPaletteBackend,
+        ) = match &live {
+            Some(live) => {
+                let (store, backend) =
+                    LiveSidebar::start(live.client.clone(), live.bus.clone(), cx);
+                let backend: SharedSidebarBackend = backend;
+                let palette: SharedPaletteBackend = std::rc::Rc::new(LivePaletteBackend::new(
+                    store.clone(),
+                    backend.clone(),
+                    live.bus.clone(),
+                ));
+                (store, backend, palette)
+            }
+            None => {
+                let (store, backend) = mock_sidebar(cx);
+                let palette: SharedPaletteBackend =
+                    std::rc::Rc::new(MockPaletteBackend::new(store.clone(), backend.clone()));
+                (store, backend, palette)
+            }
+        };
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
         let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
@@ -263,6 +318,7 @@ impl AppSidebarLayout {
             store,
             palette,
             git_host,
+            live,
             thread_details_open: std::env::var("TURIN_THREAD_DETAILS").is_ok_and(|v| v == "1"),
             usage: None,
             notifications: ThreadNotificationCoordinator::new(),
@@ -373,8 +429,17 @@ impl AppSidebarLayout {
                         self.sync_palette_context(cx);
                         cx.notify();
                     }
+                    None if self.live.is_some() => {
+                        self.create_thread_in_project(project_key.clone(), window, cx)
+                    }
                     None => unavailable("New thread", window, cx),
                 }
+            }
+            CommandPaletteEvent::NewThreadInProject { project_key } if self.live.is_some() => {
+                self.create_thread_in_project(project_key.clone(), window, cx)
+            }
+            CommandPaletteEvent::NewThreadFromContext if self.live.is_some() => {
+                self.new_thread_from_context(window, cx)
             }
             CommandPaletteEvent::NewThreadInProject { .. }
             | CommandPaletteEvent::NewThreadFromContext => unavailable("New thread", window, cx),
@@ -453,6 +518,23 @@ impl AppSidebarLayout {
                 self.right_panel_open = true;
                 cx.notify();
             }
+            SidebarEvent::AddProject if self.live.is_some() => self.open_command_palette(
+                CommandPaletteOpenDetail {
+                    open: Some(OpenTarget::AddProject),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            ),
+            SidebarEvent::NewThread {
+                project_key: Some(project_key),
+                ..
+            } if self.live.is_some() => {
+                self.create_thread_in_project(project_key.clone(), window, cx)
+            }
+            SidebarEvent::NewThread { .. } if self.live.is_some() => {
+                self.new_thread_from_context(window, cx)
+            }
             // Screens owned by later tasks (composer, settings, PRs, usage).
             other => {
                 let label = match other {
@@ -486,6 +568,89 @@ impl AppSidebarLayout {
             .map(|group| group.display_name.clone())
             .unwrap_or_default();
         Some((project.into(), thread.title.clone().into()))
+    }
+
+    /// The routed thread's id, read from the route key (`<environment>:<thread>`)
+    /// so a thread that was just created opens before the shell feed lists it.
+    fn routed_thread_id(&self, cx: &App) -> Option<ThreadId> {
+        let Some(SidebarRoute::Thread(key)) = self.sidebar.read(cx).route() else {
+            return None;
+        };
+        let (_, thread_id) = key.split_once(':')?;
+        ThreadId::new(thread_id).ok()
+    }
+
+    /// `handleNewThread(projectRef)`: creates the thread at once and opens it.
+    /// Upstream keeps an unsent draft and creates the thread with its first
+    /// message; Turin has no draft store yet (docs/handoff/T22.md).
+    fn create_thread_in_project(
+        &mut self,
+        project_key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(live) = self.live.clone() else {
+            return;
+        };
+        let Some(project_id) = project_key
+            .split_once(':')
+            .and_then(|(_, id)| turin_contracts::ProjectId::new(id).ok())
+        else {
+            return;
+        };
+        let task = live.bus.task(cx, move |commands| async move {
+            commands
+                .create_thread(CreateThread {
+                    project_id,
+                    title: "New thread".into(),
+                    model_selection: serde_json::json!({
+                        "instanceId": "claudeAgent",
+                        "model": DEFAULT_CLAUDE_MODEL,
+                    }),
+                    runtime_mode: "full-access".into(),
+                    interaction_mode: "default".into(),
+                })
+                .await
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let outcome = task.await;
+            this.update_in(cx, |this, window, cx| match outcome {
+                Ok(thread_id) => {
+                    let key = scoped_thread_key(&local_environment_id(), &thread_id);
+                    this.sidebar
+                        .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+                    this.sync_palette_context(cx);
+                    cx.notify();
+                }
+                Err(error) => window.push_notification(
+                    Notification::error(error.message).title("Failed to create thread"),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// "New thread" with no project in mind: the project of the routed thread,
+    /// else the palette's project picker.
+    fn new_thread_from_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let routed = self.routed_thread_id(cx);
+        let snapshot = self.store.read(cx).snapshot().clone();
+        let project_key = routed
+            .and_then(|id| snapshot.threads.iter().find(|thread| thread.id == id))
+            .map(|thread| thread.project_key());
+        match project_key {
+            Some(key) => self.create_thread_in_project(key, window, cx),
+            None => self.open_command_palette(
+                CommandPaletteOpenDetail {
+                    open: Some(OpenTarget::NewThreadIn),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            ),
+        }
     }
 
     /// The routed thread as the git surfaces read it.
@@ -1018,6 +1183,7 @@ impl Render for AppSidebarLayout {
         let maximized = right_panel_open && self.right_panel_maximized;
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
+        let routed_thread_id = self.routed_thread_id(cx);
         let routed_git = self.routed_git_thread(cx);
         self.git_host
             .update(cx, |host, cx| host.sync(routed_git, window, cx));
@@ -1216,6 +1382,11 @@ impl Render for AppSidebarLayout {
                                 match self.main_content.clone() {
                                     Some(content) => this.child(content),
                                     None => this.child(ChatView {
+                                        live: self.live.as_ref().map(|live| LiveChatTarget {
+                                            client: live.client.clone(),
+                                            bus: live.bus.clone(),
+                                            thread: routed_thread_id.clone(),
+                                        }),
                                         sidebar_open,
                                         right_panel_open,
                                         thread: routed_thread.clone(),

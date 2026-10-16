@@ -151,9 +151,14 @@ fn main() {
     } = state::store::spawn_client_state(runtime.handle(), state::local_environment_id());
     // Opens Turin's database and feeds the store. Kept alive for the whole
     // process; dropping it aborts the feeds.
-    let _feeds = tokio_util::task::AbortOnDropHandle::new(runtime.handle().spawn(
-        app_runtime::run(app_runtime::data_dir::resolve_data_dir(), sender, requests),
-    ));
+    let command_bus = app_runtime::write::bus::CommandBus::new(runtime.handle().clone());
+    let _feeds =
+        tokio_util::task::AbortOnDropHandle::new(runtime.handle().spawn(app_runtime::run(
+            app_runtime::data_dir::resolve_data_dir(),
+            sender,
+            requests,
+            command_bus.clone(),
+        )));
     gpui_kit::application()
         .with_assets(assets::AppAssets)
         .run(move |cx| {
@@ -163,6 +168,9 @@ fn main() {
             theme::init(cx);
             let store = state::store::bind_client_store(handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));
+            cx.set_global(app_runtime::write::bus::CommandBusGlobal(
+                command_bus.clone(),
+            ));
             app_sidebar_layout::bind_keys(cx);
             desktop::bind_menu_keys(cx, app_sidebar_layout::KEY_CONTEXT);
             desktop::install_native_menus(cx);

@@ -10,6 +10,7 @@ pub mod file_path_display;
 pub mod fixtures;
 pub mod item_detail;
 pub mod js_text;
+pub mod live_projection;
 pub mod messages_timeline_logic;
 pub mod orchestration_timing;
 pub mod orchestration_v2_timeline;

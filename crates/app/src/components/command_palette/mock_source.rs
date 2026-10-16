@@ -29,6 +29,15 @@ impl MockPaletteBackend {
         store: Entity<SidebarStore>,
         sidebar_backend: std::rc::Rc<MockSidebarBackend>,
     ) -> Self {
+        Self::with_backend(store, sidebar_backend)
+    }
+
+    /// Over any sidebar backend: the live app passes its own, so the
+    /// palette's thread actions reach the orchestrator.
+    pub fn with_backend(
+        store: Entity<SidebarStore>,
+        sidebar_backend: SharedSidebarBackend,
+    ) -> Self {
         Self {
             store,
             sidebar_backend,

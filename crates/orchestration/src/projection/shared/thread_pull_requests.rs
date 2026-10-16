@@ -134,6 +134,22 @@ fn normalize_key(key: &KeySource<'_>) -> NormalizedPullRequestKey {
     }
 }
 
+/// `normalizeThreadPullRequestKey` for a command's `host`/`repository`/`number`,
+/// which carry no URL to recover a Forgejo authority from.
+pub fn normalized_pull_request_key(
+    host: &str,
+    repository: &str,
+    number: u64,
+) -> NormalizedPullRequestKey {
+    normalize_key(&KeySource {
+        host,
+        repository,
+        number,
+        authority: None,
+        url: None,
+    })
+}
+
 /// Legacy Azure selectors omit the organization and project; recover those from the PR URL.
 pub fn legacy_thread_pull_request_key(
     linked: &ThreadLinkedPullRequest,

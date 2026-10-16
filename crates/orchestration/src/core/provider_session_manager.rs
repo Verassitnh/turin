@@ -10,9 +10,10 @@
 //! implements it over `EventSink`, and tests use a recording fake.
 //!
 //! Not ported here (see docs/handoff/T13c-needs.md): MCP credential issuance,
-//! agent access settings, background-task roster cleanup on release, shared
-//! runtime idle thread unload, interrupting running turns on detach (needs
-//! projection reads), and retried release-record writes.
+//! agent access settings, shared runtime idle thread unload, the keyed attach
+//! lock and loaded-thread cache (PORTING.md Deviations), and retried
+//! release-record writes. Background-task roster cleanup on release and the
+//! interrupt of running turns on detach are done.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -312,6 +313,9 @@ struct ReleaseRequest {
     graceful_subscribers: bool,
     only_if_idle_generation: Option<u64>,
     origin: ReleaseOrigin,
+    /// The thread whose `detach` released the session: it already left the
+    /// attached set, but its background-task roster still belongs to the release.
+    detached_thread_id: Option<ThreadId>,
 }
 
 struct Inner {
@@ -455,10 +459,13 @@ impl Inner {
     fn remove_live_session(&self, request: &ReleaseRequest) -> Option<Arc<LiveSession>> {
         let mut sessions = self.sessions.lock();
         let session = sessions.get(&request.provider_session_id)?.clone();
-        if let Some(generation) = request.only_if_idle_generation
-            && session.state.lock().idle_generation != generation
-        {
-            return None;
+        if let Some(generation) = request.only_if_idle_generation {
+            // `mark_busy` does not bump the generation, so the busy set is
+            // checked here, under the same state lock, as upstream does.
+            let state = session.state.lock();
+            if !state.busy_turns.is_empty() || state.idle_generation != generation {
+                return None;
+            }
         }
         sessions.remove(&request.provider_session_id);
         Some(session)
@@ -516,9 +523,17 @@ impl Inner {
             != ProviderSessionReleaseReason::ServerShutdown
             && session.runtime.background_tasks_end_with_process()
         {
+            // A detach that released the session already removed its thread
+            // from the attached set.
+            let mut roster_threads = attached.clone();
+            if let Some(detached) = &request.detached_thread_id
+                && !roster_threads.contains(detached)
+            {
+                roster_threads.push(detached.clone());
+            }
             match self
                 .reads
-                .pending_background_tasks(&attached, &session.provider_session_id)
+                .pending_background_tasks(&roster_threads, &session.provider_session_id)
                 .await
             {
                 Ok(tasks) => tasks,
@@ -673,6 +688,7 @@ async fn release_if_still_idle(
                 graceful_subscribers: false,
                 only_if_idle_generation: Some(generation),
                 origin: ReleaseOrigin::IdleTimer,
+                detached_thread_id: None,
             })
             .await
         {
@@ -794,6 +810,7 @@ fn spawn_event_pump(inner: &Arc<Inner>, session: &Arc<LiveSession>) -> AbortOnDr
                 graceful_subscribers: true,
                 only_if_idle_generation: None,
                 origin: ReleaseOrigin::EventPump,
+                detached_thread_id: None,
             },
             other => {
                 let detail = match other {
@@ -812,6 +829,7 @@ fn spawn_event_pump(inner: &Arc<Inner>, session: &Arc<LiveSession>) -> AbortOnDr
                     graceful_subscribers: false,
                     only_if_idle_generation: None,
                     origin: ReleaseOrigin::EventPump,
+                    detached_thread_id: None,
                 }
             }
         };
@@ -1276,6 +1294,7 @@ impl ProviderSessionManager {
                     graceful_subscribers: false,
                     only_if_idle_generation: None,
                     origin: ReleaseOrigin::Caller,
+                    detached_thread_id: None,
                 })
                 .await;
             if let Err(release_cause) = release {
@@ -1328,6 +1347,7 @@ impl ProviderSessionManager {
                 graceful_subscribers: false,
                 only_if_idle_generation: None,
                 origin: ReleaseOrigin::Caller,
+                detached_thread_id: None,
             })
             .await
     }
@@ -1415,6 +1435,7 @@ impl ProviderSessionManager {
                     graceful_subscribers: false,
                     only_if_idle_generation: None,
                     origin: ReleaseOrigin::Caller,
+                    detached_thread_id: Some(thread_id.clone()),
                 })
                 .await;
         }
@@ -1434,6 +1455,7 @@ impl ProviderSessionManager {
                 graceful_subscribers: false,
                 only_if_idle_generation: None,
                 origin: ReleaseOrigin::Caller,
+                detached_thread_id: None,
             })
         }))
         .await;

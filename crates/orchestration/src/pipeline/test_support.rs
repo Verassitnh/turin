@@ -191,6 +191,99 @@ impl OrchestratorPort for MockOrchestrator {
         Ok(0)
     }
 
+    async fn get_thread_history_page(
+        &self,
+        thread_id: &ThreadId,
+        _cursor: &str,
+        _through_entry_id: Option<&str>,
+        _conversation_only: bool,
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage,
+        OrchestratorError,
+    > {
+        Err(OrchestratorError::projection(
+            thread_id.clone(),
+            "not scripted",
+        ))
+    }
+
+    async fn get_timeline_page(
+        &self,
+        thread_id: &ThreadId,
+        _options: crate::projection::store::history::TimelinePageOptions,
+    ) -> Result<crate::projection::store::history::ProjectionTimelinePage, OrchestratorError> {
+        Err(OrchestratorError::projection(
+            thread_id.clone(),
+            "not scripted",
+        ))
+    }
+
+    async fn get_message_count(&self, thread_id: &ThreadId) -> Result<u64, OrchestratorError> {
+        Err(OrchestratorError::projection(
+            thread_id.clone(),
+            "not scripted",
+        ))
+    }
+
+    async fn get_turn_item(
+        &self,
+        thread_id: &ThreadId,
+        _item_id: &turin_contracts::TurnItemId,
+    ) -> Result<Option<turin_contracts::orchestration_v2::OrchestrationV2TurnItem>, OrchestratorError>
+    {
+        Err(OrchestratorError::projection(
+            thread_id.clone(),
+            "not scripted",
+        ))
+    }
+
+    async fn get_checkpoint_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::contexts::CheckpointContext, OrchestratorError> {
+        Err(OrchestratorError::projection(
+            thread_id.clone(),
+            "not scripted",
+        ))
+    }
+
+    async fn get_thread_snapshot(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError> {
+        Err(OrchestratorError::projection(
+            thread_id.clone(),
+            "not scripted",
+        ))
+    }
+
+    async fn get_thread_snapshot_window(
+        &self,
+        thread_id: &ThreadId,
+        _options: crate::projection::store::ThreadSnapshotWindowOptions,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError> {
+        Err(OrchestratorError::projection(
+            thread_id.clone(),
+            "not scripted",
+        ))
+    }
+
+    async fn search_thread_stream(
+        &self,
+        input: &turin_contracts::orchestration_v2::OrchestrationV2SearchThreadInput,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            turin_contracts::orchestration_v2::OrchestrationV2SearchThreadResult,
+        >,
+        OrchestratorError,
+    > {
+        Err(OrchestratorError::projection(
+            input.thread_id.clone(),
+            "search is not scripted",
+        ))
+    }
+
     async fn restart_continuation_pending(&self, run: &OrchestrationV2Run) -> bool {
         (self.restart_pending.lock())(run)
     }

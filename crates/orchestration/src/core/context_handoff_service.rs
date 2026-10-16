@@ -1,39 +1,32 @@
-//! Port of upstream/apps/server/src/orchestration-v2/ContextHandoffService.ts
+//! Port of upstream/apps/server/src/orchestration-v2/ContextHandoffService.ts.
 //!
-//! Builds the handoff records that carry a conversation into another provider
-//! thread: the legacy import, the manual handoff, the fork merge-back delta, and
-//! the provider-thread handoff. Each record holds a human-readable `summaryText`
-//! and, when the history fits, the portable `history` that delivery replays.
-//!
-//! Deviations from upstream:
-//! - Preparation is synchronous and infallible. `IdAllocator` in provider-core
-//!   is a plain function, so the `ContextHandoffPrepareError` mapping on
-//!   allocation has nothing to catch and is not ported.
-//! - The Effect `layer` becomes `ContextHandoffService::new` (explicit token cap)
-//!   or `ContextHandoffService::from_env` (reads `T3CODE_CONTEXT_HANDOFF_TOKEN_CAP`,
-//!   falling back to the default on an invalid value, as `orElseSucceed` did).
-
-use std::collections::VecDeque;
+//! Builds the `OrchestrationV2ContextHandoff` records that carry portable
+//! history into a provider thread. Id allocation cannot fail here, so none of
+//! the `prepare*` methods returns a `ContextHandoffPrepareError`; that type is
+//! not ported.
 
 use serde::Serialize;
-use turin_contracts::base_schemas::{UtcDateTime, is_js_whitespace, js_len};
-use turin_contracts::orchestration_v2::{
-    OrchestrationV2ContextHandoff, OrchestrationV2ContextHandoffHistory,
-    OrchestrationV2ContextHandoffStatus, OrchestrationV2ContextHandoffStrategy,
-    OrchestrationV2CoveredRunOrdinals, OrchestrationV2HistoricalMessage, OrchestrationV2Run,
-    OrchestrationV2TurnItem,
+use turin_contracts::{
+    ProviderThreadId, RunId, ThreadId, UtcDateTime,
+    orchestration_v2::{
+        OrchestrationV2ContextHandoff, OrchestrationV2ContextHandoffHistory,
+        OrchestrationV2ContextHandoffStatus, OrchestrationV2ContextHandoffStrategy,
+        OrchestrationV2CoveredRunOrdinals, OrchestrationV2HistoricalMessage, OrchestrationV2Run,
+        OrchestrationV2TurnItem,
+    },
+    provider_instance::ProviderInstanceId,
 };
-use turin_contracts::provider_instance::ProviderInstanceId;
-use turin_contracts::{ContextTransferId, PositiveInt, ProviderThreadId, RunId, ThreadId};
-use turin_provider_core::handoff_budget::{
-    DEFAULT_HANDOFF_TOKEN_CAP, SelectHistoryInput, SelectedHistory, handoff_coverage,
-    handoff_token_cap_config, historical_message, render_history, select_history,
+use turin_provider_core::{
+    handoff_budget::{
+        DEFAULT_HANDOFF_TOKEN_CAP, SelectHistoryInput, handoff_coverage, historical_message,
+        render_history, select_history,
+    },
+    id_allocator::IdAllocator,
 };
-use turin_provider_core::id_allocator::IdAllocator;
-use turin_provider_core::turn_item::turn_item_common;
 
-/// The provider-thread handoff strategies `prepareProviderHandoff` accepts
-/// (upstream `Extract<…, "delta_since_target_last_seen" | "full_thread_summary">`).
+use crate::projection::turn_item;
+
+/// The strategies `prepareProviderHandoff` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderHandoffStrategy {
     DeltaSinceTargetLastSeen,
@@ -51,6 +44,36 @@ impl ProviderHandoffStrategy {
     }
 }
 
+pub struct PrepareProviderHandoffInput<'a> {
+    pub thread_id: &'a ThreadId,
+    pub target_run_id: &'a RunId,
+    /// `Some(None)` is upstream's `null`.
+    pub transfer_id: Option<turin_contracts::ContextTransferId>,
+    pub from_provider_thread_ids: &'a [ProviderThreadId],
+    pub to_provider_thread_id: &'a ProviderThreadId,
+    pub from_provider_instance_id: &'a ProviderInstanceId,
+    pub to_provider_instance_id: &'a ProviderInstanceId,
+    pub covered_run_ordinals: OrchestrationV2CoveredRunOrdinals,
+    pub runs: Option<&'a [OrchestrationV2Run]>,
+    pub strategy: ProviderHandoffStrategy,
+    pub items: &'a [OrchestrationV2TurnItem],
+    pub created_at: UtcDateTime,
+}
+
+pub struct PrepareForkDeltaInput<'a> {
+    pub source_thread_id: &'a ThreadId,
+    pub target_thread_id: &'a ThreadId,
+    pub target_run_id: &'a RunId,
+    pub transfer_id: Option<turin_contracts::ContextTransferId>,
+    pub from_provider_thread_ids: &'a [ProviderThreadId],
+    pub to_provider_thread_id: &'a ProviderThreadId,
+    pub from_provider_instance_id: &'a ProviderInstanceId,
+    pub to_provider_instance_id: &'a ProviderInstanceId,
+    pub covered_run_ordinals: OrchestrationV2CoveredRunOrdinals,
+    pub delta_items: &'a [OrchestrationV2TurnItem],
+    pub created_at: UtcDateTime,
+}
+
 pub struct PrepareLegacyImportInput<'a> {
     pub thread_id: &'a ThreadId,
     pub target_run_id: &'a RunId,
@@ -60,79 +83,69 @@ pub struct PrepareLegacyImportInput<'a> {
     pub created_at: UtcDateTime,
 }
 
-pub struct PrepareManualInput<'a> {
-    pub thread_id: &'a ThreadId,
-    pub target_run_id: &'a RunId,
-    pub from_provider_thread_ids: &'a [ProviderThreadId],
-    pub to_provider_thread_id: &'a ProviderThreadId,
-}
-
-pub struct PrepareForkDeltaInput<'a> {
-    pub source_thread_id: &'a ThreadId,
-    pub target_thread_id: &'a ThreadId,
-    pub target_run_id: &'a RunId,
-    pub transfer_id: Option<ContextTransferId>,
-    pub from_provider_thread_ids: &'a [ProviderThreadId],
-    pub to_provider_thread_id: &'a ProviderThreadId,
-    pub from_provider_instance_id: &'a ProviderInstanceId,
-    pub to_provider_instance_id: &'a ProviderInstanceId,
-    pub covered_run_ordinals: &'a OrchestrationV2CoveredRunOrdinals,
-    pub delta_items: &'a [OrchestrationV2TurnItem],
-    pub created_at: UtcDateTime,
-}
-
-pub struct PrepareProviderHandoffInput<'a> {
-    pub thread_id: &'a ThreadId,
-    pub target_run_id: &'a RunId,
-    pub transfer_id: Option<ContextTransferId>,
-    pub from_provider_thread_ids: &'a [ProviderThreadId],
-    pub to_provider_thread_id: &'a ProviderThreadId,
-    pub from_provider_instance_id: &'a ProviderInstanceId,
-    pub to_provider_instance_id: &'a ProviderInstanceId,
-    pub covered_run_ordinals: &'a OrchestrationV2CoveredRunOrdinals,
-    pub runs: &'a [OrchestrationV2Run],
-    pub strategy: ProviderHandoffStrategy,
-    pub items: &'a [OrchestrationV2TurnItem],
-    pub created_at: UtcDateTime,
-}
-
-/// `ContextHandoffServiceV2`: stateless apart from the history token cap.
+/// `ContextHandoffServiceV2`.
+#[derive(Debug, Clone, Copy)]
 pub struct ContextHandoffService {
     token_cap: i64,
-    ids: IdAllocator,
+}
+
+impl Default for ContextHandoffService {
+    fn default() -> Self {
+        Self::new(DEFAULT_HANDOFF_TOKEN_CAP)
+    }
+}
+
+fn covered(from: u64, to: u64) -> OrchestrationV2CoveredRunOrdinals {
+    OrchestrationV2CoveredRunOrdinals {
+        from: turin_contracts::PositiveInt::new(from).expect("positive"),
+        to: turin_contracts::PositiveInt::new(to).expect("positive"),
+    }
+}
+
+fn history(
+    messages: Vec<OrchestrationV2HistoricalMessage>,
+    coverage: String,
+    omitted_items: i64,
+    omitted_item_ids: Vec<turin_contracts::TurnItemId>,
+) -> OrchestrationV2ContextHandoffHistory {
+    OrchestrationV2ContextHandoffHistory {
+        messages,
+        coverage,
+        omitted_items: u64::try_from(omitted_items).unwrap_or(0),
+        omitted_item_ids: Some(omitted_item_ids),
+    }
 }
 
 impl ContextHandoffService {
+    /// `tokenCap` is `handoffTokenCapConfig` read once when the layer builds.
     pub fn new(token_cap: i64) -> Self {
-        Self {
-            token_cap,
-            ids: IdAllocator,
-        }
+        Self { token_cap }
     }
 
-    /// Reads `T3CODE_CONTEXT_HANDOFF_TOKEN_CAP`. An invalid value falls back to
-    /// the default, as upstream's `orElseSucceed` did.
-    pub fn from_env() -> Self {
-        let token_cap = handoff_token_cap_config(|key| std::env::var(key).ok())
-            .unwrap_or(DEFAULT_HANDOFF_TOKEN_CAP);
-        Self::new(token_cap)
+    /// The service with the cap read from the environment, falling back to
+    /// the default when the variable is malformed (`Effect.orElseSucceed`).
+    pub fn from_environment() -> Self {
+        Self::new(
+            turin_provider_core::handoff_budget::handoff_token_cap_config(|name| {
+                std::env::var(name).ok()
+            })
+            .unwrap_or(DEFAULT_HANDOFF_TOKEN_CAP),
+        )
     }
 
-    /// `prepareLegacyImport`: history from the previous orchestrator, imported
-    /// as a single run-1 handoff for the first native v2 turn.
     pub fn prepare_legacy_import(
         &self,
-        input: PrepareLegacyImportInput<'_>,
+        input: &PrepareLegacyImportInput<'_>,
     ) -> OrchestrationV2ContextHandoff {
-        let legacy_instance = ProviderInstanceId::new("legacy").expect("legacy id is non-blank");
-        let id = self.ids.context_handoff(
+        let handoff_id = IdAllocator.context_handoff(
             input.thread_id,
-            &legacy_instance,
+            &ProviderInstanceId::new("legacy").expect("static id"),
             input.to_provider_instance_id,
         );
-        let covered = covered_run_ordinals(1, 1);
-        let coverage = handoff_coverage(input.thread_id.as_str(), &covered, input.items);
-        let messages = historical_messages(input.items, &[]);
+        let covered_run_ordinals = covered(1, 1);
+        let coverage =
+            handoff_coverage(input.thread_id.as_str(), &covered_run_ordinals, input.items);
+        let messages: Vec<_> = input.items.iter().filter_map(historical_message).collect();
         let selected = select_history(&SelectHistoryInput {
             messages: &messages,
             coverage: &coverage,
@@ -140,18 +153,23 @@ impl ContextHandoffService {
             budget: self.token_cap,
         });
         OrchestrationV2ContextHandoff {
-            id,
+            id: handoff_id,
             transfer_id: Some(None),
             thread_id: input.thread_id.clone(),
             target_run_id: input.target_run_id.clone(),
             from_provider_thread_ids: Vec::new(),
             to_provider_thread_id: input.to_provider_thread_id.clone(),
-            covered_run_ordinals: covered,
+            covered_run_ordinals,
             strategy: OrchestrationV2ContextHandoffStrategy::ManualContext,
             status: OrchestrationV2ContextHandoffStatus::Ready,
             summary_message_id: None,
             summary_text: make_legacy_import_summary(input.items),
-            history: Some(history(selected, coverage)),
+            history: Some(history(
+                selected.messages,
+                coverage,
+                selected.omitted_items,
+                selected.omitted_item_ids,
+            )),
             delivery: None,
             detail_in_turn_item: None,
             created_by_provider_instance_id: None,
@@ -160,19 +178,23 @@ impl ContextHandoffService {
         }
     }
 
-    /// `prepare`: a manual handoff with no history to replay.
-    pub fn prepare(&self, input: PrepareManualInput<'_>) -> OrchestrationV2ContextHandoff {
-        let manual = ProviderInstanceId::new("manual").expect("manual id is non-blank");
-        let id = self.ids.context_handoff(input.thread_id, &manual, &manual);
+    pub fn prepare(
+        &self,
+        thread_id: &ThreadId,
+        target_run_id: &RunId,
+        from_provider_thread_ids: &[ProviderThreadId],
+        to_provider_thread_id: &ProviderThreadId,
+    ) -> OrchestrationV2ContextHandoff {
         let now = UtcDateTime::now();
+        let manual = ProviderInstanceId::new("manual").expect("static id");
         OrchestrationV2ContextHandoff {
-            id,
+            id: IdAllocator.context_handoff(thread_id, &manual, &manual),
             transfer_id: Some(None),
-            thread_id: input.thread_id.clone(),
-            target_run_id: input.target_run_id.clone(),
-            from_provider_thread_ids: input.from_provider_thread_ids.to_vec(),
-            to_provider_thread_id: input.to_provider_thread_id.clone(),
-            covered_run_ordinals: covered_run_ordinals(1, 1),
+            thread_id: thread_id.clone(),
+            target_run_id: target_run_id.clone(),
+            from_provider_thread_ids: from_provider_thread_ids.to_vec(),
+            to_provider_thread_id: to_provider_thread_id.clone(),
+            covered_run_ordinals: covered(1, 1),
             strategy: OrchestrationV2ContextHandoffStrategy::ManualContext,
             status: OrchestrationV2ContextHandoffStatus::Ready,
             summary_message_id: None,
@@ -186,23 +208,25 @@ impl ContextHandoffService {
         }
     }
 
-    /// `prepareForkDelta`: the merge-back summary of what a fork did after it
-    /// diverged, written into the target thread.
     pub fn prepare_fork_delta(
         &self,
-        input: PrepareForkDeltaInput<'_>,
+        input: &PrepareForkDeltaInput<'_>,
     ) -> OrchestrationV2ContextHandoff {
-        let id = self.ids.context_handoff(
+        let handoff_id = IdAllocator.context_handoff(
             input.target_thread_id,
             input.from_provider_instance_id,
             input.to_provider_instance_id,
         );
         let coverage = handoff_coverage(
             input.source_thread_id.as_str(),
-            input.covered_run_ordinals,
+            &input.covered_run_ordinals,
             input.delta_items,
         );
-        let messages = historical_messages(input.delta_items, &[]);
+        let messages: Vec<_> = input
+            .delta_items
+            .iter()
+            .filter_map(historical_message)
+            .collect();
         let selected = select_history(&SelectHistoryInput {
             messages: &messages,
             coverage: &coverage,
@@ -210,8 +234,8 @@ impl ContextHandoffService {
             budget: self.token_cap,
         });
         OrchestrationV2ContextHandoff {
-            id,
-            transfer_id: Some(input.transfer_id),
+            id: handoff_id,
+            transfer_id: Some(input.transfer_id.clone()),
             thread_id: input.target_thread_id.clone(),
             target_run_id: input.target_run_id.clone(),
             from_provider_thread_ids: input.from_provider_thread_ids.to_vec(),
@@ -220,13 +244,13 @@ impl ContextHandoffService {
             strategy: OrchestrationV2ContextHandoffStrategy::ForkDeltaSummary,
             status: OrchestrationV2ContextHandoffStatus::Ready,
             summary_message_id: None,
-            summary_text: make_fork_delta_summary(
-                input.source_thread_id,
-                input.target_thread_id,
-                input.covered_run_ordinals,
-                input.delta_items,
-            ),
-            history: Some(history(selected, coverage)),
+            summary_text: make_fork_delta_summary(input),
+            history: Some(history(
+                selected.messages,
+                coverage,
+                selected.omitted_items,
+                selected.omitted_item_ids,
+            )),
             delivery: None,
             detail_in_turn_item: None,
             created_by_provider_instance_id: None,
@@ -235,24 +259,37 @@ impl ContextHandoffService {
         }
     }
 
-    /// `prepareProviderHandoff`: a delta or full-summary handoff between two
-    /// provider threads. Run statuses are attached to each message so the
-    /// budget and rendering can see them.
     pub fn prepare_provider_handoff(
         &self,
-        input: PrepareProviderHandoffInput<'_>,
+        input: &PrepareProviderHandoffInput<'_>,
     ) -> OrchestrationV2ContextHandoff {
-        let id = self.ids.context_handoff(
+        let handoff_id = IdAllocator.context_handoff(
             input.thread_id,
             input.from_provider_instance_id,
             input.to_provider_instance_id,
         );
+        let run_statuses: std::collections::HashMap<&RunId, String> = input
+            .runs
+            .unwrap_or_default()
+            .iter()
+            .map(|run| (&run.id, wire_text(&run.status)))
+            .collect();
         let coverage = handoff_coverage(
             input.thread_id.as_str(),
-            input.covered_run_ordinals,
+            &input.covered_run_ordinals,
             input.items,
         );
-        let messages = historical_messages(input.items, input.runs);
+        let messages: Vec<OrchestrationV2HistoricalMessage> = input
+            .items
+            .iter()
+            .filter_map(|item| {
+                let mut message = historical_message(item)?;
+                if let Some(run_id) = turn_item::common(item).run_id {
+                    message.run_status = run_statuses.get(run_id).cloned();
+                }
+                Some(message)
+            })
+            .collect();
         let selected = select_history(&SelectHistoryInput {
             messages: &messages,
             coverage: &coverage,
@@ -260,8 +297,8 @@ impl ContextHandoffService {
             budget: self.token_cap,
         });
         OrchestrationV2ContextHandoff {
-            id,
-            transfer_id: Some(input.transfer_id),
+            id: handoff_id,
+            transfer_id: Some(input.transfer_id.clone()),
             thread_id: input.thread_id.clone(),
             target_run_id: input.target_run_id.clone(),
             from_provider_thread_ids: input.from_provider_thread_ids.to_vec(),
@@ -271,7 +308,12 @@ impl ContextHandoffService {
             status: OrchestrationV2ContextHandoffStatus::Ready,
             summary_message_id: None,
             summary_text: render_history(&selected.messages, &selected.context),
-            history: Some(history(selected, coverage)),
+            history: Some(history(
+                selected.messages,
+                coverage,
+                selected.omitted_items,
+                selected.omitted_item_ids,
+            )),
             delivery: None,
             detail_in_turn_item: None,
             created_by_provider_instance_id: None,
@@ -281,70 +323,28 @@ impl ContextHandoffService {
     }
 }
 
-fn covered_run_ordinals(from: u64, to: u64) -> OrchestrationV2CoveredRunOrdinals {
-    OrchestrationV2CoveredRunOrdinals {
-        from: PositiveInt::new(from).expect("run ordinals start at 1"),
-        to: PositiveInt::new(to).expect("run ordinals start at 1"),
-    }
-}
-
-/// `historicalMessage` over each item, with `runStatus` set from the run the
-/// item belongs to (empty `runs` leaves it unset).
-fn historical_messages(
-    items: &[OrchestrationV2TurnItem],
-    runs: &[OrchestrationV2Run],
-) -> Vec<OrchestrationV2HistoricalMessage> {
-    items
-        .iter()
-        .filter_map(|item| {
-            let mut message = historical_message(item)?;
-            if let Some(run_id) = turn_item_run_id(item) {
-                message.run_status = runs
-                    .iter()
-                    .find(|run| &run.id == run_id)
-                    .map(|run| wire_name(&run.status));
-            }
-            Some(message)
-        })
-        .collect()
-}
-
-fn turn_item_run_id(item: &OrchestrationV2TurnItem) -> Option<&RunId> {
-    turn_item_common(item).run_id
-}
-
-fn history(selected: SelectedHistory, coverage: String) -> OrchestrationV2ContextHandoffHistory {
-    OrchestrationV2ContextHandoffHistory {
-        messages: selected.messages,
-        coverage,
-        omitted_items: selected.omitted_items as u64,
-        omitted_item_ids: Some(selected.omitted_item_ids),
-    }
-}
-
-/// The wire spelling of a contract enum (`"fork_delta_summary"`, …).
-fn wire_name<T: Serialize>(value: &T) -> String {
+fn wire_text<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_default()
 }
 
-/// `text.replace(/\s+/g, " ").trim()`, then cut to `max_length` UTF-16 code
-/// units with a trailing `...`. Units, not chars: upstream measures `.length`.
+/// `compactText`. Lengths are UTF-16 code units, as in JavaScript.
 fn compact_text(text: &str, max_length: usize) -> String {
     let compacted = text
-        .split(is_js_whitespace)
-        .filter(|part| !part.is_empty())
+        .split(turin_contracts::base_schemas::is_js_whitespace)
+        .filter(|piece| !piece.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    if js_len(&compacted) <= max_length {
+    let units: Vec<u16> = compacted.encode_utf16().collect();
+    if units.len() <= max_length {
         return compacted;
     }
-    let units: Vec<u16> = compacted.encode_utf16().take(max_length - 3).collect();
-    format!("{}...", String::from_utf16_lossy(&units))
+    format!("{}...", String::from_utf16_lossy(&units[..max_length - 3]))
 }
 
+/// `summarizeDeltaItem`.
 fn summarize_delta_item(item: &OrchestrationV2TurnItem) -> Option<String> {
     use OrchestrationV2TurnItem as Item;
     match item {
@@ -355,38 +355,32 @@ fn summarize_delta_item(item: &OrchestrationV2TurnItem) -> Option<String> {
         Item::CommandExecution { input, .. } => {
             Some(format!("- Command: {}", compact_text(input, 240)))
         }
-        Item::FileChange { file_name, .. } => {
-            Some(format!("- File change: {}", file_name.as_str()))
-        }
+        Item::FileChange { file_name, .. } => Some(format!("- File change: {file_name}")),
         Item::Checkpoint { files, .. } => Some(format!("- Checkpoint: {} files", files.len())),
         Item::Handoff {
             summary, strategy, ..
         } => {
-            let source = summary.clone().unwrap_or_else(|| wire_name(strategy));
-            Some(format!("- Handoff: {}", compact_text(&source, 240)))
+            let label = summary.clone().unwrap_or_else(|| wire_text(strategy));
+            Some(format!("- Handoff: {}", compact_text(&label, 240)))
         }
         _ => None,
     }
 }
 
-fn make_fork_delta_summary(
-    source_thread_id: &ThreadId,
-    target_thread_id: &ThreadId,
-    covered: &OrchestrationV2CoveredRunOrdinals,
-    delta_items: &[OrchestrationV2TurnItem],
-) -> String {
-    let item_lines: Vec<String> = delta_items
+/// `makeForkDeltaSummary`.
+fn make_fork_delta_summary(input: &PrepareForkDeltaInput<'_>) -> String {
+    let item_lines: Vec<String> = input
+        .delta_items
         .iter()
         .filter_map(summarize_delta_item)
         .collect();
     let mut lines = vec![
         "Merge-back context from forked conversation.".to_owned(),
-        format!("Source thread: {}", source_thread_id.as_str()),
-        format!("Target thread: {}", target_thread_id.as_str()),
+        format!("Source thread: {}", input.source_thread_id),
+        format!("Target thread: {}", input.target_thread_id),
         format!(
             "Covered fork runs: {}-{}",
-            covered.from.0.get(),
-            covered.to.0.get()
+            input.covered_run_ordinals.from, input.covered_run_ordinals.to
         ),
         String::new(),
         "Fork delta:".to_owned(),
@@ -399,13 +393,21 @@ fn make_fork_delta_summary(
     lines.join("\n")
 }
 
-fn is_unit_whitespace(unit: u16) -> bool {
-    char::from_u32(u32::from(unit)).is_some_and(is_js_whitespace)
+/// JavaScript `\s`: what `/\s/` and `trimStart` treat as whitespace.
+fn is_js_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x09..=0x0d | 0x20 | 0xa0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f
+            | 0x3000 | 0xfeff
+    )
 }
 
-/// The imported transcript, newest first, cut to 32,000 UTF-16 units. A section
-/// that does not fit whole keeps its newest tail, started at a word boundary and
-/// never inside a surrogate pair.
+fn utf16(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
+/// `makeLegacyImportSummary`. Works in UTF-16 code units so the 32,000-unit
+/// cap and the surrogate-pair repair match JavaScript string indexing.
 fn make_legacy_import_summary(items: &[OrchestrationV2TurnItem]) -> String {
     use OrchestrationV2TurnItem as Item;
     let sections: Vec<(&str, &str)> = items
@@ -418,59 +420,57 @@ fn make_legacy_import_summary(items: &[OrchestrationV2TurnItem]) -> String {
         .collect();
     let header = "Imported conversation history from the previous T3 Code orchestrator. Use it as context; do not repeat it unless the user asks.";
     let max_chars: i64 = 32_000;
-    let mut selected: VecDeque<String> = VecDeque::new();
-    let mut remaining: i64 = max_chars - js_len(header) as i64 - 2;
-    for (label, body) in sections.iter().rev() {
+    let mut selected: Vec<String> = Vec::new();
+    let mut remaining = max_chars - utf16(header).len() as i64 - 2;
+    for (label, body) in sections.into_iter().rev() {
         if remaining <= 0 {
             break;
         }
         let full_section = format!("{label}:\n{body}");
-        let full_len = js_len(&full_section) as i64;
-        if full_len <= remaining {
-            selected.push_front(full_section);
-            remaining -= full_len + 2;
+        let full_length = utf16(&full_section).len() as i64;
+        if full_length <= remaining {
+            selected.insert(0, full_section);
+            remaining -= full_length + 2;
             continue;
         }
 
         let prefix = format!("{label}:\n... ");
-        let body_budget = remaining - js_len(&prefix) as i64;
+        let body_budget = remaining - utf16(&prefix).len() as i64;
         if body_budget <= 0 {
             continue;
         }
-
-        let units: Vec<u16> = body.encode_utf16().collect();
-        let is_ws_at = |index: usize| {
-            units
-                .get(index)
-                .is_some_and(|unit| is_unit_whitespace(*unit))
-        };
-        let mut body_start = (units.len() as i64 - body_budget).max(0) as usize;
+        let body_units = utf16(body);
+        let initial_start = body_units.len() as i64 - body_budget;
+        let mut body_start = initial_start.max(0) as usize;
         if body_start > 0
-            && !is_ws_at(body_start - 1)
-            && !is_ws_at(body_start)
-            && let Some(offset) = units[body_start..]
+            && !is_js_whitespace(body_units[body_start - 1])
+            && !is_js_whitespace(body_units[body_start])
+            && let Some(next_whitespace) = body_units[body_start..]
                 .iter()
-                .position(|unit| is_unit_whitespace(*unit))
+                .position(|unit| is_js_whitespace(*unit))
         {
-            body_start += offset;
+            body_start += next_whitespace;
         }
-        let unit_at = units.get(body_start).copied();
-        let unit_before = body_start
-            .checked_sub(1)
-            .and_then(|index| units.get(index).copied());
-        if matches!(unit_at, Some(0xdc00..=0xdfff)) && matches!(unit_before, Some(0xd800..=0xdbff))
+        // Do not start on the low half of a surrogate pair.
+        if body_start > 0
+            && body_start < body_units.len()
+            && (0xdc00..=0xdfff).contains(&body_units[body_start])
+            && (0xd800..=0xdbff).contains(&body_units[body_start - 1])
         {
             body_start += 1;
         }
-        let body_suffix = String::from_utf16_lossy(units.get(body_start..).unwrap_or(&[]));
-        let body_suffix = body_suffix.trim_start_matches(is_js_whitespace);
+        let suffix_units = &body_units[body_start.min(body_units.len())..];
+        let trimmed_from = suffix_units
+            .iter()
+            .position(|unit| !is_js_whitespace(*unit))
+            .unwrap_or(suffix_units.len());
+        let body_suffix = &suffix_units[trimmed_from..];
         if body_suffix.is_empty() {
             continue;
         }
-
-        let suffix = format!("{prefix}{body_suffix}");
-        remaining -= js_len(&suffix) as i64 + 2;
-        selected.push_front(suffix);
+        let suffix = format!("{prefix}{}", String::from_utf16_lossy(body_suffix));
+        remaining -= utf16(&suffix).len() as i64 + 2;
+        selected.insert(0, suffix);
     }
     std::iter::once(header.to_owned())
         .chain(selected)
@@ -478,8 +478,7 @@ fn make_legacy_import_summary(items: &[OrchestrationV2TurnItem]) -> String {
         .join("\n\n")
 }
 
-/// `providerMessageWithContextHandoff`: the handoff summary followed by the
-/// user's message, for providers that take the context as plain text.
+/// `providerMessageWithContextHandoff`.
 pub fn provider_message_with_context_handoff(
     handoff: &OrchestrationV2ContextHandoff,
     user_text: &str,
@@ -487,116 +486,75 @@ pub fn provider_message_with_context_handoff(
     provider_message_with_context_handoffs(std::slice::from_ref(handoff), user_text)
 }
 
-fn provider_message_with_context_handoffs(
+/// `providerMessageWithContextHandoffs`.
+pub fn provider_message_with_context_handoffs(
     handoffs: &[OrchestrationV2ContextHandoff],
     user_text: &str,
 ) -> String {
-    let mut lines: Vec<String> = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     for handoff in handoffs {
-        let label = match handoff.strategy {
-            OrchestrationV2ContextHandoffStrategy::ForkDeltaSummary => {
-                "merge_back / fork_delta_summary".to_owned()
-            }
-            strategy => wire_name(&strategy),
+        let label = if handoff.strategy == OrchestrationV2ContextHandoffStrategy::ForkDeltaSummary {
+            "merge_back / fork_delta_summary".to_owned()
+        } else {
+            wire_text(&handoff.strategy)
         };
-        lines.push(format!("Context handoff ({label}):"));
-        lines.push(handoff.summary_text.clone());
-        lines.push(String::new());
+        parts.push(format!("Context handoff ({label}):"));
+        parts.push(handoff.summary_text.clone());
+        parts.push(String::new());
     }
-    lines.push("User message:".to_owned());
-    lines.push(user_text.to_owned());
-    lines.join("\n")
+    parts.push("User message:".to_owned());
+    parts.push(user_text.to_owned());
+    parts.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
-    use turin_contracts::orchestration_v2::{
-        OrchestrationV2Actor, OrchestrationV2CreationSource, OrchestrationV2TurnItemStatus,
-        OrchestrationV2UserMessageInputIntent,
-    };
-    use turin_contracts::{MessageId, TurnItemId};
-    use turin_provider_core::handoff_budget::DEFAULT_HANDOFF_TOKEN_CAP;
 
-    fn imported_item(role: &str, id: &str, text: &str, ordinal: u64) -> OrchestrationV2TurnItem {
-        let now = UtcDateTime::now();
-        let base = (
-            TurnItemId::new(format!("turn-item:{id}")).unwrap(),
-            MessageId::new(format!("message:{id}")).unwrap(),
-        );
-        if role == "user" {
-            OrchestrationV2TurnItem::UserMessage {
-                tool_non_execution_kind: None,
-                tool_surface: None,
-                tool_icon: None,
-                tool_source: None,
-                id: base.0,
-                thread_id: ThreadId::new("thread:legacy-context").unwrap(),
-                run_id: None,
-                node_id: None,
-                provider_thread_id: None,
-                provider_turn_id: None,
-                native_item_ref: None,
-                parent_item_id: None,
-                ordinal,
-                status: OrchestrationV2TurnItemStatus::Completed,
-                title: None,
-                started_at: Some(now),
-                completed_at: Some(now),
-                updated_at: now,
-                created_by: OrchestrationV2Actor::User,
-                creation_source: OrchestrationV2CreationSource::Server,
-                message_id: base.1,
-                scheduled_task_id: None,
-                sender_thread_id: None,
-                input_intent: OrchestrationV2UserMessageInputIntent::TurnStart,
-                text: text.to_owned(),
-                context: None,
-                attachments: vec![],
-            }
-        } else {
-            let value = json!({
-                "type": "assistant_message",
-                "id": base.0,
-                "threadId": "thread:legacy-context",
-                "runId": null,
-                "nodeId": null,
-                "providerThreadId": null,
-                "providerTurnId": null,
-                "nativeItemRef": null,
-                "parentItemId": null,
-                "ordinal": ordinal,
-                "status": "completed",
-                "title": null,
-                "startedAt": null,
-                "completedAt": null,
-                "updatedAt": now,
-                "messageId": base.1,
-                "text": text,
-                "attachments": null,
-                "streaming": false,
-            });
-            serde_json::from_value(value).unwrap()
-        }
+    use super::*;
+
+    const T0: &str = "2026-01-01T00:00:00.000Z";
+    const CREATED: &str = "2026-01-02T00:00:00.000Z";
+
+    fn at(value: &str) -> UtcDateTime {
+        serde_json::from_value(json!(value)).expect("utc")
     }
 
-    fn prepare_import(items: &[OrchestrationV2TurnItem]) -> OrchestrationV2ContextHandoff {
-        ContextHandoffService::new(DEFAULT_HANDOFF_TOKEN_CAP).prepare_legacy_import(
-            PrepareLegacyImportInput {
-                thread_id: &ThreadId::new("thread:legacy-context").unwrap(),
-                target_run_id: &RunId::new("run:first-v2").unwrap(),
-                to_provider_thread_id: &ProviderThreadId::new("provider-thread:first-v2").unwrap(),
-                to_provider_instance_id: &ProviderInstanceId::new("codex").unwrap(),
-                items,
-                created_at: UtcDateTime::now(),
-            },
-        )
+    fn imported_item(role: &str, id: &str, text: &str, ordinal: u64) -> OrchestrationV2TurnItem {
+        let mut item = json!({
+            "id": format!("turn-item:{id}"), "threadId": "thread:legacy-context",
+            "runId": null, "nodeId": null, "providerThreadId": null, "providerTurnId": null,
+            "nativeItemRef": null, "parentItemId": null, "ordinal": ordinal,
+            "status": "completed", "title": null, "startedAt": T0, "completedAt": T0,
+            "updatedAt": T0, "messageId": format!("message:{id}"), "text": text,
+        });
+        if role == "user" {
+            item["type"] = json!("user_message");
+            item["createdBy"] = json!("user");
+            item["creationSource"] = json!("server");
+            item["inputIntent"] = json!("turn_start");
+            item["attachments"] = json!([]);
+        } else {
+            item["type"] = json!("assistant_message");
+            item["streaming"] = json!(false);
+        }
+        serde_json::from_value(item).expect("item fixture")
+    }
+
+    fn prepare(items: &[OrchestrationV2TurnItem]) -> OrchestrationV2ContextHandoff {
+        ContextHandoffService::default().prepare_legacy_import(&PrepareLegacyImportInput {
+            thread_id: &ThreadId::new("thread:legacy-context").expect("id"),
+            target_run_id: &RunId::new("run:first-v2").expect("id"),
+            to_provider_thread_id: &ProviderThreadId::new("provider-thread:first-v2").expect("id"),
+            to_provider_instance_id: &ProviderInstanceId::new("codex").expect("id"),
+            items,
+            created_at: at(CREATED),
+        })
     }
 
     #[test]
     fn prepares_imported_history_for_the_first_native_v2_turn() {
-        let handoff = prepare_import(&[
+        let handoff = prepare(&[
             imported_item("user", "one", "What did we decide?", 1),
             imported_item(
                 "assistant",
@@ -625,36 +583,104 @@ mod tests {
 
     #[test]
     fn preserves_role_attribution_when_truncating_imported_history() {
-        let long = format!("{} retained final words", "x".repeat(35_000));
-        let handoff = prepare_import(&[imported_item("user", "long", &long, 1)]);
+        let handoff = prepare(&[imported_item(
+            "user",
+            "long",
+            &format!("{} retained final words", "x".repeat(35_000)),
+            1,
+        )]);
 
-        assert!(js_len(&handoff.summary_text) <= 32_000);
+        assert!(handoff.summary_text.encode_utf16().count() <= 32_000);
         assert!(
             handoff
                 .summary_text
                 .contains("User:\n... retained final words")
         );
-        let retained = regex::Regex::new(r"\n+x+ retained final words").unwrap();
-        assert!(!retained.is_match(&handoff.summary_text));
+        // The truncated body starts after whitespace, not mid-token.
+        assert!(!handoff.summary_text.contains("\nxxx retained final words"));
+        assert!(!handoff.summary_text.contains("\nx retained final words"));
     }
 
     #[test]
     fn retains_the_newest_oversized_import_even_when_it_has_no_whitespace() {
-        let long = format!("{}LATEST_SINGLE_TOKEN", "🧪".repeat(20_000));
-        let handoff = prepare_import(&[
+        let handoff = prepare(&[
             imported_item("assistant", "older", "older message", 1),
-            imported_item("user", "long-single-token", &long, 2),
+            imported_item(
+                "user",
+                "long-single-token",
+                &format!("{}LATEST_SINGLE_TOKEN", "🧪".repeat(20_000)),
+                2,
+            ),
         ]);
 
-        let omitted = handoff.history.as_ref().unwrap().omitted_item_ids.clone();
+        let omitted = handoff
+            .history
+            .as_ref()
+            .and_then(|history| history.omitted_item_ids.as_ref())
+            .expect("omitted ids");
         assert!(
             omitted
-                .unwrap_or_default()
-                .contains(&TurnItemId::new("turn-item:long-single-token").unwrap())
+                .iter()
+                .any(|id| id.as_str() == "turn-item:long-single-token")
         );
-        assert!(js_len(&handoff.summary_text) <= 32_000);
+        assert!(handoff.summary_text.encode_utf16().count() <= 32_000);
         assert!(handoff.summary_text.contains("User:\n... "));
         assert!(handoff.summary_text.contains("LATEST_SINGLE_TOKEN"));
         assert!(!handoff.summary_text.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn provider_handoff_attributes_each_message_to_its_run_status() {
+        let thread = ThreadId::new("thread:legacy-context").expect("id");
+        let mut item =
+            serde_json::to_value(imported_item("user", "one", "Hello", 1)).expect("item");
+        item["runId"] = json!("run:failed-one");
+        let item: OrchestrationV2TurnItem = serde_json::from_value(item).expect("item");
+        let run: OrchestrationV2Run = serde_json::from_value(json!({
+            "id": "run:failed-one", "threadId": "thread:legacy-context", "ordinal": 1,
+            "providerInstanceId": "codex",
+            "modelSelection": {"instanceId": "codex", "model": "gpt-5.4"},
+            "providerThreadId": null, "userMessageId": "message:one", "rootNodeId": null,
+            "activeAttemptId": null, "status": "failed", "requestedAt": T0, "startedAt": T0,
+            "completedAt": T0, "checkpointId": null, "contextHandoffId": null,
+        }))
+        .expect("run");
+        let handoff =
+            ContextHandoffService::default().prepare_provider_handoff(
+                &PrepareProviderHandoffInput {
+                    thread_id: &thread,
+                    target_run_id: &RunId::new("run:two").expect("id"),
+                    transfer_id: None,
+                    from_provider_thread_ids: &[
+                        ProviderThreadId::new("provider-thread:a").expect("id")
+                    ],
+                    to_provider_thread_id: &ProviderThreadId::new("provider-thread:a").expect("id"),
+                    from_provider_instance_id: &ProviderInstanceId::new("codex").expect("id"),
+                    to_provider_instance_id: &ProviderInstanceId::new("codex").expect("id"),
+                    covered_run_ordinals: covered(1, 1),
+                    runs: Some(std::slice::from_ref(&run)),
+                    strategy: ProviderHandoffStrategy::DeltaSinceTargetLastSeen,
+                    items: std::slice::from_ref(&item),
+                    created_at: at(CREATED),
+                },
+            );
+        let messages = handoff.history.expect("history").messages;
+        assert_eq!(messages[0].run_status.as_deref(), Some("failed"));
+        assert_eq!(
+            handoff.strategy,
+            OrchestrationV2ContextHandoffStrategy::DeltaSinceTargetLastSeen
+        );
+    }
+}
+
+#[cfg(test)]
+mod js_whitespace_tests {
+    use super::compact_text;
+
+    /// `text.replace(/\s+/g, " ").trim()`: U+FEFF is whitespace, U+0085 is not.
+    #[test]
+    fn compact_text_collapses_js_whitespace_only() {
+        assert_eq!(compact_text("\u{feff} a \n\t b\u{a0}c ", 240), "a b c");
+        assert_eq!(compact_text("a\u{85}b", 240), "a\u{85}b");
     }
 }

@@ -19,7 +19,11 @@ mod feed_retry;
 mod feeds;
 mod requests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+// The write path: the UI seams (composer send, thread actions) consume it as
+// they are bound to live threads.
+#[allow(dead_code)]
+pub mod write;
 
 // Synthetic data for `examples/seed_dev_db.rs` and the read-path test. Not a
 // runtime path, so the app binary never calls it.
@@ -49,10 +53,14 @@ use turin_contracts::orchestration_v2::{
 
 /// Every read and write service over one database connection pair.
 pub struct Stores {
-    pub projections: ProjectionStore,
-    pub projects: ProjectStore,
+    pub db: Db,
+    pub projections: Arc<ProjectionStore>,
+    pub projects: Arc<ProjectStore>,
     pub events: OrchestrationEventStore,
     pub sink: EventSink,
+    /// The outbox the sink enqueues into. The effect worker must claim from
+    /// this same value: its wake-up semaphore is shared state.
+    pub outbox: EffectOutbox,
 }
 
 impl Stores {
@@ -71,28 +79,34 @@ impl Stores {
     pub fn from_db(db: Db) -> Self {
         let events = OrchestrationEventStore::new(db.clone());
         let outbox = EffectOutbox::new(db.clone());
-        let sink = EventSink::new(events.clone(), outbox, Arc::new(ProjectionWriter));
+        let sink = EventSink::new(events.clone(), outbox.clone(), Arc::new(ProjectionWriter));
         Self {
-            projections: ProjectionStore::new(db.clone()),
-            projects: ProjectStore::new(db),
+            projections: Arc::new(ProjectionStore::new(db.clone())),
+            projects: Arc::new(ProjectStore::new(db.clone())),
+            db,
             events,
             sink,
+            outbox,
         }
     }
 }
 
-/// Starts the feeds for the client store. Returns when the store drops its
-/// request channel or the database cannot be opened. An unopenable database
-/// leaves the store empty; the UI still starts.
+/// Starts the write path and the feeds for the client store. Returns when the
+/// store drops its request channel or the database cannot be opened. An
+/// unopenable database leaves the store empty; the UI still starts, and the
+/// command bus reports why every command fails.
 pub async fn run(
     data_dir: Option<std::path::PathBuf>,
     sender: ClientStateSender,
     requests: ClientStateRequests,
+    bus: write::bus::CommandBus,
 ) {
     let Some(data_dir) = data_dir else {
-        tracing::error!("no Turin data dir: set TURIN_DATA_DIR or HOME; the sidebar stays empty");
+        let message = "no Turin data dir: set TURIN_DATA_DIR or HOME";
+        tracing::error!("{message}; the sidebar stays empty");
+        bus.fail(message.into());
         sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
-            "no Turin data dir: set TURIN_DATA_DIR or HOME".into(),
+            message.into(),
         )));
         return;
     };
@@ -100,13 +114,43 @@ pub async fn run(
         Ok(stores) => Arc::new(stores),
         Err(error) => {
             tracing::error!(error = %format!("{error:#}"), "failed to open Turin database; the sidebar stays empty");
+            bus.fail(format!("{error:#}"));
             sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
                 error.to_string(),
             )));
             return;
         }
     };
+    // Held until `serve` returns: dropping it stops the effect worker and the
+    // provider sessions.
+    let _write = match write::runtime::WriteRuntime::build(
+        Arc::clone(&stores),
+        &data_dir,
+        write::settings::load_server_settings(
+            &data_dir,
+            std::env::var(write::settings::CLAUDE_BINARY_ENV)
+                .ok()
+                .as_deref(),
+        ),
+    )
+    .await
+    {
+        Ok(runtime) => {
+            let commands = write::commands::Commands::new(Arc::clone(&runtime));
+            tokio::spawn(write::smoke::run_if_requested(commands.clone()));
+            bus.install(commands);
+            Some(runtime)
+        }
+        Err(error) => {
+            tracing::error!(error = %format!("{error:#}"), "failed to start the write path; the app is read-only");
+            bus.fail(format!("{error:#}"));
+            None
+        }
+    };
     serve(stores, sender, requests).await;
+    if let Some(write) = &_write {
+        write.shutdown().await;
+    }
 }
 
 /// Loads the shell, starts its feed after the snapshot's sequence, then serves

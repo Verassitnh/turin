@@ -51,7 +51,7 @@ pub fn mode_text<T: serde::Serialize>(mode: &T) -> String {
 /// `OrchestratorV2Error`.
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
-    #[error("Orchestration command {command_type} ({command_id}) failed.")]
+    #[error("Failed to dispatch orchestration command {command_type} ({command_id}).")]
     Dispatch {
         command_id: CommandId,
         command_type: String,
@@ -169,6 +169,9 @@ pub enum RecordField {
     RuntimeRequests,
     Messages,
     TurnItems,
+    CheckpointScopes,
+    Checkpoints,
+    ContextTransfers,
 }
 
 /// `ProjectionRecordFilter`.
@@ -179,6 +182,14 @@ pub struct RecordFilter {
     pub message_ids: Option<Vec<turin_contracts::MessageId>>,
     pub run_ids: Option<Vec<RunId>>,
     pub turn_item_types: Option<Vec<String>>,
+    /// Only turn items in these statuses (`turnItemStatuses`).
+    pub turn_item_statuses:
+        Option<Vec<turin_contracts::orchestration_v2::OrchestrationV2TurnItemStatus>>,
+    /// Only turn items of these runs; `None` entries match items with no run
+    /// (`turnItemRunIds`).
+    pub turn_item_run_ids: Option<Vec<Option<RunId>>>,
+    /// Only messages of these runs (`messageRunIds`).
+    pub message_run_ids: Option<Vec<RunId>>,
     /// Skips finished tool call, assistant message and reasoning nodes of
     /// finished runs. Command decisions only read root, subagent and
     /// active-run nodes.
@@ -251,6 +262,83 @@ pub trait OrchestratorPort: Send + Sync {
     /// `source_run_id` declined or failed.
     async fn recover_delegated_task(&self, thread_id: &ThreadId, source_run_id: &RunId);
 
+    /// `getThreadHistoryPage`: the page of the thread's history after `cursor`.
+    async fn get_thread_history_page(
+        &self,
+        thread_id: &ThreadId,
+        cursor: &str,
+        through_entry_id: Option<&str>,
+        conversation_only: bool,
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage,
+        OrchestratorError,
+    >;
+
+    /// `getTimelinePage`.
+    async fn get_timeline_page(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::history::TimelinePageOptions,
+    ) -> Result<crate::projection::store::history::ProjectionTimelinePage, OrchestratorError>;
+
+    /// `getMessageCount`.
+    async fn get_message_count(&self, thread_id: &ThreadId) -> Result<u64, OrchestratorError>;
+
+    /// `getTurnItem`: `None` when the thread has no such item.
+    async fn get_turn_item(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &turin_contracts::TurnItemId,
+    ) -> Result<Option<turin_contracts::orchestration_v2::OrchestrationV2TurnItem>, OrchestratorError>;
+
+    /// `getCheckpointContext`.
+    async fn get_checkpoint_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::contexts::CheckpointContext, OrchestratorError>;
+
+    /// `getThreadSnapshot`: the full projection and the sequence it reflects.
+    async fn get_thread_snapshot(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError>;
+
+    /// `getThreadSnapshotWindow`: the projection narrowed to recent turns or
+    /// an anchored page.
+    async fn get_thread_snapshot_window(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::ThreadSnapshotWindowOptions,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError>;
+
+    /// `searchThreadStream`: the frames of one message search. An initial
+    /// search yields an early frame (`complete: false`) before the final one.
+    async fn search_thread_stream(
+        &self,
+        input: &turin_contracts::orchestration_v2::OrchestrationV2SearchThreadInput,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            turin_contracts::orchestration_v2::OrchestrationV2SearchThreadResult,
+        >,
+        OrchestratorError,
+    >;
+
+    /// `searchThread`: the final frame of [`Self::search_thread_stream`].
+    async fn search_thread(
+        &self,
+        input: &turin_contracts::orchestration_v2::OrchestrationV2SearchThreadInput,
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2SearchThreadResult,
+        OrchestratorError,
+    > {
+        use futures::StreamExt;
+        let frames: Vec<_> = self.search_thread_stream(input).await?.collect().await;
+        frames.into_iter().next_back().ok_or_else(|| {
+            OrchestratorError::projection(input.thread_id.clone(), "the search produced no result")
+        })
+    }
+
     /// Stored events of the log, replayed from `after_sequence` then live
     /// (`EventSink::stream`).
     async fn stream_stored_events_from(
@@ -262,4 +350,26 @@ pub trait OrchestratorPort: Send + Sync {
     async fn stream_domain_events(
         &self,
     ) -> Result<futures::stream::BoxStream<'static, OrchestrationV2DomainEvent>, OrchestratorError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use turin_contracts::CommandId;
+
+    use super::OrchestratorError;
+
+    /// Upstream `OrchestratorDispatchError.message`. Rejected receipts store
+    /// this text, so the wording must match upstream exactly.
+    #[test]
+    fn dispatch_error_text_matches_upstream() {
+        let error = OrchestratorError::Dispatch {
+            command_id: CommandId::new("command:1").expect("command id"),
+            command_type: "thread.visit".to_owned(),
+            cause: "boom".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Failed to dispatch orchestration command thread.visit (command:1)."
+        );
+    }
 }

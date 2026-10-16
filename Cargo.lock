@@ -7376,10 +7376,14 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "turin-contracts",
+ "turin-git",
+ "turin-hooks",
  "turin-launcher",
  "turin-orchestration",
  "turin-persistence",
+ "turin-provider-claude",
  "turin-provider-core",
+ "turin-providers",
  "turin-review",
  "turin-runtime",
  "turin-shared",
@@ -7548,7 +7552,11 @@ dependencies = [
  "chrono",
  "futures",
  "indexmap",
+<<<<<<< HEAD
  "libc",
+=======
+ "markdown",
+>>>>>>> task/T13c-orch-core
  "parking_lot",
  "pretty_assertions",
  "regex",

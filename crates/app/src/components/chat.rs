@@ -50,6 +50,7 @@ pub mod composer_menu_state;
 pub mod draft_hero_transition;
 #[allow(dead_code)]
 pub mod folder_drop;
+pub mod live_chat;
 pub mod markdown;
 #[allow(dead_code)]
 pub mod markdown_clipboard;

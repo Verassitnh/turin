@@ -1,0 +1,561 @@
+//! Port of upstream/apps/server/src/orchestration-v2/Orchestrator.ts
+//! (`OrchestratorV2`): the decider behind [`OrchestratorPort`].
+//!
+//! This file holds the port's read half and the constructor. The command
+//! path (receipts, the per-thread lock, commit, rejection) is in
+//! [`orchestrator::dispatch`](self::dispatch), and each command group has its
+//! own file under `core/orchestrator/`, so parallel ports merge cleanly.
+//!
+//! Every read of the upstream shape delegates to the projection store; a
+//! failure is `OrchestratorError::Projection` for that thread.
+
+mod checkpoint_rollback;
+#[cfg(test)]
+mod checkpoint_rollback_tests;
+mod cohort;
+#[cfg(test)]
+mod cohort_tests;
+mod delegated_commands;
+#[cfg(test)]
+mod delegated_commands_tests;
+mod delegated_request;
+#[cfg(test)]
+mod delegated_request_tests;
+pub mod delegated_task;
+#[cfg(test)]
+mod delegated_task_tests;
+pub mod dispatch;
+#[cfg(test)]
+mod dispatch_limit_tests;
+mod message_dispatch;
+mod subagent_followup;
+#[cfg(test)]
+mod subagent_followup_tests;
+pub(crate) use message_dispatch::is_native_maintenance_command;
+#[cfg(test)]
+mod js_whitespace_tests;
+#[cfg(test)]
+mod message_dispatch_tests;
+#[cfg(test)]
+mod message_plan_tests;
+#[cfg(test)]
+mod message_restart_tests;
+mod message_steer;
+#[cfg(test)]
+mod message_steer_tests;
+mod message_transfer;
+#[cfg(test)]
+mod message_transfer_tests;
+#[cfg(test)]
+mod migration_tests;
+#[cfg(test)]
+mod model_selection_tests;
+mod prepared_run;
+#[cfg(test)]
+mod prepared_run_tests;
+mod provider_detach;
+mod queue_start;
+#[cfg(test)]
+mod queue_start_tests;
+mod queued_run;
+#[cfg(test)]
+mod queued_run_tests;
+mod run_stop;
+#[cfg(test)]
+mod run_stop_tests;
+mod runtime_request;
+#[cfg(test)]
+mod runtime_request_tests;
+mod secret_request;
+#[cfg(test)]
+mod secret_request_tests;
+pub mod services;
+#[cfg(test)]
+mod settle_cleanup_tests;
+#[cfg(test)]
+pub(super) mod test_harness;
+#[cfg(test)]
+mod tests;
+mod thread_archive;
+mod thread_delete;
+mod thread_fork;
+mod thread_lifecycle;
+mod thread_merge_back;
+mod thread_metadata;
+#[cfg(test)]
+mod thread_metadata_tests;
+mod thread_mutation;
+mod thread_pull_request;
+#[cfg(test)]
+mod thread_pull_request_tests;
+#[cfg(test)]
+mod thread_search_tests;
+#[cfg(test)]
+mod thread_stop_tests;
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::{StreamExt, future, stream::BoxStream};
+use turin_contracts::{
+    RunId, ThreadId,
+    orchestration_v2::{
+        OrchestrationV2DomainEvent, OrchestrationV2Run, OrchestrationV2ServerCommand,
+        OrchestrationV2ThreadProjection, OrchestrationV2ThreadShell,
+        OrchestrationV2ThreadShellSnapshot,
+    },
+};
+
+use crate::pipeline::command_receipt_store::CommandReceiptStore;
+use crate::pipeline::dispatch_mode_limit::DispatchModeLimit;
+use crate::pipeline::event_sink::{EventSink, SinkStream, StreamOptions};
+use crate::pipeline::orchestrator_port::{
+    BoxError, DispatchResult, OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
+    ShellLocation, ShellSnapshotOptions, ThreadRecords,
+};
+use crate::pipeline::thread_command_executor::ThreadCommandExecutor;
+use crate::projection::store::{
+    ProjectionStore,
+    canonical::{ProjectionRecordField, ProjectionRecordFilter},
+    shell::{ShellSnapshotLocation, ShellSnapshotOptions as ProjectionShellSnapshotOptions},
+};
+use services::{DispatchSeams, RestartRecovery};
+use turin_contracts::orchestration_v2::OrchestrationV2SearchThreadResult;
+use turin_provider_core::id_allocator::IdAllocator;
+
+/// Thread id upstream attaches to shell-snapshot errors (`shellProjectionError`).
+fn shell_error_thread() -> ThreadId {
+    // A literal that passes `ThreadId`'s non-empty check.
+    ThreadId::new("thread:shell").expect("literal thread id is non-empty")
+}
+
+pub struct Orchestrator {
+    projection: Arc<ProjectionStore>,
+    sink: EventSink,
+    receipts: CommandReceiptStore,
+    locks: ThreadCommandExecutor,
+    ids: IdAllocator,
+    recovery: Arc<dyn RestartRecovery>,
+    seams: DispatchSeams,
+}
+
+impl Orchestrator {
+    /// `readCommandProjection`: the records a command decision reads. Not the
+    /// historical assistant or tool output, and not the finished leaf nodes of
+    /// finished runs: this runs under the thread lock for every command, and
+    /// busy threads hold thousands of them. Handoff preparation reads its
+    /// history explicitly once it has chosen a strategy.
+    pub(crate) async fn read_command_projection(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<OrchestrationV2ThreadProjection, OrchestratorError> {
+        let records = self
+            .get_thread_records(
+                thread_id,
+                &[
+                    RecordField::Runs,
+                    RecordField::Attempts,
+                    RecordField::Nodes,
+                    RecordField::Subagents,
+                    RecordField::ProviderSessions,
+                    RecordField::ProviderThreads,
+                    RecordField::ProviderTurns,
+                    RecordField::RuntimeRequests,
+                    RecordField::Messages,
+                    RecordField::TurnItems,
+                    RecordField::CheckpointScopes,
+                    RecordField::ContextTransfers,
+                ],
+                &RecordFilter {
+                    turn_item_types: Some(vec!["user_message".to_owned(), "error".to_owned()]),
+                    message_roles: Some(vec![
+                        turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole::User,
+                    ]),
+                    omit_settled_leaf_nodes: true,
+                    ..RecordFilter::default()
+                },
+            )
+            .await?;
+        Ok(OrchestrationV2ThreadProjection {
+            checkpoints: Vec::new(),
+            plans: Vec::new(),
+            context_handoffs: Vec::new(),
+            visible_turn_items: Vec::new(),
+            updated_at: records.thread.updated_at,
+            ..records
+        })
+    }
+
+    pub fn new(
+        projection: Arc<ProjectionStore>,
+        sink: EventSink,
+        receipts: CommandReceiptStore,
+        recovery: Arc<dyn RestartRecovery>,
+    ) -> Self {
+        Self {
+            projection,
+            sink,
+            receipts,
+            locks: ThreadCommandExecutor::new(),
+            ids: IdAllocator,
+            recovery,
+            seams: DispatchSeams::default(),
+        }
+    }
+
+    /// Shares the per-thread lock executor, so command dispatch and anything
+    /// else that writes a thread (event ingest, provider-session release)
+    /// serialize on the same locks. Build the executor first and hand clones
+    /// to each writer; the clones share state.
+    pub fn with_thread_executor(mut self, executor: ThreadCommandExecutor) -> Self {
+        self.locks = executor;
+        self
+    }
+
+    /// The executor `dispatch` locks threads with.
+    pub fn thread_executor(&self) -> ThreadCommandExecutor {
+        self.locks.clone()
+    }
+
+    /// `dispatch` for a limited sender: refuses a thread that runs above
+    /// `limit` (`DispatchModeLimit`, upstream's ambient reference) under the
+    /// thread's lock. Additive: `OrchestratorPort::dispatch` is the unlimited
+    /// path.
+    pub async fn dispatch_with_limit(
+        &self,
+        command: OrchestrationV2ServerCommand,
+        limit: Option<&DispatchModeLimit>,
+    ) -> Result<DispatchResult, OrchestratorError> {
+        dispatch::dispatch_with_limit(self, command, limit).await
+    }
+
+    /// Hands in the checkpoint, adapter and project-root seams that message
+    /// dispatch needs. Without them a run that needs a scope or a provider
+    /// refuses.
+    pub fn with_dispatch_seams(mut self, seams: DispatchSeams) -> Self {
+        self.seams = seams;
+        self
+    }
+
+    fn projection_error(thread_id: &ThreadId, cause: impl Into<BoxError>) -> OrchestratorError {
+        OrchestratorError::projection(thread_id.clone(), cause)
+    }
+
+    fn stream_error(cause: crate::pipeline::event_sink::SinkError) -> OrchestratorError {
+        OrchestratorError::DomainEventStream {
+            cause: Box::new(cause),
+        }
+    }
+}
+
+fn projection_record_field(field: RecordField) -> ProjectionRecordField {
+    match field {
+        RecordField::Runs => ProjectionRecordField::Runs,
+        RecordField::Attempts => ProjectionRecordField::Attempts,
+        RecordField::Nodes => ProjectionRecordField::Nodes,
+        RecordField::Subagents => ProjectionRecordField::Subagents,
+        RecordField::ProviderSessions => ProjectionRecordField::ProviderSessions,
+        RecordField::ProviderThreads => ProjectionRecordField::ProviderThreads,
+        RecordField::ProviderTurns => ProjectionRecordField::ProviderTurns,
+        RecordField::RuntimeRequests => ProjectionRecordField::RuntimeRequests,
+        RecordField::Messages => ProjectionRecordField::Messages,
+        RecordField::TurnItems => ProjectionRecordField::TurnItems,
+        RecordField::CheckpointScopes => ProjectionRecordField::CheckpointScopes,
+        RecordField::Checkpoints => ProjectionRecordField::Checkpoints,
+        RecordField::ContextTransfers => ProjectionRecordField::ContextTransfers,
+    }
+}
+
+fn projection_record_filter(filter: &RecordFilter) -> ProjectionRecordFilter {
+    ProjectionRecordFilter {
+        message_roles: filter.message_roles.clone(),
+        message_ids: filter
+            .message_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|id| id.as_str().to_owned()).collect()),
+        run_ids: filter.run_ids.clone(),
+        turn_item_types: filter.turn_item_types.clone(),
+        turn_item_statuses: filter.turn_item_statuses.clone(),
+        turn_item_run_ids: filter.turn_item_run_ids.clone(),
+        message_run_ids: filter
+            .message_run_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|id| id.as_str().to_owned()).collect()),
+        omit_settled_leaf_nodes: filter.omit_settled_leaf_nodes,
+        ..ProjectionRecordFilter::default()
+    }
+}
+
+fn projection_shell_options(options: &ShellSnapshotOptions) -> ProjectionShellSnapshotOptions {
+    ProjectionShellSnapshotOptions {
+        location: Some(match options.location {
+            ShellLocation::Active => ShellSnapshotLocation::Active,
+            ShellLocation::Archive => ShellSnapshotLocation::Archive,
+        }),
+        project_id: options.project_id.clone(),
+        unsettled_only: options.unsettled_only,
+    }
+}
+
+#[async_trait]
+impl OrchestratorPort for Orchestrator {
+    async fn dispatch(
+        &self,
+        command: OrchestrationV2ServerCommand,
+    ) -> Result<DispatchResult, OrchestratorError> {
+        dispatch::dispatch_with_receipt(self, command).await
+    }
+
+    async fn get_thread_records(
+        &self,
+        thread_id: &ThreadId,
+        fields: &[RecordField],
+        filter: &RecordFilter,
+    ) -> Result<ThreadRecords, OrchestratorError> {
+        let fields = fields
+            .iter()
+            .copied()
+            .map(projection_record_field)
+            .collect();
+        self.projection
+            .get_thread_records(thread_id, fields, Some(projection_record_filter(filter)))
+            .await
+            .map_err(|cause| Self::projection_error(thread_id, cause))
+    }
+
+    async fn get_thread_history_page(
+        &self,
+        thread_id: &ThreadId,
+        cursor: &str,
+        through_entry_id: Option<&str>,
+        conversation_only: bool,
+    ) -> Result<
+        turin_contracts::orchestration_v2::OrchestrationV2ThreadHistoryPage,
+        OrchestratorError,
+    > {
+        self.projection
+            .get_thread_history_page(thread_id, cursor, through_entry_id, conversation_only)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_timeline_page(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::history::TimelinePageOptions,
+    ) -> Result<crate::projection::store::history::ProjectionTimelinePage, OrchestratorError> {
+        self.projection
+            .get_timeline_page(thread_id, options)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_message_count(&self, thread_id: &ThreadId) -> Result<u64, OrchestratorError> {
+        self.projection
+            .get_message_count(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_turn_item(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &turin_contracts::TurnItemId,
+    ) -> Result<Option<turin_contracts::orchestration_v2::OrchestrationV2TurnItem>, OrchestratorError>
+    {
+        self.projection
+            .get_turn_item(thread_id, item_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_checkpoint_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::contexts::CheckpointContext, OrchestratorError> {
+        self.projection
+            .get_checkpoint_context(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_thread_snapshot(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError> {
+        self.projection
+            .get_thread_snapshot(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn get_thread_snapshot_window(
+        &self,
+        thread_id: &ThreadId,
+        options: crate::projection::store::ThreadSnapshotWindowOptions,
+    ) -> Result<crate::projection::store::ThreadSnapshot, OrchestratorError> {
+        self.projection
+            .get_thread_snapshot_window(thread_id, options)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))
+    }
+
+    async fn search_thread_stream(
+        &self,
+        input: &turin_contracts::orchestration_v2::OrchestrationV2SearchThreadInput,
+    ) -> Result<BoxStream<'static, OrchestrationV2SearchThreadResult>, OrchestratorError> {
+        let thread_id = &input.thread_id;
+        let projection = self
+            .projection
+            .get_thread_projection(thread_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+        // A deleted thread, or one whose project is gone, is not found.
+        let project_root = self
+            .seams
+            .project_roots
+            .workspace_root(&projection.thread.project_id)
+            .await
+            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+        if projection.thread.deleted_at.is_some() || project_root.is_none() {
+            return Err(OrchestratorError::projection(
+                thread_id.clone(),
+                crate::projection::error::ProjectionStoreError::ThreadNotFound {
+                    thread_id: thread_id.clone(),
+                },
+            ));
+        }
+        let cwd = projection
+            .thread
+            .worktree_path
+            .as_ref()
+            .map(|path| path.as_str().to_owned())
+            .or(project_root);
+        // The revision spans every thread whose rows the view inherits.
+        let mut sources = vec![thread_id.clone()];
+        for row in &projection.visible_turn_items {
+            if !sources.contains(&row.source_thread_id) {
+                sources.push(row.source_thread_id.clone());
+            }
+        }
+        let mut sequence = 0;
+        for source in &sources {
+            let latest = self
+                .sink
+                .latest_sequence(Some(source.clone()))
+                .await
+                .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+            sequence = sequence.max(u64::try_from(latest).unwrap_or(0));
+        }
+        let frames = crate::core::thread_find::find_projected_thread_items(
+            &projection.visible_turn_items,
+            input,
+            sequence,
+            cwd.as_deref(),
+        );
+        Ok(futures::stream::iter(frames).boxed())
+    }
+
+    async fn get_thread_projection(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<OrchestrationV2ThreadProjection, OrchestratorError> {
+        self.projection
+            .get_thread_projection(thread_id)
+            .await
+            .map_err(|cause| Self::projection_error(thread_id, cause))
+    }
+
+    async fn get_thread_shell(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<OrchestrationV2ThreadShell>, OrchestratorError> {
+        self.projection
+            .get_thread_shell(thread_id)
+            .await
+            .map_err(|cause| Self::projection_error(thread_id, cause))
+    }
+
+    async fn get_shell_snapshot(
+        &self,
+        options: &ShellSnapshotOptions,
+    ) -> Result<OrchestrationV2ThreadShellSnapshot, OrchestratorError> {
+        self.projection
+            .get_shell_snapshot(projection_shell_options(options))
+            .await
+            .map_err(|cause| Self::projection_error(&shell_error_thread(), cause))
+    }
+
+    async fn get_thread_event_sequence(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<i64, OrchestratorError> {
+        self.sink
+            .latest_sequence(Some(thread_id.clone()))
+            .await
+            .map_err(|cause| Self::projection_error(thread_id, cause))
+    }
+
+    async fn restart_continuation_pending(&self, run: &OrchestrationV2Run) -> bool {
+        self.recovery.restart_continuation_pending(run).await
+    }
+
+    async fn await_restart_continuation(&self, run: &OrchestrationV2Run) {
+        self.recovery.await_restart_continuation(run).await;
+    }
+
+    async fn recover_delegated_task(&self, thread_id: &ThreadId, source_run_id: &RunId) {
+        self.recovery
+            .recover_delegated_task(thread_id, source_run_id)
+            .await;
+    }
+
+    async fn stream_stored_events_from(
+        &self,
+        options: StreamOptions,
+    ) -> Result<SinkStream, OrchestratorError> {
+        self.sink.stream(options).await.map_err(Self::stream_error)
+    }
+
+    /// Live tail only: the stream starts after the log's current high-water
+    /// mark. Replaying the whole store first would make every domain-event
+    /// subscriber redo its work after each boot.
+    async fn stream_domain_events(
+        &self,
+    ) -> Result<BoxStream<'static, OrchestrationV2DomainEvent>, OrchestratorError> {
+        let latest = self
+            .sink
+            .latest_sequence(None)
+            .await
+            .map_err(Self::stream_error)?;
+        let stored = self
+            .sink
+            .stream(StreamOptions {
+                after_sequence: Some(latest),
+                ..StreamOptions::default()
+            })
+            .await
+            .map_err(Self::stream_error)?;
+        // The port carries no per-item error, so a failed read ends the stream
+        // after logging. Subscribers treat the end of the stream as shutdown.
+        let events = stored
+            .take_while(|item| {
+                if let Err(error) = item {
+                    tracing::warn!(error = ?error, "domain event stream failed; ending live tail");
+                }
+                future::ready(item.is_ok())
+            })
+            .filter_map(|item| future::ready(item.ok().map(|stored| stored.event)));
+        Ok(events.boxed())
+    }
+}
+
+/// Whether a read failed because the thread does not exist.
+pub(crate) fn is_thread_not_found(error: &OrchestratorError) -> bool {
+    match error {
+        OrchestratorError::Projection { cause, .. } => cause
+            .downcast_ref::<crate::projection::error::ProjectionStoreError>()
+            .is_some_and(|cause| cause.is_thread_not_found()),
+        _ => false,
+    }
+}

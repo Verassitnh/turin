@@ -6,6 +6,7 @@
 pub mod animated_size;
 pub mod badge;
 pub mod button;
+pub mod collapsible;
 pub mod collapsible_section_header;
 pub mod dialog;
 pub mod discovery_list;

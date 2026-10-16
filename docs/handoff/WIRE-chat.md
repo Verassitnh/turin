@@ -22,7 +22,7 @@ Step 1 live wiring for the chat column and composer on routed threads (`LiveChat
 | Seam | Consumer action |
 |------|-----------------|
 | **`take_thread_open_request`** | On tick or after navigation, open the returned thread id in the sidebar (same pattern as diff open requests). |
-| **Question attachment uploads on respond** | Drawer/composer paths stage files locally; full upload queue parity with web may still need command-bus hooks when responding. |
+| **Question attachment uploads on respond** | Drawer and composer respond paths stage via `Commands::stage_attachment` and send `attachmentsByQuestionId`; drafts clear only after a successful respond. |
 
 ## Owned paths
 

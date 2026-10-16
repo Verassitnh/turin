@@ -16,9 +16,9 @@ use turin_persistence::ReceiptStatus;
 use turin_provider_core::id_allocator::IdAllocator;
 
 use super::{
-    Orchestrator, message_dispatch, queue_start, queued_run, run_stop, thread_archive,
-    thread_delete, thread_fork, thread_lifecycle, thread_merge_back, thread_metadata,
-    thread_mutation,
+    Orchestrator, message_dispatch, prepared_run, queue_start, queued_run, run_stop,
+    thread_archive, thread_delete, thread_fork, thread_lifecycle, thread_merge_back,
+    thread_metadata, thread_mutation,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::dispatch_mode_limit::{
@@ -752,6 +752,9 @@ async fn decide(
         return Ok(true);
     }
     if message_dispatch::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if prepared_run::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     if queue_start::decide(orchestrator, command, decision).await? {

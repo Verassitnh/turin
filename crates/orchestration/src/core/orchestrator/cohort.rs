@@ -368,3 +368,18 @@ pub(super) fn dispose_all_delegated_completion_cohorts(
         );
     }
 }
+
+/// `{ ...item, ...patch }` on a turn item, which shares one base shape across
+/// members: the spread runs on the wire shape. A `null` clears an optional field.
+pub(super) fn patch_turn_item(
+    item: &turin_contracts::orchestration_v2::OrchestrationV2TurnItem,
+    patch: Vec<(&'static str, serde_json::Value)>,
+) -> turin_contracts::orchestration_v2::OrchestrationV2TurnItem {
+    let mut wire = serde_json::to_value(item).expect("turn item encodes");
+    if let Some(fields) = wire.as_object_mut() {
+        for (key, value) in patch {
+            fields.insert(key.to_owned(), value);
+        }
+    }
+    serde_json::from_value(wire).expect("patched turn item decodes")
+}

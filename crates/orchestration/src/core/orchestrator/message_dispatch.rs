@@ -76,17 +76,19 @@ macro_rules! run_scoped_event {
     ($decision:expr, $variant:ident, $thread:expr, $run:expr, $node:expr, $instance:expr, $payload:expr) => {{
         let id = $decision.event_id($thread);
         let occurred_at = $decision.now();
-        $decision.emit(OrchestrationV2DomainEvent::$variant {
-            id,
-            thread_id: $thread.clone(),
-            run_id: Some($run.clone()),
-            node_id: Some($node.clone()),
-            driver: None,
-            provider_instance_id: Some($instance.clone()),
-            raw_event_id: None,
-            occurred_at,
-            payload: $payload,
-        });
+        $decision.emit(
+            turin_contracts::orchestration_v2::OrchestrationV2DomainEvent::$variant {
+                id,
+                thread_id: $thread.clone(),
+                run_id: Some($run.clone()),
+                node_id: Some($node.clone()),
+                driver: None,
+                provider_instance_id: Some($instance.clone()),
+                raw_event_id: None,
+                occurred_at,
+                payload: $payload,
+            },
+        );
     }};
 }
 

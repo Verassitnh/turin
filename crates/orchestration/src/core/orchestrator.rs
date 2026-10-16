@@ -25,6 +25,9 @@ mod message_plan_tests;
 mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;
+mod prepared_run;
+#[cfg(test)]
+mod prepared_run_tests;
 mod provider_detach;
 mod queue_start;
 #[cfg(test)]

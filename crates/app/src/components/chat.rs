@@ -42,3 +42,5 @@ pub mod timeline_scroll_anchoring;
 pub mod selection_actions;
 pub mod timestamp_format;
 pub mod work_log;
+#[allow(dead_code)]
+pub mod workspace_file_drop;

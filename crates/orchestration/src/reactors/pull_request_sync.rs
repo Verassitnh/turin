@@ -214,5 +214,45 @@ impl SyncCadence {
     }
 }
 
+impl SyncCadence {
+    /// The generation of an explicit request for `key`, if one is pending.
+    pub fn requested_generation(&self, key: &str) -> Option<i64> {
+        self.requested.get(key).copied()
+    }
+
+    pub fn request_is_set(&self, key: &str) -> bool {
+        self.requested.contains_key(key)
+    }
+
+    pub fn retry_set(&self, key: &str) -> bool {
+        self.retry_stacks.contains(key)
+    }
+
+    pub fn set_retry(&mut self, key: &str, on: bool) {
+        if on {
+            self.retry_stacks.insert(key.to_owned());
+        } else {
+            self.retry_stacks.remove(key);
+        }
+    }
+
+    /// Clears the request only if no newer one arrived while a host read was in flight.
+    pub fn clear_request_if(&mut self, key: &str, generation: Option<i64>) {
+        if self.requested.get(key).copied() == generation {
+            self.requested.remove(key);
+        }
+    }
+
+    /// Drops state for keys no active link holds any more.
+    pub fn prune(&mut self, keep: impl Fn(&str) -> bool) {
+        self.last_synced_at.retain(|key, _| keep(key));
+        self.retry_stacks.retain(|key| keep(key));
+        self.requested.retain(|key, _| keep(key));
+    }
+}
+
+pub mod adapters;
+pub mod sweep;
+
 #[cfg(test)]
 mod tests;

@@ -55,7 +55,7 @@ use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect};
 use crate::pipeline::event_sink::WriteInput;
 use crate::pipeline::orchestrator_port::OrchestratorError;
 use crate::projection::queued_run_order::queued_runs_in_delivery_order;
-use crate::projection::shared::thread_error::{
+use turin_shared::orchestration_v2_thread_error::{
     latest_executed_run, latest_root_provider_failure, usage_limit_blocked_run,
 };
 
@@ -215,9 +215,22 @@ impl Orchestrator {
         Ok(resumed)
     }
 
-    /// `handleTerminalRun`'s queue step: a run reached a terminal status, so
-    /// the thread's next queued run may start.
+    /// `handleTerminalRun`: a run reached a terminal status. Its delegated
+    /// delivery settles, the thread's next queued run may start, and an
+    /// app-owned child hands its result to the parent. Each step takes its own
+    /// thread's lock, sequentially and never nested: the parent lock must not
+    /// be taken inside the child's.
     pub async fn handle_terminal_run(&self, run: &OrchestrationV2Run) {
+        if let Err(cause) = self
+            .finalize_delegated_completion_delivery(&run.thread_id, &run.id)
+            .await
+        {
+            tracing::warn!(
+                thread_id = %run.thread_id,
+                %cause,
+                "Failed to react to terminal V2 run"
+            );
+        }
         let options = QueueStartOptions {
             ended_run_id: Some(run.id.clone()),
             failed_run_id: (run.status == OrchestrationV2RunStatus::Failed).then(|| run.id.clone()),
@@ -229,9 +242,21 @@ impl Orchestrator {
                 "Failed to start the next queued V2 run"
             );
         }
+        // After the queue decision: a provider failure holds the child's queued
+        // wakes, and only then is the failed run the task's result.
+        if let Err(cause) = self
+            .finalize_app_owned_subagent(&run.thread_id, &Default::default())
+            .await
+        {
+            tracing::warn!(
+                thread_id = %run.thread_id,
+                %cause,
+                "Failed to react to terminal V2 run"
+            );
+        }
     }
 
-    async fn system_write(
+    pub(super) async fn system_write(
         &self,
         thread_id: &ThreadId,
         decision: Decision,

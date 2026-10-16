@@ -9,6 +9,7 @@
 //! the user got there first, opted out, or the run is not one to continue.
 
 use std::sync::Arc;
+use turin_shared::orchestration_v2_thread_error::run_ran_after;
 
 use async_trait::async_trait;
 use turin_contracts::{
@@ -40,12 +41,9 @@ use crate::{
         seams::ServerSettingsSource,
         thread_management_service::{ThreadManagementError, ThreadManagementService},
     },
-    projection::{
-        shared::thread_error::run_ran_after,
-        store::{
-            ProjectionStore,
-            canonical::{ProjectionRecordField, ProjectionRecordFilter},
-        },
+    projection::store::{
+        ProjectionStore,
+        canonical::{ProjectionRecordField, ProjectionRecordFilter},
     },
 };
 

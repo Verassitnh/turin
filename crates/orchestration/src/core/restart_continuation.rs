@@ -22,9 +22,9 @@ use turin_contracts::orchestration_v2::{
 use super::restart_background_note::{
     cancelled_roster_task_work, cancelled_turn_item_work, is_awaited_work,
 };
-use crate::projection::shared::thread_error::run_ran_after;
 use crate::projection::store::runtime_recovery::RuntimeRecoveryState;
 use crate::projection::turn_item;
+use turin_shared::orchestration_v2_thread_error::run_ran_after;
 
 /// The slice of a projection the restart selection reads. Upstream types these
 /// functions as a `Pick` of `ProjectionRuntimeRecoveryState`, so the full thread

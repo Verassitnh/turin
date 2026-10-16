@@ -330,6 +330,10 @@ pub struct DispatchSeams {
     pub switch_planner: Arc<dyn ProviderSwitchPlanner>,
     /// `ServerSettings`: whether a project has turned a provider instance off.
     pub provider_instances: Arc<dyn ProviderInstanceSettings>,
+    /// Where delegated-completion wake offers go (`ProviderContinuationRequests`).
+    /// The default drops them.
+    pub continuation_requests:
+        Arc<turin_provider_core::provider_continuation_requests::ProviderContinuationRequests>,
 }
 
 impl Default for DispatchSeams {
@@ -341,6 +345,9 @@ impl Default for DispatchSeams {
             sessions: Arc::new(NoLiveSessions),
             switch_planner: Arc::new(UnwiredProviderSwitchPlanner),
             provider_instances: Arc::new(AllProviderInstancesEnabled),
+            continuation_requests: Arc::new(
+                turin_provider_core::provider_continuation_requests::ProviderContinuationRequests::dropping(),
+            ),
         }
     }
 }

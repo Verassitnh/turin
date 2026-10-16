@@ -9,6 +9,7 @@
 //! all, and cancels that thread's process-bound effects with it.
 
 use std::{collections::HashSet, sync::Arc};
+use turin_shared::orchestration_v2_thread_error::run_ran_after;
 
 use async_trait::async_trait;
 use turin_contracts::{
@@ -52,7 +53,6 @@ use crate::{
         seams::ServerSettingsSource,
     },
     projection::{
-        shared::thread_error::run_ran_after,
         store::{
             ProjectionStore,
             canonical::{ProjectionRecordField, ProjectionRecordFilter},

@@ -59,7 +59,7 @@ use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect, ThreadTitleKi
 use crate::pipeline::notification_mailbox::is_undelivered_mailbox_steer;
 use crate::pipeline::orchestrator_port::OrchestratorError;
 use crate::pipeline::runtime_policy::{self, RuntimePolicyOverride};
-use crate::projection::shared::thread_error::{
+use turin_shared::orchestration_v2_thread_error::{
     latest_executed_run, latest_root_provider_failure, run_ran_after, usage_limit_blocked_run,
 };
 
@@ -564,7 +564,7 @@ pub(super) fn restart_of(client: &C) -> Option<RunId> {
 }
 
 /// `delegatedCompletionWakeDetail`.
-fn delegated_completion_wake_detail(task_ids: &[NodeId]) -> String {
+pub(super) fn delegated_completion_wake_detail(task_ids: &[NodeId]) -> String {
     let list = task_ids
         .iter()
         .map(ToString::to_string)

@@ -14,7 +14,9 @@ use turin_contracts::{
         OrchestrationV2Actor, OrchestrationV2AppThread, OrchestrationV2CreationSource,
     },
     provider_instance::ProviderInstanceId,
-    provider_policy::{ProviderApprovalDecision, ProviderInteractionMode, RuntimeMode},
+    provider_policy::{
+        ProviderApprovalDecision, ProviderInteractionMode, ProviderUserInputAnswers, RuntimeMode,
+    },
 };
 
 use crate::OpenCodeGeneration;
@@ -1389,6 +1391,10 @@ async fn v1_permission_waits_as_a_node_and_item_then_settles_on_reply() {
         .clone();
     assert_eq!(item["turn_item"]["status"], "waiting");
     assert_eq!(item["turn_item"]["nodeId"], node["node"]["id"]);
+    assert_eq!(
+        item["turn_item"]["prompt"], "ls",
+        "approval prompt comes from permission patterns"
+    );
 
     script
         .frames
@@ -2757,5 +2763,593 @@ async fn v2_a_failed_reply_is_retried_once_and_settles() {
         "{settled:#?}"
     );
     assert_eq!(replies.load(std::sync::atomic::Ordering::SeqCst), 2);
+    session.close().await;
+}
+
+/// A tool call that never succeeds is interrupted when the execution ends (upstream `finishTurn`).
+#[tokio::test]
+async fn v2_an_open_tool_call_ends_interrupted_when_the_execution_is_interrupted() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"t0","type":"session.tool.input.started","data":{"sessionID":"ses_1","id":"call_open","name":"bash"}}),
+        json!({"id":"t1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_open","name":"bash","input":{"command":"sleep 9"}}}),
+        json!({"id":"t2","type":"session.execution.interrupted","data":{"sessionID":"ses_1"}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated"
+            && value["provider_turn"]["status"] == "interrupted"
+    })
+    .await;
+    let item = of_type(&seen, "turn_item.updated")
+        .into_iter()
+        .find(|event| {
+            event["turn_item"]["status"] == "interrupted"
+                && event["turn_item"]["nativeItemRef"]["nativeId"] == "call_open"
+        })
+        .expect("interrupted tool item");
+    assert_eq!(item["turn_item"]["status"], "interrupted");
+    session.close().await;
+}
+
+/// Plain tool success completes even when metadata claims the call is still running.
+#[tokio::test]
+async fn v2_plain_tool_success_completes_despite_metadata_running() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"t1","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_plain","name":"bash","metadata":{"status":"running"},"output":"ok"}}).to_string(),
+        )))
+        .unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"t2","type":"session.execution.succeeded","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "tool_call"
+            && value["turn_item"]["status"] == "completed"
+    })
+    .await;
+    assert!(
+        of_type(&seen, "turn_item.updated")
+            .iter()
+            .any(|event| event["turn_item"]["status"] == "completed"),
+        "{seen:#?}"
+    );
+    session.close().await;
+}
+
+/// A background child's permission request stays pending when the parent turn completes.
+#[tokio::test]
+async fn v2_a_background_child_permission_survives_a_completed_parent_turn() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"b1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}),
+        json!({"id":"b2","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"b3","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"status":"running"}}}),
+        json!({"id":"b4","type":"permission.asked","data":{"sessionID":"ses_child","id":"perm_bg","permission":"bash","patterns":["ls"]}}),
+        json!({"id":"b5","type":"session.execution.succeeded","data":{"sessionID":"ses_1"}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "completed"
+    })
+    .await;
+    let pending = of_type(&seen, "runtime_request.updated")
+        .into_iter()
+        .find(|event| event["runtime_request"]["status"] == "pending")
+        .expect("background permission still pending");
+    assert_eq!(pending["runtime_request"]["status"], "pending");
+    session.close().await;
+}
+
+/// Reconcile settles a background subagent whose child session is no longer active upstream.
+#[tokio::test]
+async fn v2_reconcile_settles_a_background_child_gone_from_active() {
+    let script = script(|request| {
+        if request.method == "GET" && request.target.contains("/api/session/active") {
+            return FakeResponse::json(200, r#"{"data":{"ses_1":{}}}"#);
+        }
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"r1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}),
+        json!({"id":"r2","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"r3","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"status":"running"}}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let _ = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "running"
+    })
+    .await;
+    session
+        .reconcile_within(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let settled = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "interrupted"
+    })
+    .await;
+    let item = of_type(&settled, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["status"] == "interrupted")
+        .expect("lost background item");
+    assert_eq!(
+        item["turn_item"]["result"],
+        "T3 Code lost its connection to OpenCode while this subagent ran, so its result is not shown."
+    );
+    session.close().await;
+}
+
+/// A Stop treats a background child session that is already gone as interrupted.
+#[tokio::test]
+async fn v2_stop_treats_a_gone_background_child_as_interrupted() {
+    let script = script(|request| {
+        if request.method == "POST" && request.target.contains("/interrupt") {
+            return FakeResponse::json(404, r#"{"name":"SessionNotFoundError","data":{}}"#);
+        }
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let offers = Arc::new(
+        turin_provider_core::provider_continuation_requests::ProviderContinuationRequests::queue(),
+    );
+    session.set_continuation_requests(Arc::clone(&offers));
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session
+        .start_turn(turn(thread.clone(), "hi"))
+        .await
+        .unwrap();
+    for frame in [
+        json!({"id":"s1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}),
+        json!({"id":"s2","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"s3","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"status":"running"}}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let _ = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "running"
+    })
+    .await;
+    session
+        .interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: thread,
+            provider_turn_id: turin_contracts::ProviderTurnId::new("turn_1").unwrap(),
+            request_runtime_restart: Some(true),
+        })
+        .await
+        .unwrap();
+    let settled = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "interrupted"
+    })
+    .await;
+    assert!(
+        of_type(&settled, "turn_item.updated")
+            .iter()
+            .any(|event| event["turn_item"]["status"] == "interrupted"),
+        "{settled:#?}"
+    );
+    session.close().await;
+}
+
+/// A prompt that takes a running wake drops the wake's continuation offer.
+#[tokio::test]
+async fn v2_a_prompt_that_takes_a_running_wake_withdraws_its_offer() {
+    let (script, session, _events, offers, thread) = v2_idle_session_with_offers().await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"w1","type":"session.execution.started","data":{"sessionID":"ses_1"}})
+                .to_string(),
+        )))
+        .unwrap();
+    let offer = tokio::time::timeout(Duration::from_secs(3), offers.take())
+        .await
+        .expect("wake offer");
+    session.start_turn(turn(thread, "join")).await.unwrap();
+    let dispatch = offer.dispatch_if_current.expect("dispatch gate");
+    let result = dispatch(Box::pin(async { Ok(()) })).await;
+    assert!(result.unwrap().is_none(), "taken wake must refuse dispatch");
+    session.close().await;
+}
+
+/// A report from a child a Stop marked stopped settles as interrupted, not completed.
+#[tokio::test]
+async fn v2_a_stopped_child_report_settles_interrupted() {
+    let script = script(|request| {
+        if request.method == "POST" && request.target.contains("/interrupt") {
+            return FakeResponse::json(404, r#"{"name":"SessionNotFoundError","data":{}}"#);
+        }
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session
+        .start_turn(turn(thread.clone(), "hi"))
+        .await
+        .unwrap();
+    for frame in [
+        json!({"id":"x1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}),
+        json!({"id":"x2","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"x3","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"status":"running"}}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let _ = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "running"
+    })
+    .await;
+    session
+        .interrupt_turn(ProviderAdapterV2InterruptInput {
+            provider_thread: thread,
+            provider_turn_id: turin_contracts::ProviderTurnId::new("turn_1").unwrap(),
+            request_runtime_restart: Some(true),
+        })
+        .await
+        .unwrap();
+    let _ = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "interrupted"
+    })
+    .await;
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"id":"x4","type":"session.inbox.enqueued","data":{"sessionID":"ses_1","inboxID":"inbox_late","item":{"type":"synthetic","payload":{"text":"<subagent sessionID=\"ses_child\" state=\"completed\" description=\"work\">\nLATE\n</subagent>","metadata":{"source":"subagent","childID":"ses_child","state":"completed","description":"work"}}}}}).to_string(),
+        )))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut after = Vec::new();
+    let drain_until = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < drain_until {
+        if let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(100), events.next()).await
+        {
+            after.push(serde_json::to_value(event.expect("event")).expect("json"));
+        }
+    }
+    assert!(
+        !of_type(&after, "turn_item.updated").iter().any(|event| {
+            event["turn_item"]["type"] == "subagent"
+                && event["turn_item"]["status"] == "completed"
+                && event["turn_item"]["result"] == "LATE"
+        }),
+        "a stopped child's late report must not complete the item: {after:#?}"
+    );
+    session.close().await;
+}
+
+/// Subagent session events park on the parent's held wake until a turn takes it.
+#[tokio::test]
+async fn v2_subagent_events_park_while_the_parent_holds_a_wake() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    for frame in [
+        json!({"id":"p1","type":"session.execution.started","data":{"sessionID":"ses_1"}}),
+        json!({"id":"p1b","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_p","name":"subagent","input":{"prompt":"child"}}}),
+        json!({"id":"p1c","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_p","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"p2","type":"session.created","data":{"sessionID":"ses_child","parentID":"ses_1","id":"ses_child"}}),
+        json!({"id":"p3","type":"session.execution.started","data":{"sessionID":"ses_child"}}),
+        json!({"id":"p3b","type":"session.text.started","data":{"sessionID":"ses_child","assistantMessageID":"msg_c","ordinal":0}}),
+        json!({"id":"p4","type":"session.text.delta","data":{"sessionID":"ses_child","assistantMessageID":"msg_c","ordinal":0,"delta":"held"}}),
+        json!({"id":"p5","type":"session.text.ended","data":{"sessionID":"ses_child","assistantMessageID":"msg_c","ordinal":0,"text":"held"}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut early = Vec::new();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(50), events.next()).await
+    {
+        early.push(serde_json::to_value(event.expect("event")).expect("event json"));
+    }
+    assert!(
+        !early.iter().any(|event| {
+            event["type"] == "message.updated" && event["message"]["text"] == "held"
+        }),
+        "child text must park on the held wake, not go live: {early:#?}"
+    );
+    session.start_turn(turn(thread, "take wake")).await.unwrap();
+    session.close().await;
+}
+
+/// A v1 blank-header question id matches answers keyed as upstream does.
+#[tokio::test]
+async fn v1_a_blank_header_question_answer_round_trips() {
+    let answers = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&answers);
+    let script = script(move |request| {
+        if request.method == "POST" && request.target.contains("/question/") {
+            let body: Value = serde_json::from_str(request.body.as_str()).unwrap_or(Value::Null);
+            captured.lock().push(body);
+            return FakeResponse::json(200, "true");
+        }
+        if request.method == "POST" && request.target.contains("prompt_async") {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "POST" && request.target.contains("/session") {
+            return FakeResponse::json(200, r#"{"id":"ses_1"}"#);
+        }
+        FakeResponse::json(200, "{}")
+    })
+    .await;
+    let session = OpenCodeV1Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        &script.server.url,
+        None,
+        Some("openai/gpt"),
+    )
+    .await
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    script
+        .frames
+        .send(Some(sse(
+            &json!({"type":"question.asked","properties":{"id":"q1","sessionID":"ses_1","questions":[{"header":"","question":"pick","options":[{"label":"Yes"}]}]}}).to_string(),
+        )))
+        .unwrap();
+    let asked = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    let request_id = request_id_of(&asked);
+    let mut answer_map = ProviderUserInputAnswers::new();
+    answer_map.insert(
+        "question-0".to_owned(),
+        serde_json::Value::String("Yes".to_owned()),
+    );
+    session
+        .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
+            request_id,
+            decision: None,
+            answers: Some(answer_map),
+            response: None,
+        })
+        .await
+        .unwrap();
+    let sent = answers.lock().clone();
+    assert!(
+        sent.iter()
+            .any(|body| body["answers"][0][0].as_str() == Some("Yes")),
+        "{sent:#?}"
+    );
+    session.close().await;
+}
+
+/// An undelivered reply to a subagent's permission request ends the child turn and interrupts it.
+#[tokio::test]
+async fn v2_an_undelivered_child_permission_reply_abandons_the_child_turn() {
+    let interrupts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = Arc::clone(&interrupts);
+    let script = script(move |request| {
+        if request.method == "POST" && request.target.contains("/permission/") {
+            return FakeResponse::json(500, r#"{"error":"boom"}"#);
+        }
+        if request.method == "POST" && request.target.contains("/interrupt") {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return FakeResponse::json(200, r#"{"interrupted":true}"#);
+        }
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.contains("/api/session") {
+            return FakeResponse::json(200, r#"{"data":{"id":"ses_1"}}"#);
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let thread = session
+        .ensure_thread(ProviderAdapterV2EnsureThreadInput {
+            thread_id: ThreadId::new("thread_1").unwrap(),
+            title: None,
+            model_selection: model(),
+            runtime_policy: policy(RuntimeMode::FullAccess),
+            provider_session_id: None,
+            existing_provider_thread: None,
+        })
+        .await
+        .unwrap();
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"c1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_fg","name":"subagent","input":{"prompt":"child work"}}}),
+        json!({"id":"c2","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_fg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"c3","type":"session.execution.started","data":{"sessionID":"ses_child"}}),
+        json!({"id":"c4","type":"permission.asked","data":{"sessionID":"ses_child","id":"perm_child","permission":"bash","patterns":["ls"]}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let asked = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    let request_id = request_id_of(&asked);
+    session
+        .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
+            request_id,
+            decision: Some(ProviderApprovalDecision::Accept),
+            answers: None,
+            response: None,
+        })
+        .await
+        .unwrap();
+    let failed = events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "failed"
+    })
+    .await;
+    assert!(
+        of_type(&failed, "provider_turn.updated")
+            .iter()
+            .any(|event| event["provider_turn"]["status"] == "failed"),
+        "{failed:#?}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(interrupts.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    session.close().await;
+}
+
+/// `fail_stream` settles running background subagents as failed (upstream `failAll`).
+#[tokio::test]
+async fn v2_stream_failure_settles_a_running_background_subagent() {
+    let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+    session.start_turn(turn(thread, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"f1","type":"session.tool.called","data":{"sessionID":"ses_1","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}),
+        json!({"id":"f2","type":"session.tool.progress","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"f3","type":"session.tool.success","data":{"sessionID":"ses_1","id":"call_bg","metadata":{"status":"running"}}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let _ = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "running"
+    })
+    .await;
+    session.test_fail_stream("stream lost").await;
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "turn_item.updated"
+            && value["turn_item"]["type"] == "subagent"
+            && value["turn_item"]["status"] == "failed"
+    })
+    .await;
+    assert!(
+        of_type(&seen, "turn_item.updated")
+            .iter()
+            .any(|event| event["turn_item"]["status"] == "failed"),
+        "{seen:#?}"
+    );
     session.close().await;
 }

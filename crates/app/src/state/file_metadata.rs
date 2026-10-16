@@ -26,9 +26,7 @@ use turin_contracts::filesystem::{
     FILESYSTEM_METADATA_BATCH_LIMIT, FilesystemEntryKind, FilesystemEntryMetadata,
 };
 
-use crate::state::support::path::{
-    normalize_project_path_for_comparison, resolve_workspace_file_path,
-};
+use turin_shared::path::{normalize_project_path_for_comparison, resolve_workspace_file_path};
 
 pub const METADATA_STALE_TIME_MS: u64 = 60_000;
 pub const METADATA_CACHE_LIMIT: usize = 1024;

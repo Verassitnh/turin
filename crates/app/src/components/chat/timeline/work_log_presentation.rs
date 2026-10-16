@@ -13,7 +13,6 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 use super::change_request_url::parse_change_request_url;
-use super::file_preview::is_workspace_image_preview_path;
 use super::js_text::{js_trim, lowercase_first, utf16_prefix};
 use super::t3_mcp_tool_presentation::{
     T3McpToolDefinition, T3McpToolIcon, T3McpToolSummaryAction, resolve_t3_mcp_tool_definition,
@@ -31,7 +30,8 @@ use super::turn_item::{
     ToolActivitySource, TurnItem, TurnItemPayload, TurnItemStatus, TurnItemType,
 };
 use super::types::{ToolLifecycleStatus, WorkLogEntry, WorkTone};
-use super::usage_format::format_tokens;
+use turin_shared::file_preview::is_workspace_image_preview_path;
+use turin_shared::usage_format::format_tokens;
 
 /// Inspection and copying omit raw outputs, including values from older caches.
 pub fn tool_item_for_display(item: &TurnItem) -> TurnItem {

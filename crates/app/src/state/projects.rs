@@ -5,13 +5,13 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::state::support::path::{
+use turin_shared::path::{
     is_explicit_relative_path, is_unc_path, is_windows_absolute_path, is_windows_drive_path,
 };
 
 #[allow(unused_imports)]
-pub use crate::state::support::path::is_explicit_relative_path as is_explicit_relative_project_path;
-pub use crate::state::support::path::{
+pub use turin_shared::path::is_explicit_relative_path as is_explicit_relative_project_path;
+pub use turin_shared::path::{
     normalize_project_path_for_comparison, normalize_project_path_for_dispatch,
 };
 

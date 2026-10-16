@@ -160,6 +160,27 @@ icon_assets!(
         Users,
         X,
         Zap,
+        ArrowDown,
+        Cloud,
+        CloudDownload,
+        CloudUpload,
+        Computer,
+        CornerLeftUp,
+        FileSearch,
+        FolderGit,
+        GitBranchPlus,
+        GitCommitHorizontal,
+        Laptop,
+        Lock,
+        MessageSquareDashed,
+        Monitor,
+        Moon,
+        Palette,
+        RotateCcw,
+        Scale,
+        Server,
+        Sun,
+        TextSearch,
     ]
 );
 
@@ -168,6 +189,16 @@ pub const SEND_ARROW: &str = "brand/send-arrow.svg";
 /// Lucide `chevron-down` at `stroke-width` 2.25 (ComposerControl.tsx); the
 /// stock `IconName::ChevronDown` is stroke 2.
 pub const CHEVRON_DOWN: &str = "brand/chevron-down.svg";
+/// EnvironmentMachineIcon's hand-drawn Mac mini / Mac Studio (lucide has no Apple desktops).
+pub const MAC_MINI: &str = "brand/mac-mini.svg";
+pub const MAC_STUDIO: &str = "brand/mac-studio.svg";
+/// The bare T mark for the sidebar brand slot (upstream `T3Wordmark`). Bytes are
+/// `assets/prod/wordmark.svg`, `currentColor`. The asset key stays `brand/`.
+pub const WORDMARK: &str = "brand/wordmark.svg";
+/// The macOS app icon, the same `assets/prod/black-macos-1024.png` that
+/// `scripts/bundle-macos.sh` turns into `Turin.icns`. Set as the Dock icon of an
+/// unbundled run.
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/prod/black-macos-1024.png");
 
 /// Provider marks (components/Icons.tsx), keyed by driver kind in
 /// [`provider_icon_path`].
@@ -210,6 +241,12 @@ const BRAND: &[(&str, &[u8])] = &[
     (
         CHEVRON_DOWN,
         include_bytes!("../assets/brand/chevron-down.svg"),
+    ),
+    (MAC_MINI, include_bytes!("../assets/brand/mac-mini.svg")),
+    (MAC_STUDIO, include_bytes!("../assets/brand/mac-studio.svg")),
+    (
+        WORDMARK,
+        include_bytes!("../../../assets/prod/wordmark.svg"),
     ),
     (
         PROVIDER_OPENAI,
@@ -273,6 +310,12 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(bytes) = crate::settings::icons::load_brand(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
+        if let Some(bytes) = crate::settings::icons::SettingsIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
         Assets.load(path)
     }
 
@@ -284,6 +327,7 @@ impl AssetSource for AppAssets {
             .map(SharedString::from)
             .collect();
         names.extend(AppIcons.list(path)?);
+        names.extend(crate::settings::icons::SettingsIcons.list(path)?);
         names.extend(Assets.list(path)?);
         names.sort();
         names.dedup();

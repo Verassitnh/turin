@@ -55,8 +55,8 @@ use crate::pipeline::notification_mailbox::is_undelivered_mailbox_steer;
 use crate::pipeline::orchestrator_port::{
     OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
 };
-use crate::projection::shared::thread_error::run_ran_after;
 use crate::projection::store::recovery::ProjectionRecoveryKind;
+use turin_shared::orchestration_v2_thread_error::run_ran_after;
 
 /// `finalizeAppOwnedSubagent`'s options.
 #[derive(Debug, Clone, Default)]
@@ -457,7 +457,7 @@ impl Orchestrator {
             .iter()
             .filter(|run| run.delegated_task_id.as_ref() == Some(task_id))
             .collect();
-        task_runs.sort_by(|a, b| b.ordinal.get().cmp(&a.ordinal.get()));
+        task_runs.sort_by_key(|run| std::cmp::Reverse(run.ordinal.get()));
         let child_run: &OrchestrationV2Run = match task_runs.first() {
             Some(run) => run,
             None if task_id == forked_node => match progress_result_run {
@@ -536,7 +536,7 @@ impl Orchestrator {
         if parent.context_transfers.iter().any(|transfer| {
             transfer.r#type == OrchestrationV2ContextTransferType::SubagentResult
                 && &transfer.source_thread_id == child_thread_id
-                && &transfer.target_thread_id == &parent_thread_id
+                && transfer.target_thread_id == parent_thread_id
                 && (transfer.source_point.run_id.as_ref() == Some(&child_run.id)
                     || (task_id == forked_node && transfer.source_point.run_id.is_none()))
         }) {
@@ -559,7 +559,7 @@ impl Orchestrator {
         let parent_node = parent
             .nodes
             .iter()
-            .find(|candidate| &candidate.id == &task.id);
+            .find(|candidate| candidate.id == task.id);
         let parent_turn_item = parent.turn_items.iter().find(|candidate| {
             matches!(candidate, OrchestrationV2TurnItem::Subagent { subagent_id, .. } if subagent_id == &task.id)
         });

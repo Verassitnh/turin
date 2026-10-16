@@ -18,9 +18,14 @@ mod message_dispatch_tests;
 mod provider_detach;
 pub mod services;
 #[cfg(test)]
+pub(super) mod test_harness;
+#[cfg(test)]
 mod tests;
 mod thread_archive;
+mod thread_delete;
+mod thread_fork;
 mod thread_lifecycle;
+mod thread_merge_back;
 mod thread_metadata;
 mod thread_mutation;
 mod thread_pull_request;
@@ -118,6 +123,8 @@ fn projection_record_field(field: RecordField) -> ProjectionRecordField {
         RecordField::RuntimeRequests => ProjectionRecordField::RuntimeRequests,
         RecordField::Messages => ProjectionRecordField::Messages,
         RecordField::TurnItems => ProjectionRecordField::TurnItems,
+        RecordField::Checkpoints => ProjectionRecordField::Checkpoints,
+        RecordField::ContextTransfers => ProjectionRecordField::ContextTransfers,
     }
 }
 

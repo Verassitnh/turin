@@ -169,6 +169,8 @@ pub enum RecordField {
     RuntimeRequests,
     Messages,
     TurnItems,
+    Checkpoints,
+    ContextTransfers,
 }
 
 /// `ProjectionRecordFilter`.

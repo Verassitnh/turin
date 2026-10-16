@@ -52,11 +52,14 @@ pub(super) fn command_id(id: &str) -> CommandId {
     CommandId::new(id).expect("command id")
 }
 
-fn delete(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
-    OrchestrationV2ServerCommand::Client(OrchestrationV2Command::ThreadDelete {
-        command_id: command_id(command),
-        thread_id: thread(thread_id),
-    })
+fn model_selection_set(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
+    serde_json::from_value(json!({
+        "type": "thread.model-selection.set",
+        "commandId": command,
+        "threadId": thread_id,
+        "modelSelection": {"instanceId": "codex", "model": "gpt-test"},
+    }))
+    .expect("thread.model-selection.set decodes")
 }
 
 fn archive(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
@@ -95,12 +98,12 @@ async fn a_kind_without_a_handler_is_rejected_and_leaves_no_receipt() {
     let (orchestrator, receipts) = harness().await;
 
     let error = orchestrator
-        .dispatch(delete("command:unported", "thread:a"))
+        .dispatch(model_selection_set("command:unported", "thread:a"))
         .await
         .expect_err("unported kinds are rejected");
 
     assert!(
-        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.delete"),
+        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.model-selection.set"),
         "{error:?}"
     );
     assert!(error.was_not_accepted());

@@ -55,6 +55,7 @@ pub mod turn_item;
 pub mod unavailable_provider_snapshot;
 pub mod usage;
 pub mod usage_limits;
+pub mod wire_projection;
 
 pub use adapter_driver::{ProviderAdapterDriver, ProviderAdapterDriverCreateError};
 pub use driver::{

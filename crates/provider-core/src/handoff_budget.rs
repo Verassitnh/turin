@@ -459,8 +459,8 @@ mod tests {
     //! Port of the "handoff budget" describe in
     //! upstream/apps/server/src/orchestration-v2/ContextHandoffBudget.test.ts.
     //!
-    //! The first `it` calls `projectContextHandoffForWire`, which is not in
-    //! this crate. The "handoff delivery" describe belongs with
+    //! The first `it` (`projectContextHandoffForWire`) lives in
+    //! `wire_projection`. The "handoff delivery" describe lives with
     //! `ContextHandoffDelivery`.
 
     use super::{

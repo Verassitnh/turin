@@ -359,3 +359,599 @@ fn selected_item_ids(
         .map(|message| message.item_id.clone())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    //! Port of the "handoff delivery" describe in
+    //! upstream/apps/server/src/orchestration-v2/ContextHandoffBudget.test.ts.
+    //!
+    //! The budget argument is already an `i64`. Upstream's lazy budget Effect
+    //! is not a seam here, so the "loads the history budget only when a
+    //! handoff needs delivery" case asserts that the store and injector stay
+    //! idle on the three early returns, then that a real delivery includes
+    //! the first message.
+
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use turin_contracts::orchestration_v2::{
+        OrchestrationV2ContextHandoff, OrchestrationV2ContextHandoffDelivery,
+        OrchestrationV2ContextHandoffDeliveryStatus, OrchestrationV2ContextHandoffHistory,
+        OrchestrationV2ContextHandoffStatus, OrchestrationV2ContextHandoffStrategy,
+        OrchestrationV2CoveredRunOrdinals, OrchestrationV2HistoricalMessage,
+        OrchestrationV2HistoricalMessageRole, OrchestrationV2NativeRefStrength,
+        OrchestrationV2ProviderRef, OrchestrationV2ProviderThread,
+        OrchestrationV2ProviderThreadStatus,
+    };
+    use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceId};
+    use turin_contracts::{
+        ContextHandoffId, PositiveInt, ProviderThreadId, RunId, ThreadId, TrimmedNonEmptyString,
+        TurnItemId, UtcDateTime,
+    };
+    use turin_provider_core::handoff_budget::{history_cost, history_response_items};
+    use turin_provider_core::provider_adapter::ProviderAdapterV2HistoricalContext;
+
+    use super::{
+        ContextHandoffDeliveryError, ContextHandoffStore, DeliverContextHandoffsInput,
+        HistoricalContextInjector, deliver_context_handoffs, persist_handoffs,
+    };
+    use crate::pipeline::orchestrator_port::BoxError;
+
+    struct MemoryStore {
+        latest: Mutex<Option<OrchestrationV2ContextHandoff>>,
+        statuses: Mutex<Vec<OrchestrationV2ContextHandoffDeliveryStatus>>,
+        writes: Mutex<usize>,
+    }
+
+    impl MemoryStore {
+        fn new() -> Self {
+            Self {
+                latest: Mutex::new(None),
+                statuses: Mutex::new(Vec::new()),
+                writes: Mutex::new(0),
+            }
+        }
+
+        fn latest(&self) -> Option<OrchestrationV2ContextHandoff> {
+            self.latest.lock().unwrap().clone()
+        }
+
+        fn writes(&self) -> usize {
+            *self.writes.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl ContextHandoffStore for MemoryStore {
+        async fn persist(&self, handoff: &OrchestrationV2ContextHandoff) -> Result<(), BoxError> {
+            if let Some(delivery) = &handoff.delivery {
+                self.statuses.lock().unwrap().push(delivery.status);
+            }
+            *self.latest.lock().unwrap() = Some(handoff.clone());
+            *self.writes.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    enum InjectMode {
+        Accept,
+        Refuse,
+        Fail,
+    }
+
+    struct FakeInjector {
+        mode: InjectMode,
+        calls: Mutex<Vec<ProviderAdapterV2HistoricalContext>>,
+    }
+
+    impl FakeInjector {
+        fn new(mode: InjectMode) -> Self {
+            Self {
+                mode,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<ProviderAdapterV2HistoricalContext> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl HistoricalContextInjector for FakeInjector {
+        async fn inject(
+            &self,
+            history: &ProviderAdapterV2HistoricalContext,
+        ) -> Result<bool, BoxError> {
+            self.calls.lock().unwrap().push(history.clone());
+            match self.mode {
+                InjectMode::Accept => Ok(true),
+                InjectMode::Refuse => Ok(false),
+                InjectMode::Fail => Err(anyhow::anyhow!("connection lost").into()),
+            }
+        }
+    }
+
+    fn now() -> UtcDateTime {
+        "2026-09-17T00:00:00.000Z".parse().unwrap()
+    }
+
+    fn message(
+        id: &str,
+        role: OrchestrationV2HistoricalMessageRole,
+        text: &str,
+    ) -> OrchestrationV2HistoricalMessage {
+        OrchestrationV2HistoricalMessage {
+            role,
+            text: text.to_owned(),
+            run_status: None,
+            thread_id: ThreadId::new("thread:handoff").unwrap(),
+            run_id: Some(RunId::new("run:source").unwrap()),
+            item_id: TurnItemId::new(id).unwrap(),
+            provider_thread_id: Some(ProviderThreadId::new("provider-thread:source").unwrap()),
+            status: "interrupted".to_owned(),
+            kind: match role {
+                OrchestrationV2HistoricalMessageRole::User => "user_message",
+                OrchestrationV2HistoricalMessageRole::Assistant => "assistant_message",
+            }
+            .to_owned(),
+        }
+    }
+
+    fn sample_messages() -> Vec<OrchestrationV2HistoricalMessage> {
+        vec![
+            message(
+                "item:one",
+                OrchestrationV2HistoricalMessageRole::User,
+                "Preserve every line.\n\n  And this indentation.\n",
+            ),
+            message(
+                "item:two",
+                OrchestrationV2HistoricalMessageRole::Assistant,
+                &format!("Partial work: 日本語 🧪 مرحبا\n{}", "x".repeat(600)),
+            ),
+        ]
+    }
+
+    fn handoff_with(
+        id: &str,
+        messages: Vec<OrchestrationV2HistoricalMessage>,
+        omitted_items: u64,
+        omitted_item_ids: Option<Vec<TurnItemId>>,
+    ) -> OrchestrationV2ContextHandoff {
+        let now = now();
+        OrchestrationV2ContextHandoff {
+            id: ContextHandoffId::new(id).unwrap(),
+            transfer_id: None,
+            thread_id: ThreadId::new("thread:handoff").unwrap(),
+            target_run_id: RunId::new("run:target").unwrap(),
+            from_provider_thread_ids: Vec::new(),
+            to_provider_thread_id: ProviderThreadId::new("provider-thread:target").unwrap(),
+            covered_run_ordinals: OrchestrationV2CoveredRunOrdinals {
+                from: PositiveInt::new(1).unwrap(),
+                to: PositiveInt::new(2).unwrap(),
+            },
+            strategy: OrchestrationV2ContextHandoffStrategy::FullThreadSummary,
+            status: OrchestrationV2ContextHandoffStatus::Ready,
+            summary_message_id: None,
+            summary_text: String::new(),
+            history: Some(OrchestrationV2ContextHandoffHistory {
+                messages,
+                coverage: "Historical context; retrieve thread:handoff with t3_thread_read."
+                    .to_owned(),
+                omitted_items,
+                omitted_item_ids,
+            }),
+            delivery: None,
+            detail_in_turn_item: None,
+            created_by_provider_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn handoff() -> OrchestrationV2ContextHandoff {
+        handoff_with("handoff:one", sample_messages(), 0, None)
+    }
+
+    fn provider_thread() -> OrchestrationV2ProviderThread {
+        let now = now();
+        let driver = ProviderDriverKind::new("codex").unwrap();
+        OrchestrationV2ProviderThread {
+            id: ProviderThreadId::new("provider-thread:target").unwrap(),
+            driver: driver.clone(),
+            provider_instance_id: ProviderInstanceId::new("codex").unwrap(),
+            provider_session_id: None,
+            app_thread_id: Some(ThreadId::new("thread:handoff").unwrap()),
+            owner_node_id: None,
+            native_thread_ref: Some(OrchestrationV2ProviderRef {
+                driver,
+                native_id: Some(TrimmedNonEmptyString::new("native:target").unwrap()),
+                strength: OrchestrationV2NativeRefStrength::Strong,
+                fingerprint: None,
+                ordinal: None,
+            }),
+            native_conversation_head_ref: None,
+            status: OrchestrationV2ProviderThreadStatus::Idle,
+            first_run_ordinal: None,
+            last_run_ordinal: None,
+            handoff_ids: Vec::new(),
+            forked_from: None,
+            pending_background_tasks: Vec::new(),
+            context_usage: None,
+            native_metadata: None,
+            goal: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn deliver(
+        handoffs: &[OrchestrationV2ContextHandoff],
+        budget: i64,
+        defer_inline: bool,
+        already: &HashSet<TurnItemId>,
+        store: &MemoryStore,
+        inject: Option<&FakeInjector>,
+    ) -> Result<super::ContextHandoffDelivery, ContextHandoffDeliveryError> {
+        let thread = provider_thread();
+        deliver_context_handoffs(
+            DeliverContextHandoffsInput {
+                handoffs,
+                provider_thread: &thread,
+                budget,
+                defer_inline,
+                already_delivered_item_ids: already,
+                inject: inject.map(|inject| inject as &dyn HistoricalContextInjector),
+            },
+            store,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn records_omitted_recovery_coverage_separately_from_injected_and_inline_text() {
+        let messages = sample_messages();
+        let omitted_before = TurnItemId::new("item:omitted-during-preparation").unwrap();
+        let oversized = message(
+            "item:oversized",
+            OrchestrationV2HistoricalMessageRole::User,
+            &"x".repeat(20_000),
+        );
+        for native in [true, false] {
+            let source = handoff_with(
+                "handoff:one",
+                {
+                    let mut messages = messages.clone();
+                    messages.push(oversized.clone());
+                    messages
+                },
+                1,
+                Some(vec![omitted_before.clone()]),
+            );
+            let store = MemoryStore::new();
+            let injector = FakeInjector::new(if native {
+                InjectMode::Accept
+            } else {
+                InjectMode::Refuse
+            });
+            let result = deliver(
+                &vec![source],
+                16_000,
+                false,
+                &HashSet::new(),
+                &store,
+                Some(&injector),
+            )
+            .await
+            .unwrap();
+            let captured = injector.calls();
+            assert_eq!(captured.len(), 1);
+            assert!(captured[0].context.contains("omitted 2 items"));
+            assert!(
+                !captured[0]
+                    .messages
+                    .iter()
+                    .any(|item| item.item_id == oversized.item_id)
+            );
+            let durable = store.latest().unwrap();
+            assert_eq!(
+                durable.delivery.as_ref().unwrap().status,
+                if native {
+                    OrchestrationV2ContextHandoffDeliveryStatus::Injected
+                } else {
+                    OrchestrationV2ContextHandoffDeliveryStatus::Pending
+                }
+            );
+            persist_handoffs(&store, &result.delivered).await.unwrap();
+            let durable = store.latest().unwrap();
+            assert_eq!(
+                durable.delivery.as_ref().unwrap().status,
+                if native {
+                    OrchestrationV2ContextHandoffDeliveryStatus::Injected
+                } else {
+                    OrchestrationV2ContextHandoffDeliveryStatus::Inline
+                }
+            );
+            assert_eq!(
+                durable.delivery.as_ref().unwrap().item_ids,
+                messages
+                    .iter()
+                    .map(|item| item.item_id.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                durable.delivery.as_ref().unwrap().omitted_item_ids,
+                Some(vec![omitted_before.clone(), oversized.item_id.clone()])
+            );
+            let decoded: OrchestrationV2ContextHandoff =
+                serde_json::from_value(serde_json::to_value(&durable).unwrap()).unwrap();
+            assert_eq!(decoded.delivery, durable.delivery);
+        }
+    }
+
+    #[tokio::test]
+    async fn skips_store_and_injector_until_a_handoff_needs_delivery() {
+        let store = MemoryStore::new();
+        let empty = deliver(&[], 16_000, false, &HashSet::new(), &store, None)
+            .await
+            .unwrap();
+        assert_eq!(empty.context, "");
+        let deferred = deliver(&[handoff()], 16_000, true, &HashSet::new(), &store, None)
+            .await
+            .unwrap();
+        assert_eq!(deferred.context, "");
+        let mut already = handoff();
+        already.delivery = Some(OrchestrationV2ContextHandoffDelivery {
+            native_thread_id: "native:target".to_owned(),
+            status: OrchestrationV2ContextHandoffDeliveryStatus::Injected,
+            item_ids: Vec::new(),
+            omitted_item_ids: None,
+        });
+        let settled = deliver(&[already], 16_000, false, &HashSet::new(), &store, None)
+            .await
+            .unwrap();
+        assert_eq!(settled.context, "");
+        assert_eq!(store.writes(), 0);
+        let result = deliver(&[handoff()], 16_000, false, &HashSet::new(), &store, None)
+            .await
+            .unwrap();
+        assert!(result.context.contains(&sample_messages()[0].text));
+    }
+
+    #[tokio::test]
+    async fn persists_successful_injection_before_turn_start_and_skips_it_on_retry() {
+        let store = MemoryStore::new();
+        let injector = FakeInjector::new(InjectMode::Accept);
+        let source = handoff();
+        let first = deliver(
+            &[source],
+            16_000,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.context, "");
+        assert_eq!(
+            *store.statuses.lock().unwrap(),
+            vec![
+                OrchestrationV2ContextHandoffDeliveryStatus::Pending,
+                OrchestrationV2ContextHandoffDeliveryStatus::Injected,
+            ]
+        );
+        let captured = injector.calls();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            history_response_items(&captured[0].messages, &captured[0].context).len(),
+            3
+        );
+        let durable = store.latest().unwrap();
+        let second = deliver(
+            std::slice::from_ref(&durable),
+            16_000,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.context, "");
+        assert_eq!(injector.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn uses_the_same_selection_on_explicit_native_fallback() {
+        let messages = sample_messages();
+        let store = MemoryStore::new();
+        let injector = FakeInjector::new(InjectMode::Refuse);
+        let result = deliver(
+            &[handoff()],
+            16_000,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await
+        .unwrap();
+        assert!(result.context.contains(&messages[0].text));
+        assert!(result.context.contains(&messages[1].text));
+        assert_eq!(
+            store.latest().unwrap().delivery.unwrap().status,
+            OrchestrationV2ContextHandoffDeliveryStatus::Pending
+        );
+        persist_handoffs(&store, &result.delivered).await.unwrap();
+        assert_eq!(
+            store.latest().unwrap().delivery.unwrap().status,
+            OrchestrationV2ContextHandoffDeliveryStatus::Inline
+        );
+    }
+
+    #[tokio::test]
+    async fn defers_unsupported_compaction_history_until_a_normal_turn() {
+        let store = MemoryStore::new();
+        let injector = FakeInjector::new(InjectMode::Refuse);
+        let compact = deliver(
+            &[handoff()],
+            16_000,
+            true,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await
+        .unwrap();
+        persist_handoffs(&store, &compact.delivered).await.unwrap();
+        assert_eq!(compact.context, "");
+        assert!(store.latest().unwrap().delivery.is_none());
+        let next = deliver(
+            &[store.latest().unwrap()],
+            16_000,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await
+        .unwrap();
+        assert!(next.context.contains(&sample_messages()[0].text));
+        persist_handoffs(&store, &next.delivered).await.unwrap();
+        assert_eq!(
+            store.latest().unwrap().delivery.unwrap().status,
+            OrchestrationV2ContextHandoffDeliveryStatus::Inline
+        );
+    }
+
+    #[tokio::test]
+    async fn bounds_accumulated_recovery_markers_while_keeping_omitted_history_discoverable() {
+        let many: Vec<_> = (0..100)
+            .map(|index| {
+                handoff_with(
+                    &format!("handoff:retry:{index}"),
+                    sample_messages(),
+                    0,
+                    None,
+                )
+            })
+            .collect();
+        let store = MemoryStore::new();
+        let injector = FakeInjector::new(InjectMode::Accept);
+        let result = deliver(
+            &many,
+            2_500,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.context, "");
+        let captured = injector.calls();
+        assert_eq!(captured.len(), 1);
+        assert!(
+            captured[0]
+                .context
+                .contains("detailed coverage references omitted")
+        );
+        assert!(captured[0].context.contains("t3_thread_read"));
+        assert!(captured[0].context.contains("thread:handoff"));
+        assert!(history_cost(&captured[0].messages, &captured[0].context) <= 2_500);
+        assert!(!captured[0].messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn does_not_redeliver_after_ambiguous_injection_failure() {
+        let store = MemoryStore::new();
+        let injector = FakeInjector::new(InjectMode::Fail);
+        let first = deliver(
+            &[handoff()],
+            16_000,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await;
+        assert!(first.is_err());
+        assert_eq!(
+            store.latest().unwrap().delivery.unwrap().status,
+            OrchestrationV2ContextHandoffDeliveryStatus::Pending
+        );
+        let retry = deliver(
+            &[store.latest().unwrap()],
+            16_000,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await;
+        assert!(matches!(
+            retry,
+            Err(ContextHandoffDeliveryError::Uncertain(_))
+        ));
+        assert_eq!(injector.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn budgets_multiple_handoffs_together_and_skips_previously_delivered_items() {
+        let messages = sample_messages();
+        let mut extra_messages = messages.clone();
+        extra_messages.push(message(
+            "item:three",
+            OrchestrationV2HistoricalMessageRole::Assistant,
+            "Latest result",
+        ));
+        let extra = handoff_with("handoff:two", extra_messages, 0, None);
+        let already = HashSet::from([TurnItemId::new("item:one").unwrap()]);
+        let store = MemoryStore::new();
+        let injector = FakeInjector::new(InjectMode::Accept);
+        deliver(
+            &[handoff(), extra],
+            2_500,
+            false,
+            &already,
+            &store,
+            Some(&injector),
+        )
+        .await
+        .unwrap();
+        let captured = injector.calls();
+        let serialized = serde_json::to_string(&history_response_items(
+            &captured[0].messages,
+            &captured[0].context,
+        ))
+        .unwrap();
+        assert!(serialized.len() <= 2_500);
+        assert!(!serialized.contains("Preserve every line"));
+        assert_eq!(serialized.matches("Partial work").count(), 1);
+        assert!(serialized.contains("Latest result"));
+    }
+
+    #[tokio::test]
+    async fn fails_before_delivery_when_even_the_coverage_marker_cannot_fit() {
+        let store = MemoryStore::new();
+        let injector = FakeInjector::new(InjectMode::Accept);
+        let result = deliver(
+            &[handoff()],
+            0,
+            false,
+            &HashSet::new(),
+            &store,
+            Some(&injector),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ContextHandoffDeliveryError::Budget(_))
+        ));
+        assert!(injector.calls().is_empty());
+        assert_eq!(store.writes(), 0);
+    }
+}

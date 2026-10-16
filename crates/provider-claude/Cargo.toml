@@ -6,9 +6,28 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
+turin-claude-protocol.workspace = true
+turin-provider-core.workspace = true
+turin-shared.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+url.workspace = true
+tokio-util.workspace = true
+indexmap.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+regex.workspace = true
+fancy-regex.workspace = true
+yaml-rust2 = "0.13"
+reqwest.workspace = true
+parking_lot.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

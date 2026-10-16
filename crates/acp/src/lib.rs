@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod client;
+pub mod client_policy;
 pub mod compat;
 pub mod cursor;
 pub mod errors;

@@ -9,6 +9,7 @@ pub mod command_palette;
 pub mod drag_region;
 pub mod git_actions_control;
 pub mod jetbrains_icons;
+pub mod keybindings_update_toast_logic;
 pub mod project_favicon;
 pub mod project_monogram;
 pub mod prompt_links;

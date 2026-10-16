@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px, rems,
+    img, px, rems,
 };
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -418,24 +418,38 @@ impl SettingsView {
         let auth = item.auth();
         let (auth_label, auth_warn) = auth.map(auth_presentation).unzip();
         let dot = item_status_dot(item, &theme);
-        let icon = match (item, item.kind().as_str()) {
-            (Item::Provider(_), "github") => Some(IconName::Github),
-            (Item::Vcs(_), "git") => Some(IconName::GitBranch),
+        // `VCS_ICONS` / `sourceControlIcon`: `size-4.5 text-foreground/80`. The Git and
+        // Jujutsu marks carry their own colours, so they are drawn as images.
+        let glyph: Option<AnyElement> = match (item, item.kind().as_str()) {
+            (Item::Provider(_), "github") => Some(
+                Icon::new(IconName::Github)
+                    .size(rems(1.125))
+                    .color(with_alpha(theme.foreground, 0.8).into())
+                    .into_any_element(),
+            ),
+            (Item::Vcs(_), "git") => Some(
+                img(crate::assets::GIT)
+                    .size(rems(1.125))
+                    .flex_shrink_0()
+                    .into_any_element(),
+            ),
+            (Item::Vcs(_), "jj") => Some(
+                img(crate::assets::JUJUTSU)
+                    .size(rems(1.125))
+                    .flex_shrink_0()
+                    .into_any_element(),
+            ),
             _ => None,
         };
-        let mark: AnyElement = match icon {
-            Some(icon) => div()
+        let mark: AnyElement = match glyph {
+            Some(glyph) => div()
                 .relative()
                 .flex()
                 .size_5()
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
-                .child(
-                    Icon::new(icon)
-                        .size(rems(1.125))
-                        .color(with_alpha(theme.foreground, 0.8).into()),
-                )
+                .child(glyph)
                 .child(
                     div()
                         .absolute()

@@ -13,6 +13,8 @@
 
 pub mod dispatch;
 mod message_dispatch;
+#[cfg(test)]
+mod message_dispatch_tests;
 mod provider_detach;
 pub mod services;
 #[cfg(test)]

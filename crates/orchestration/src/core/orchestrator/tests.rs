@@ -44,11 +44,11 @@ async fn harness() -> (Orchestrator, CommandReceiptStore) {
     (orchestrator, receipts)
 }
 
-fn thread(id: &str) -> ThreadId {
+pub(super) fn thread(id: &str) -> ThreadId {
     ThreadId::new(id).expect("thread id")
 }
 
-fn command_id(id: &str) -> CommandId {
+pub(super) fn command_id(id: &str) -> CommandId {
     CommandId::new(id).expect("command id")
 }
 
@@ -199,7 +199,11 @@ async fn the_event_log_is_readable_through_the_port() {
     assert!(stream.next().now_or_never().is_none());
 }
 
-fn create_command(command: &str, thread_id: &str, title: &str) -> OrchestrationV2ServerCommand {
+pub(super) fn create_command(
+    command: &str,
+    thread_id: &str,
+    title: &str,
+) -> OrchestrationV2ServerCommand {
     serde_json::from_value(json!({
         "type": "thread.create",
         "createdBy": "user",
@@ -903,7 +907,11 @@ fn refusal_text(error: &OrchestratorError) -> String {
     format!("{error:?}")
 }
 
-fn message_command(command: &str, thread_id: &str, extra: Value) -> OrchestrationV2ServerCommand {
+pub(super) fn message_command(
+    command: &str,
+    thread_id: &str,
+    extra: Value,
+) -> OrchestrationV2ServerCommand {
     let mut value = json!({
         "type": "message.dispatch",
         "commandId": command,
@@ -977,21 +985,21 @@ async fn a_restart_continuation_is_refused_until_the_restart_port_lands() {
 }
 
 #[tokio::test]
-async fn a_new_turn_on_an_idle_thread_stops_before_the_provider_start_port() {
+async fn a_new_turn_without_a_provider_adapter_is_refused_before_any_event() {
     let (orchestrator, _) = harness().await;
     orchestrator
         .dispatch(create_command("command:create", "thread:idle", "Thread"))
         .await
         .expect("create commits");
 
-    // Without a checkpoint scope and provider adapter, a start is refused
-    // rather than run without them.
+    // The default seams have no provider adapters, so a start is refused
+    // rather than run without one. The start path writes nothing before that.
     let error = orchestrator
         .dispatch(message_command("command:start", "thread:idle", json!({})))
         .await
-        .expect_err("the start path is not ported");
+        .expect_err("no adapter is wired");
     assert!(
-        refusal_text(&error).contains("Starting a provider turn is not ported yet (T13c S3)."),
+        refusal_text(&error).contains("Provider instance codex is not available."),
         "{error:?}"
     );
 }

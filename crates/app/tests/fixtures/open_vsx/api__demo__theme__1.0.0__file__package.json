@@ -1,0 +1,6 @@
+{
+  "license": "MIT",
+  "contributes": {
+    "themes": [{ "path": "./theme.json" }]
+  }
+}

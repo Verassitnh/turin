@@ -64,6 +64,12 @@ gpui-kit = { workspace = true, features = [
 percent-encoding.workspace = true
 markdown.workspace = true
 similar = "2"
+uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSString"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

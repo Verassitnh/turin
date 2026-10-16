@@ -23,11 +23,14 @@ use gpui_kit::{
 };
 
 use super::chat::panel_layout_controls::PanelLayoutControls;
-use super::chat_view::ChatView;
+use super::confirm_dialog_host::ConfirmDialogHost;
+use super::quit_hold_overlay::QuitHoldOverlay;
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
 use super::sidebar::{self as thread_sidebar, Sidebar, SidebarEvent, SidebarRoute};
+use super::thread_notification_coordinator::ThreadNotificationCoordinator;
+use super::thread_route_view::thread_route_view;
 use super::thread_sidebar_width::{
     THREAD_SIDEBAR_DEFAULT_WIDTH, THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width,
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
@@ -36,6 +39,8 @@ use super::workspace_titlebar::workspace_controls_left;
 use crate::hooks::use_preview_panel_inline_size::{
     PREVIEW_PANEL_DEFAULT_WIDTH, clamp_preview_panel_width, get_preview_panel_max_width,
 };
+use crate::shell::app_route::{AppRoute, NavigationStack, route_from_draft};
+use crate::shell::thread_routes::{ThreadRouteRenderState, ThreadRouteTarget};
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{WORKSPACE_CONTROLS_INSET, WORKSPACE_TOPBAR_HEIGHT};
 use crate::theme::{self, ActiveAppTheme};
@@ -57,7 +62,7 @@ actions!(
     ]
 );
 
-const KEY_CONTEXT: &str = "AppShell";
+pub const KEY_CONTEXT: &str = "AppShell";
 
 /// Upstream default keybindings (packages/shared/src/keybindings.ts) for the
 /// shell's actions.
@@ -106,6 +111,11 @@ pub struct AppSidebarLayout {
     right_panel_content: Option<AnyView>,
     /// A modal layer over the whole window (dialogs).
     overlay: Option<AnyView>,
+    navigation: NavigationStack,
+    #[allow(dead_code)]
+    notifications: ThreadNotificationCoordinator,
+    quit_overlay: Entity<QuitHoldOverlay>,
+    confirm_dialog: Entity<ConfirmDialogHost>,
     sidebar: Entity<Sidebar>,
     store: Entity<SidebarStore>,
     _appearance: Subscription,
@@ -126,6 +136,8 @@ impl AppSidebarLayout {
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
         sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
+        let quit_overlay = cx.new(|_| QuitHoldOverlay::new());
+        let confirm_dialog = cx.new(|cx| ConfirmDialogHost::new(window, cx));
         Self {
             focus_handle,
             sidebar_open: true,
@@ -138,6 +150,10 @@ impl AppSidebarLayout {
             main_content: None,
             right_panel_content: None,
             overlay: None,
+            navigation: NavigationStack::default(),
+            notifications: ThreadNotificationCoordinator::new(),
+            quit_overlay,
+            confirm_dialog,
             sidebar,
             store,
             _appearance: appearance,
@@ -172,7 +188,32 @@ impl AppSidebarLayout {
         cx: &mut Context<Self>,
     ) {
         match event {
-            SidebarEvent::Navigate(_) => cx.notify(),
+            SidebarEvent::Navigate(maybe_route) => {
+                if let Some(sidebar_route) = maybe_route {
+                    self.navigation.replace(match sidebar_route {
+                        SidebarRoute::Thread(key) => {
+                            if let Some((environment_id, thread_id)) =
+                                crate::state::models::parse_scoped_thread_key(&key)
+                            {
+                                AppRoute::ChatThread {
+                                    target: ThreadRouteTarget::Server {
+                                        thread_ref: turin_contracts::environment::ScopedThreadRef {
+                                            environment_id,
+                                            thread_id,
+                                        },
+                                    },
+                                }
+                            } else {
+                                AppRoute::ChatIndex
+                            }
+                        }
+                        SidebarRoute::Draft(draft_id) => route_from_draft(draft_id),
+                    });
+                } else {
+                    self.navigation.replace(AppRoute::ChatIndex);
+                }
+                cx.notify();
+            }
             SidebarEvent::OpenPullRequests(_) => {
                 self.right_panel_open = true;
                 cx.notify();
@@ -305,6 +346,15 @@ impl Render for AppSidebarLayout {
         let maximized = right_panel_open && self.right_panel_maximized;
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
+        let route_target = match self.navigation.current() {
+            AppRoute::ChatThread { target } => Some(target),
+            _ => None,
+        };
+        let render_state = if route_target.is_some() {
+            ThreadRouteRenderState::Ready
+        } else {
+            ThreadRouteRenderState::Loading
+        };
 
         let sidebar_rail = SidebarRail::new(px(sidebar_width))
             .active(resizing == Some(ResizeTarget::Sidebar))
@@ -471,11 +521,30 @@ impl Render for AppSidebarLayout {
                             .with(|this| this.flex_row().h_full())
                             .when(!maximized, |this| match self.main_content.clone() {
                                 Some(content) => this.child(content),
-                                None => this.child(ChatView {
-                                    sidebar_open,
-                                    right_panel_open,
-                                    thread: routed_thread.clone(),
-                                }),
+                                None => this.child(
+                                    route_target
+                                        .as_ref()
+                                        .map(|target| {
+                                            thread_route_view(
+                                                target,
+                                                render_state,
+                                                sidebar_open,
+                                                right_panel_open,
+                                                routed_thread.clone(),
+                                            )
+                                        })
+                                        .unwrap_or_else(|| {
+                                            thread_route_view(
+                                                &ThreadRouteTarget::Draft {
+                                                    draft_id: String::new(),
+                                                },
+                                                ThreadRouteRenderState::Loading,
+                                                sidebar_open,
+                                                right_panel_open,
+                                                routed_thread.clone(),
+                                            )
+                                        }),
+                                ),
                             })
                             .when(right_panel_open, |this| {
                                 this.child(
@@ -508,6 +577,8 @@ impl Render for AppSidebarLayout {
             .child(sidebar_toggle)
             .child(layout_controls)
             .children(self.overlay.clone())
+            .child(self.quit_overlay.clone())
+            .child(self.confirm_dialog.clone())
     }
 }
 

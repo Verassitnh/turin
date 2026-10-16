@@ -8,6 +8,7 @@ pub mod badge;
 pub mod button;
 pub mod collapsible_section_header;
 pub mod dialog;
+pub mod discovery_list;
 pub mod draft_input;
 pub mod empty;
 pub mod group;

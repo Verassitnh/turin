@@ -7,7 +7,7 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 ## Roster and budget
 
 **Current policy (user, 2026-10-15 ~23:55 UTC; supersedes the table below):**
-- Claude-plan usage is scarce, Cursor usage is plentiful. Implementation goes through the `cursor` provider: `composer-2.5` (bulk ports), `claude-sonnet-5-5` (hard ports, UI, critical path), `grok-4.7` (backend). No cap on Sonnet.
+- Claude-plan usage is scarce, Cursor usage is plentiful. Implementation goes through the `cursor` provider: `composer-2.5` (bulk ports), `grok-4.7` (backend). Cursor only runs Grok and Composer models. Sonnet (claudeAgent, scarce) only for the critical path; no cap otherwise.
 - `claudeAgent` Haiku: Workflow QC and small fixes only. PM (Opus) stays lean.
 - Never Codex. Pushing to GitHub (origin) is allowed. Cloud agents only if the Mac is truly resource-bound.
 - Never interrupt running threads to switch models; switch on the next continuation.

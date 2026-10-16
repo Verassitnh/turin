@@ -11,6 +11,9 @@
 //! return an error here. Command kinds not yet ported are rejected in
 //! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
 
+mod checkpoint_rollback;
+#[cfg(test)]
+mod checkpoint_rollback_tests;
 mod cohort;
 #[cfg(test)]
 mod cohort_tests;
@@ -198,6 +201,7 @@ fn projection_record_field(field: RecordField) -> ProjectionRecordField {
         RecordField::RuntimeRequests => ProjectionRecordField::RuntimeRequests,
         RecordField::Messages => ProjectionRecordField::Messages,
         RecordField::TurnItems => ProjectionRecordField::TurnItems,
+        RecordField::CheckpointScopes => ProjectionRecordField::CheckpointScopes,
         RecordField::Checkpoints => ProjectionRecordField::Checkpoints,
         RecordField::ContextTransfers => ProjectionRecordField::ContextTransfers,
     }

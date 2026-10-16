@@ -169,6 +169,7 @@ pub enum RecordField {
     RuntimeRequests,
     Messages,
     TurnItems,
+    CheckpointScopes,
     Checkpoints,
     ContextTransfers,
 }

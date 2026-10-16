@@ -190,6 +190,7 @@ impl WriteRuntime {
                 sessions: sessions.clone(),
                 switch_planner,
                 provider_instances: host_settings.clone(),
+                ..DispatchSeams::default()
             }),
         );
         let threads = Arc::new(ThreadManagementService::new(

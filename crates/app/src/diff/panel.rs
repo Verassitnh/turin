@@ -48,7 +48,12 @@ use super::view_model::{
     Loadable,
 };
 use crate::components::chat::timeline::types::TurnDiffSummary;
+use crate::hooks::use_checkpoint_diff::{
+    UseCheckpointDiffOptions, checkpoint_diff_query, use_checkpoint_diff,
+};
+use crate::state::checkpoint_diff::CheckpointDiffTarget;
 use crate::theme::ActiveAppTheme;
+use turin_contracts::{EnvironmentId, ThreadId};
 
 /// `AUTOMATIC_BASE_REF`.
 pub const AUTOMATIC_BASE_REF: &str = "__automatic_base_ref__";
@@ -630,13 +635,37 @@ impl DiffPanel {
             let mut git_source: Option<GitDiffSource> = None;
             if turn_selected {
                 let to = selected_turn_count.unwrap_or(0);
-                match self
-                    .source
-                    .checkpoint_diff(to.saturating_sub(1), to, ignore_whitespace)
-                {
-                    Loadable::Ready(text) => patch = Some(text),
-                    Loadable::Pending => loading = true,
-                    Loadable::Failed(message) => error = Some(message),
+                // `activeCheckpointDiff`: the turn's range, read through the hook.
+                let target = CheckpointDiffTarget {
+                    environment_id: context
+                        .thread
+                        .as_ref()
+                        .and_then(|thread| EnvironmentId::new(thread.environment_id.as_str()).ok()),
+                    thread_id: context
+                        .thread
+                        .as_ref()
+                        .and_then(|thread| ThreadId::new(thread.thread_id.as_str()).ok()),
+                    from_turn_count: Some(to.saturating_sub(1)),
+                    to_turn_count: Some(to),
+                    ignore_whitespace,
+                    cache_scope: selected_run_id.as_ref().map(|run| format!("turn:{run}")),
+                };
+                let source = self.source.clone();
+                let checkpoint = use_checkpoint_diff(
+                    &|target, options| {
+                        checkpoint_diff_query(target, options, |from, to, ignore_whitespace| {
+                            source.checkpoint_diff(from, to, ignore_whitespace)
+                        })
+                    },
+                    &target,
+                    Some(UseCheckpointDiffOptions::enabled(context.is_git_repo)),
+                );
+                if let Some(data) = checkpoint.data {
+                    patch = Some(data.diff);
+                } else if let Some(message) = checkpoint.error {
+                    error = Some(message);
+                } else if checkpoint.is_pending {
+                    loading = true;
                 }
             } else {
                 match self

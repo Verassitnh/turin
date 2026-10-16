@@ -58,6 +58,7 @@ pub mod pull_requests_route_search;
 pub mod relative_time;
 pub mod review_annotation;
 pub mod review_form;
+pub mod shared_summary;
 pub mod speed_actions;
 pub mod stack_popover;
 pub mod summary_tab;

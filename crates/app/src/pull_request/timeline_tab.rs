@@ -13,9 +13,9 @@ use std::collections::HashSet;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, relative, rems,
+    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px, rems,
 };
 use turin_contracts::pull_request::{
     PullRequestActor, PullRequestComment, PullRequestCommentKind, PullRequestCommentUpdateKind,
@@ -45,7 +45,6 @@ use super::view_model::Loadable;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{TEXT_2XS, TEXT_3XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::skeleton::{SkeletonShape, skeleton, skeleton_group};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, scroll_area};
 
 /// `size-8` marker box on the rail.
@@ -815,7 +814,7 @@ impl TimelineTab {
     }
 
     fn ghost(&self, cx: &App) -> AnyElement {
-        timeline_ghost(6, cx)
+        super::detail_layout::timeline_ghost(6, cx)
     }
 
     fn activity_unavailable(
@@ -864,47 +863,6 @@ impl TimelineTab {
             )
             .into_any_element()
     }
-}
-
-/// `PullRequestTimelineGhost`: bars in the geometry of the entries they stand for.
-pub fn timeline_ghost(rows: usize, cx: &App) -> AnyElement {
-    const TITLE_WIDTHS: [f32; 7] = [0.6, 0.4, 0.5, 2. / 3., 0.4, 0.6, 0.5];
-    let theme = cx.app_theme();
-    let mut rail = div()
-        .relative()
-        .ml_2()
-        .border_l_1()
-        .border_color(with_alpha(theme.border, 0.7))
-        .pl(rems(1.25));
-    for index in 0..rows {
-        rail = rail.child(
-            div()
-                .relative()
-                .pb_5()
-                .child(
-                    skeleton(SkeletonShape::Pill, cx)
-                        .absolute()
-                        .left(rems(-1.55))
-                        .top_1()
-                        .size_2(),
-                )
-                .child(
-                    skeleton(SkeletonShape::Block, cx)
-                        .h(rems(0.875))
-                        .w(relative(TITLE_WIDTHS[index % TITLE_WIDTHS.len()])),
-                )
-                .child(
-                    skeleton(SkeletonShape::Block, cx)
-                        .h_3()
-                        .mt(rems(0.375))
-                        .w(rems(4.)),
-                ),
-        );
-    }
-    skeleton_group(
-        ElementId::Name("timeline-ghost".into()),
-        div().px_4().py(rems(1.25)).child(rail),
-    )
 }
 
 impl Render for TimelineTab {

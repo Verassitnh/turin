@@ -46,6 +46,15 @@ impl InitialMainWindowBounds {
     }
 }
 
+/// `normalizeMainWindowBounds`: sizes below the window minimum are rejected.
+pub fn normalize_main_window_bounds(bounds: DesktopWindowBounds) -> Option<DesktopWindowBounds> {
+    if bounds.width < MIN_MAIN_WINDOW_WIDTH || bounds.height < MIN_MAIN_WINDOW_HEIGHT {
+        None
+    } else {
+        Some(bounds)
+    }
+}
+
 /// `windowFitsWithinDisplay`.
 pub fn window_fits_within_display(window: DesktopWindowBounds, display: DisplayBounds) -> bool {
     window.x >= display.x
@@ -74,10 +83,44 @@ pub fn macos_traffic_light_y(zoom_factor: f32) -> f32 {
     (MACOS_WORKSPACE_TOPBAR_HEIGHT * zoom_factor) / 2. - MACOS_WINDOW_BUTTON_RADIUS
 }
 
-/// `concealPendingQuitWindow` maps to zero opacity on macOS/Windows; GPUI uses
-/// window hide where supported.
+/// `concealPendingQuitWindow` maps to zero opacity on macOS/Windows.
+/// Minimizing is wrong: it unfocuses the window and leaks key repeats.
 pub fn should_conceal_window_for_pending_quit() -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
+}
+
+/// Hide a window that is about to quit by leaving fullscreen and setting
+/// opacity to 0. Linux stays visible, matching upstream.
+pub fn conceal_pending_quit_window(window: &gpui_kit::Window) {
+    if !should_conceal_window_for_pending_quit() {
+        return;
+    }
+    if window.is_fullscreen() {
+        window.toggle_fullscreen();
+    }
+    #[cfg(target_os = "macos")]
+    set_macos_window_alpha(window, 0.0);
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_window_alpha(window: &gpui_kit::Window, alpha: f64) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view = handle.ns_view.as_ptr() as *mut objc2::runtime::AnyObject;
+    // SAFETY: `ns_view` is the live content view. `window` returns its NSWindow,
+    // and `setAlphaValue:` takes a CGFloat.
+    unsafe {
+        let ns_window: *mut objc2::runtime::AnyObject = objc2::msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = objc2::msg_send![ns_window, setAlphaValue: alpha];
+        }
+    }
 }
 
 #[cfg(test)]

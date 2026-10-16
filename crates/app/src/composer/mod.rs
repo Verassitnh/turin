@@ -37,6 +37,7 @@ pub mod mention_drag;
 pub mod menu_highlight;
 pub mod mock_source;
 pub mod model_display;
+pub mod model_ordering;
 pub mod model_picker;
 pub mod model_picker_keys;
 pub mod model_picker_search;

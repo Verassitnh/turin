@@ -33,11 +33,11 @@ pub fn provider_model_key(instance_id: &str, slug: &str) -> String {
 }
 
 /// `rankByValue`: value to index; a later duplicate overwrites an earlier one.
-fn rank_by_value<'a>(values: impl IntoIterator<Item = &'a str>) -> HashMap<&'a str, usize> {
+fn rank_by_value<'a>(values: impl IntoIterator<Item = &'a str>) -> HashMap<String, usize> {
     values
         .into_iter()
         .enumerate()
-        .map(|(index, value)| (value, index))
+        .map(|(index, value)| (value.to_string(), index))
         .collect()
 }
 

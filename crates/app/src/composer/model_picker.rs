@@ -10,16 +10,16 @@ use std::collections::HashSet;
 use turin_contracts::model::ANTIGRAVITY_DEFAULT_MODEL;
 
 use crate::composer::catalog::ProviderInstanceEntry;
+use crate::composer::model_ordering::{
+    self as ordering, ModelSlugItem, ProviderModelItem, SortProviderModelItemsOptions,
+};
 use crate::composer::model_picker_keys::{model_picker_legacy_section_key, model_picker_model_key};
 use crate::composer::model_picker_search::{
     ModelPickerSearchable, build_model_picker_search_text, score_model_picker_search,
 };
 use crate::composer::provider_state::{ProviderModel, resolve_selectable_model};
 
-/// `providerModelKey`: `${instanceId}:${slug}`, the favorites key.
-pub fn provider_model_key(instance_id: &str, slug: &str) -> String {
-    format!("{instance_id}:{slug}")
-}
+pub use crate::composer::model_ordering::provider_model_key;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPickerItem {
@@ -138,26 +138,34 @@ pub fn adjacent_model_picker_provider(
     providers[next as usize].clone()
 }
 
-/// `sortProviderModelItems`: favorites first (when grouping), then instance
-/// order, then the original order.
+impl ModelSlugItem for ModelPickerItem {
+    fn slug(&self) -> &str {
+        &self.model.slug
+    }
+}
+
+impl ProviderModelItem for ModelPickerItem {
+    fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+}
+
+/// `sortProviderModelItems` (`composer::model_ordering`): favorites first
+/// (when grouping), then instance order, then the original order.
 pub fn sort_provider_model_items(
     items: Vec<ModelPickerItem>,
     favorite_model_keys: &HashSet<String>,
     group_favorites: bool,
     instance_order: &[String],
 ) -> Vec<ModelPickerItem> {
-    let mut indexed: Vec<(usize, ModelPickerItem)> = items.into_iter().enumerate().collect();
-    indexed.sort_by_key(|(original, item)| {
-        let favorite = group_favorites
-            && favorite_model_keys
-                .contains(&provider_model_key(&item.instance_id, &item.model.slug));
-        let instance_rank = instance_order
-            .iter()
-            .position(|id| *id == item.instance_id)
-            .unwrap_or(usize::MAX);
-        (!favorite, instance_rank, *original)
-    });
-    indexed.into_iter().map(|(_, item)| item).collect()
+    ordering::sort_provider_model_items(
+        items,
+        SortProviderModelItemsOptions {
+            favorite_model_keys: Some(favorite_model_keys),
+            group_favorites,
+            instance_order,
+        },
+    )
 }
 
 /// A row of the model list.

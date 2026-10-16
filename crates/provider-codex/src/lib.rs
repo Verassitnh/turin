@@ -9,6 +9,7 @@ pub mod codex_chatgpt_models;
 pub mod codex_chatgpt_session_lock;
 pub mod codex_developer_instructions;
 pub mod codex_home_layout;
+pub mod codex_input;
 pub mod codex_installation;
 pub mod codex_launch_args;
 pub mod codex_managed_errors;

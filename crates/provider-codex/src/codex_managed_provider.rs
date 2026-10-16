@@ -607,7 +607,7 @@ pub async fn make_managed_codex_provider(
     });
 
     let usage_target = Arc::clone(&snapshot);
-    let adapter = CodexProviderAdapter::with_runtime_resolver(
+    let mut adapter = CodexProviderAdapter::with_runtime_resolver(
         input.instance_id.clone(),
         base_config,
         Arc::clone(&runtime) as Arc<dyn CodexRuntimeResolver>,
@@ -615,6 +615,9 @@ pub async fn make_managed_codex_provider(
     .with_usage_sink(Arc::new(move |update, checked_at| {
         usage_target.cell.apply_usage_limits(&update, &checked_at);
     }));
+    if let Some(resolver) = &attachment_path {
+        adapter = adapter.with_attachment_resolver(Arc::clone(resolver));
+    }
     // Generations run under the sign-in gate, with the signed-in runtime.
     let native_text = codex_text_generation(CodexTextGenerationOptions {
         settings: settings.clone(),

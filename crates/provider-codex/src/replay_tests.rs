@@ -189,7 +189,25 @@ async fn open(transcript: ReplayTranscript) -> Replay {
 }
 
 async fn open_with_sink(transcript: ReplayTranscript, sink: Option<UsageLimitsSink>) -> Replay {
-    let (model, runtime, events, driver) = open_session_with(transcript, sink).await;
+    open_with(
+        transcript,
+        OpenOptions {
+            sink,
+            ..OpenOptions::default()
+        },
+    )
+    .await
+}
+
+/// What a replay session's adapter is built with beyond the transcript.
+#[derive(Default)]
+struct OpenOptions {
+    sink: Option<UsageLimitsSink>,
+    attachments: Option<crate::codex_input::AttachmentPathResolver>,
+}
+
+async fn open_with(transcript: ReplayTranscript, options: OpenOptions) -> Replay {
+    let (model, runtime, events, driver) = open_session_with(transcript, options).await;
     let thread = runtime
         .ensure_thread(ProviderAdapterV2EnsureThreadInput {
             thread_id: id("thread-1"),
@@ -252,12 +270,12 @@ async fn open_session(
     ProviderEventStream,
     ReplayDriver,
 ) {
-    open_session_with(transcript, None).await
+    open_session_with(transcript, OpenOptions::default()).await
 }
 
 async fn open_session_with(
     transcript: ReplayTranscript,
-    sink: Option<UsageLimitsSink>,
+    options: OpenOptions,
 ) -> (
     String,
     Arc<dyn ProviderSessionRuntime>,
@@ -281,8 +299,11 @@ async fn open_session_with(
         config,
         client,
     );
-    if let Some(sink) = sink {
+    if let Some(sink) = options.sink {
         adapter = adapter.with_usage_sink(sink);
+    }
+    if let Some(resolver) = options.attachments {
+        adapter = adapter.with_attachment_resolver(resolver);
     }
     let runtime = adapter
         .open_session(ProviderAdapterV2OpenSessionInput {
@@ -851,6 +872,172 @@ async fn rate_limit_pushes_reach_the_usage_sink() {
     assert_eq!(windows[0].id.as_str(), "primary");
     assert_eq!(windows[0].used_percent, 42.0);
     assert_eq!(windows[0].window_duration_mins, Some(300));
+    replay.driver.verify_complete().unwrap();
+}
+
+/// The `message_steering` transcript with the user texts it expects rewritten, so
+/// the replay checks the exact `turn/start` and `turn/steer` input Codex receives.
+fn steering_with_input(start: Value, steer: Value) -> ReplayTranscript {
+    let mut transcript = fixture("message_steering");
+    for entry in &mut transcript.entries {
+        let ReplayEntry::ExpectOutbound { frame, .. } = entry else {
+            continue;
+        };
+        match frame["method"].as_str() {
+            Some("turn/start") => frame["params"]["input"] = start.clone(),
+            Some("turn/steer") => frame["params"]["input"] = steer.clone(),
+            _ => {}
+        }
+    }
+    transcript
+}
+
+async fn start_and_steer(replay: &mut Replay, start: &str, steer: &str) {
+    replay
+        .start(
+            start,
+            policy(
+                RuntimeMode::FullAccess,
+                ProviderInteractionMode::Default,
+                None,
+                None,
+            ),
+        )
+        .await;
+    let started = replay.next_until(is_turn_running).await;
+    let provider_turn_id = started
+        .iter()
+        .find_map(|event| match event {
+            ProviderAdapterV2Event::ProviderTurnUpdated { provider_turn, .. } => {
+                Some(provider_turn.id.clone())
+            }
+            _ => None,
+        })
+        .expect("provider turn");
+    replay
+        .runtime
+        .steer_turn(ProviderAdapterV2SteerInput {
+            thread_id: id("thread-1"),
+            run_id: id("run-1"),
+            provider_thread: replay.thread.clone(),
+            provider_turn_id,
+            message: ProviderAdapterV2TurnMessage {
+                message_id: id("message-steer"),
+                text: steer.into(),
+                attachments: vec![],
+                created_by: OrchestrationV2Actor::User,
+                creation_source: OrchestrationV2CreationSource::Web,
+                scheduled_task_id: None,
+                sender_thread_id: None,
+            },
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn currency_sigil_skill_mentions_go_out_as_dollar_mentions() {
+    let mut replay = open(steering_with_input(
+        json!([{"type": "text", "text": "$review do it"}]),
+        json!([{"type": "text", "text": "then $ship it"}]),
+    ))
+    .await;
+    start_and_steer(&mut replay, "€review do it", "then £ship it").await;
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn image_attachments_go_out_as_data_urls_after_the_text_with_their_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("img-1.png"), [1u8, 2, 3]).unwrap();
+    let dir = temp.path().to_path_buf();
+    let path = dir.join("img-1.png").to_string_lossy().into_owned();
+    let mut replay = open_with(
+        steering_with_input(
+            json!([
+                {"type": "text", "text": format!("look\n\n[Attached image \"img-1.png\" is saved at: {path}]")},
+                {"type": "image", "url": "data:image/png;base64,AQID"}
+            ]),
+            json!([{"type": "text", "text": "ok"}]),
+        ),
+        OpenOptions {
+            attachments: Some(Arc::new(move |attachment| match attachment {
+                turin_contracts::chat_attachment::ChatAttachment::Image(image) => {
+                    Some(dir.join(format!("{}.png", image.id.as_str())))
+                }
+                _ => None,
+            })),
+            ..OpenOptions::default()
+        },
+    )
+    .await;
+    let mut input = replay.turn_input(
+        "look",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    input.message.attachments = vec![
+        serde_json::from_value(json!({
+            "type": "image", "id": "img-1", "name": "img-1.png",
+            "mimeType": "image/png", "sizeBytes": 3
+        }))
+        .unwrap(),
+    ];
+    replay.runtime.start_turn(input).await.unwrap();
+    replay.next_until(is_turn_running).await;
+}
+
+#[tokio::test]
+async fn an_empty_turn_fails_before_any_request_is_sent() {
+    let mut replay = open(fixture("simple")).await;
+    let input = replay.turn_input(
+        "",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    let error = replay
+        .runtime
+        .start_turn(input)
+        .await
+        .expect_err("empty input");
+    assert!(format!("{error:?}").contains("Turn requires non-empty text or attachments."));
+}
+
+#[tokio::test]
+async fn a_restart_continuation_sends_no_user_input() {
+    let mut transcript = fixture("simple");
+    for entry in &mut transcript.entries {
+        if let ReplayEntry::ExpectOutbound { frame, .. } = entry
+            && frame["method"] == "turn/start"
+        {
+            frame["params"]["input"] = json!([]);
+        }
+    }
+    let mut replay = open(transcript).await;
+    let mut input = replay.turn_input(
+        "this text is not resent",
+        policy(
+            RuntimeMode::FullAccess,
+            ProviderInteractionMode::Default,
+            None,
+            None,
+        ),
+    );
+    input.restart_continuation_of_run_id = Some(id("run-0"));
+    replay.runtime.start_turn(input).await.unwrap();
+    let seen = replay.next_until(is_terminal).await;
+    assert_eq!(
+        terminal_status(&seen),
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
     replay.driver.verify_complete().unwrap();
 }
 

@@ -224,10 +224,13 @@ impl ProviderDriver for CodexDriver {
             catalog: self.model_catalog.clone(),
         });
         let usage_target = Arc::clone(&snapshot);
-        let adapter = CodexProviderAdapter::new(input.instance_id.clone(), config.clone())
+        let mut adapter = CodexProviderAdapter::new(input.instance_id.clone(), config.clone())
             .with_usage_sink(Arc::new(move |update, checked_at| {
                 usage_target.cell.apply_usage_limits(&update, &checked_at);
             }));
+        if let Some(resolver) = &self.attachment_path {
+            adapter = adapter.with_attachment_resolver(Arc::clone(resolver));
+        }
         let text_generation = native_text_generation(
             &settings,
             &config,

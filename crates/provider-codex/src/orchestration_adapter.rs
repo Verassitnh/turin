@@ -3,6 +3,7 @@
 use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
     approvals::{Decision, PendingRequest},
+    codex_input::{AttachmentPathResolver, to_codex_input},
     codex_mcp_elicitation::describe_mcp_elicitation,
     codex_usage_limits::{CodexRateLimitSnapshot, codex_rate_limits_to_update},
     goal::{self, GoalCommand},
@@ -111,6 +112,7 @@ pub struct CodexProviderAdapter {
     /// Resolves the launch per session (managed Codex: the signed-in token).
     resolver: Option<Arc<dyn CodexRuntimeResolver>>,
     usage_sink: Option<UsageLimitsSink>,
+    attachment_path: Option<AttachmentPathResolver>,
 }
 
 impl CodexProviderAdapter {
@@ -122,7 +124,13 @@ impl CodexProviderAdapter {
             injected_client: Mutex::new(None),
             resolver: None,
             usage_sink: None,
+            attachment_path: None,
         }
+    }
+    /// `resolveAttachmentPath` for turn input: attachment paths in the text and image data URLs.
+    pub fn with_attachment_resolver(mut self, resolver: AttachmentPathResolver) -> Self {
+        self.attachment_path = Some(resolver);
+        self
     }
     /// Upstream's `onUsageLimits` hook: where `account/rateLimits/updated` pushes go.
     pub fn with_usage_sink(mut self, sink: UsageLimitsSink) -> Self {
@@ -154,6 +162,7 @@ impl CodexProviderAdapter {
             injected_client: Mutex::new(Some(client)),
             resolver: None,
             usage_sink: None,
+            attachment_path: None,
         }
     }
 }
@@ -287,6 +296,9 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             turn_registered,
             state,
             config,
+            attachment_path: self.attachment_path.clone(),
+            // ChatGPT token sharing does not accept service tiers.
+            omit_service_tier: self.resolver.is_some(),
             _keepalive: keepalive,
         }))
     }
@@ -308,6 +320,9 @@ pub struct CodexProviderRuntime {
     turn_registered: Arc<tokio::sync::Notify>,
     state: Arc<Mutex<RuntimeState>>,
     config: CodexRuntimeConfig,
+    attachment_path: Option<AttachmentPathResolver>,
+    /// `omitServiceTier`: a managed (ChatGPT token sharing) session never sends a tier.
+    omit_service_tier: bool,
     /// Held for the session: the managed executable lease.
     _keepalive: Option<Box<dyn std::any::Any + Send + Sync>>,
 }
@@ -604,13 +619,6 @@ fn option<'a>(selection: &'a ModelSelection, key: &str) -> Option<&'a str> {
             _ => None,
         })
 }
-fn turn_input(text: &str) -> Vec<Value> {
-    if text.is_empty() {
-        vec![]
-    } else {
-        vec![json!({"type":"text","text":text})]
-    }
-}
 /// Upstream `isTerminalProviderTurn`: a turn with a native ref that has stopped.
 fn is_terminal_turn(turn: &OrchestrationV2ProviderTurn) -> bool {
     turn.native_turn_ref.is_some()
@@ -707,6 +715,31 @@ fn snapshot(
 }
 
 impl CodexProviderRuntime {
+    /// `toCodexInput`.
+    async fn codex_input(
+        &self,
+        text: &str,
+        attachments: &[turin_contracts::chat_attachment::ChatAttachment],
+    ) -> Result<Vec<Value>, crate::codex_input::CodexInputError> {
+        to_codex_input(text, attachments, self.attachment_path.as_ref()).await
+    }
+
+    fn turn_start_error(
+        &self,
+        input: &ProviderAdapterV2TurnInput,
+        cause: impl std::fmt::Display,
+    ) -> ProviderAdapterV2Error {
+        error(
+            ProviderAdapterErrorKind::TurnStart {
+                driver: self.driver.clone(),
+                thread_id: input.thread_id.clone(),
+                provider_thread_id: input.provider_thread.id.clone(),
+                run_id: input.run_id.clone(),
+            },
+            cause,
+        )
+    }
+
     fn send(&self, events: Vec<ProviderAdapterV2Event>) {
         for event in events {
             let _ = self.out.send(event);
@@ -837,11 +870,20 @@ impl CodexProviderRuntime {
         // Until the goal is active, a fast first turn holds the run.
         self.state.lock().goal_activations.insert(thread.clone());
         let mut turn_input = input.clone();
+        let objective_text = objective.clone();
         if let Some(objective) = objective {
             turn_input.message.text = objective;
         }
+        // The first goal turn carries the objective; a resume continues from history.
+        let codex_input = match &objective_text {
+            Some(objective) => self
+                .codex_input(objective, &[])
+                .await
+                .map_err(|cause| self.turn_start_error(&input, cause))?,
+            None => Vec::new(),
+        };
         let outcome = async {
-            self.start_native_turn(turn_input).await?;
+            self.start_native_turn(turn_input, codex_input).await?;
             let response = client
                 .request(
                     "thread/goal/set",
@@ -872,6 +914,7 @@ impl CodexProviderRuntime {
     async fn start_native_turn(
         &self,
         input: ProviderAdapterV2TurnInput,
+        codex_input: Vec<Value>,
     ) -> Result<(), ProviderAdapterV2Error> {
         let thread = native_id(&input.provider_thread)?.to_owned();
         let policy = runtime_policy(
@@ -887,10 +930,10 @@ impl CodexProviderRuntime {
             .session
             .start_turn(
                 &thread,
-                turn_input(&input.message.text),
+                codex_input,
                 model,
                 option(&input.model_selection, "reasoningEffort"),
-                option(&input.model_selection, "serviceTier"),
+                option(&input.model_selection, "serviceTier").filter(|_| !self.omit_service_tier),
                 &policy,
             )
             .await;
@@ -1048,7 +1091,15 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         {
             return self.run_goal_command(input, command).await;
         }
-        self.start_native_turn(input).await
+        // A restart continuation resumes from history: it sends no new user input.
+        let codex_input = if input.restart_continuation_of_run_id.is_none() {
+            self.codex_input(&input.message.text, &input.message.attachments)
+                .await
+                .map_err(|cause| self.turn_start_error(&input, cause))?
+        } else {
+            Vec::new()
+        };
+        self.start_native_turn(input, codex_input).await
     }
     async fn steer_turn(
         &self,
@@ -1063,8 +1114,21 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             .find(|(id, _)| derive::provider_turn(&self.driver, id) == input.provider_turn_id)
             .map(|(id, _)| id.clone())
             .unwrap_or_else(|| input.provider_turn_id.as_str().to_owned());
+        let codex_input = self
+            .codex_input(&input.message.text, &input.message.attachments)
+            .await
+            .map_err(|cause| {
+                error(
+                    ProviderAdapterErrorKind::SteerRun {
+                        driver: self.driver.clone(),
+                        provider_thread_id: input.provider_thread.id.clone(),
+                        provider_turn_id: input.provider_turn_id.clone(),
+                    },
+                    cause,
+                )
+            })?;
         self.session
-            .steer_turn(&thread, &native_turn, turn_input(&input.message.text))
+            .steer_turn(&thread, &native_turn, codex_input)
             .await
             .map_err(|e| {
                 error(

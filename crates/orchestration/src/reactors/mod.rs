@@ -8,5 +8,7 @@ pub mod checkpoint_restore_safety;
 pub mod checkpoint_service;
 pub mod pull_request_sync;
 pub mod pull_request_watch;
+pub mod pull_request_watch_reactor;
+pub mod thread_pull_request;
 pub mod usage_limit_recovery_worker;
 pub mod workspace_claims;

@@ -17,6 +17,7 @@
 //! [`view_model::SidebarBackend`] (the T14 seam; [`mock_source`] for now).
 
 pub mod custom_snooze_dialog;
+pub mod live_source;
 pub mod mock_source;
 pub mod runtime;
 pub mod sidebar_actions;

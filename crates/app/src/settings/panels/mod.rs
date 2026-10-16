@@ -20,6 +20,7 @@ use gpui_kit::{
 
 use super::search::SettingsPath;
 use super::view::{SettingsRoute, SettingsView, Which};
+use crate::theme::ActiveAppTheme;
 
 /// Per-page UI state that is not part of the settings.
 #[derive(Default)]
@@ -60,7 +61,40 @@ impl SettingsView {
             self.panels.demo_scroll = (frames > 1).then_some((offset, frames - 1));
             cx.notify();
         }
-        let sections: Vec<AnyElement> = match self.route {
+        let context = self.scope_context(cx);
+        let boundary = super::scope::scope_boundary(
+            self.route,
+            &context.scope.kind,
+            &context.scope.label,
+            context.targets.len(),
+        );
+        let mut sections: Vec<AnyElement> = match boundary {
+            super::scope::ScopeBoundary::Unavailable(message)
+            | super::scope::ScopeBoundary::Reconnect(message) => {
+                let theme = cx.app_theme().clone();
+                vec![
+                    div()
+                        .text_size(crate::theme::tokens::TEXT_SM.size)
+                        .text_color(theme.muted_foreground)
+                        .child(message)
+                        .into_any_element(),
+                ]
+            }
+            super::scope::ScopeBoundary::Content => self.render_route_sections(window, cx),
+        };
+        // `SettingsPageContainer` puts the scope sentence above every page.
+        if let Some(sentence) = self.settings_scope_sentence(cx) {
+            sections.insert(0, sentence);
+        }
+        self.page_container(sections, cx)
+    }
+
+    fn render_route_sections(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        match self.route {
             SettingsRoute::Section(SettingsPath::General) => self.render_general(window, cx),
             SettingsRoute::Section(SettingsPath::Appearance) => self.render_appearance(window, cx),
             SettingsRoute::Section(SettingsPath::Keybindings) => {
@@ -74,8 +108,7 @@ impl SettingsView {
             SettingsRoute::Section(SettingsPath::SourceControl) => {
                 self.render_source_control(window, cx)
             }
-        };
-        self.page_container(sections, cx)
+        }
     }
 
     /// `SettingsPageContainer` + `WorkspacePageContainer`: a scrolling column,

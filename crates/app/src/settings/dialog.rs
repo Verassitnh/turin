@@ -39,6 +39,8 @@ pub enum Dialog {
     AddProvider,
     /// `AddCodexAccountDialog` (through `AddManagedCodexAccountDialog`).
     AddCodexAccount,
+    /// `ProjectIconPickerDialog` (state in `panels.projects.icon_picker`).
+    ProjectIconPicker,
     /// `ChatGptAccountPicker` for a Codex instance, with the chosen method.
     ChatGptAccountPicker {
         instance_id: String,
@@ -182,6 +184,9 @@ impl SettingsView {
         }
         if matches!(self.dialog, Some(Dialog::AddProvider)) {
             return Some(self.render_add_provider_dialog(window, cx));
+        }
+        if matches!(self.dialog, Some(Dialog::ProjectIconPicker)) {
+            return self.render_project_icon_picker(window, cx);
         }
         if matches!(self.dialog, Some(Dialog::AddCodexAccount)) {
             return self.render_add_codex_account_dialog(window, cx);

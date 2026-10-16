@@ -172,6 +172,26 @@ fn mock_projects() -> Vec<SettingsProject> {
     ]
 }
 
+/// The mock projects as the sidebar's `EnvironmentProject`s.
+fn mock_environment_projects() -> Vec<crate::state::models::EnvironmentProject> {
+    use crate::state::contracts::{EnvironmentId, ProjectId};
+    mock_projects()
+        .into_iter()
+        .map(|project| crate::state::models::EnvironmentProject {
+            environment_id: EnvironmentId::new("local").expect("environment id"),
+            id: ProjectId::new(&project.id).expect("project id"),
+            title: project.display_name,
+            workspace_root: project.workspace_root,
+            favicon_path: None,
+            project_icon: None,
+            created_at: Some("2026-10-01T09:00:00.000Z".into()),
+            updated_at: Some("2026-10-14T18:22:00.000Z".into()),
+            is_scratch: false,
+            source: None,
+        })
+        .collect()
+}
+
 fn mock_archived_threads() -> Vec<ArchivedThread> {
     let thread =
         |id: &str, title: &str, project: &str, monogram: &str, color: u32, archived: &str| {
@@ -253,6 +273,7 @@ fn mock_view_model() -> SettingsViewModel {
         pending_provider_auth_delivery: None,
         source_control: mock_source_control(),
         projects: mock_projects(),
+        environment_projects: mock_environment_projects(),
         archived_threads: mock_archived_threads(),
         storage_cleanup: None,
         licenses: mock_licenses(),
@@ -279,6 +300,12 @@ pub struct MockSettingsSource {
 }
 
 impl MockSettingsSource {
+    /// The fixture view model, for logic tests.
+    #[cfg(test)]
+    pub fn view_model_for_tests() -> SettingsViewModel {
+        mock_view_model()
+    }
+
     /// Builds the source and its store.
     pub fn store(cx: &mut App) -> Entity<SettingsStore> {
         let source = Rc::new(Self {
@@ -875,6 +902,26 @@ impl SettingsSource for MockSettingsSource {
             .projects
             .retain(|p| p.id != project_id);
         self.publish(cx);
+    }
+
+    fn set_project_icon(
+        &self,
+        project_ids: &[String],
+        favicon_path: Option<String>,
+        project_icon: Option<crate::state::models::ProjectIcon>,
+        cx: &mut App,
+    ) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            for project in &mut state.vm.environment_projects {
+                if project_ids.iter().any(|id| id == project.id.as_str()) {
+                    project.favicon_path = favicon_path.clone();
+                    project.project_icon = project_icon.clone();
+                }
+            }
+        }
+        self.publish(cx);
+        Ok(())
     }
 
     fn run_storage_cleanup(&self, cx: &mut App) {

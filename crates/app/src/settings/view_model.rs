@@ -149,6 +149,9 @@ pub struct SettingsViewModel {
     /// `sourceControlEnvironment.discovery` of the local environment.
     pub source_control: turin_contracts::source_control::SourceControlDiscoveryResult,
     pub projects: Vec<SettingsProject>,
+    /// The environment's projects as the sidebar groups them
+    /// (`useProjects`); the settings scope picks among their logical groups.
+    pub environment_projects: Vec<crate::state::models::EnvironmentProject>,
     pub archived_threads: Vec<ArchivedThread>,
     pub storage_cleanup: Option<CleanupReport>,
     pub licenses: Vec<LicenseEntry>,
@@ -258,6 +261,15 @@ pub trait SettingsSource {
     fn rename_project(&self, project_id: &str, title: &str, cx: &mut App);
     /// `projectEnvironment.delete` (`force: true`).
     fn remove_project(&self, project_id: &str, cx: &mut App);
+    /// `projectEnvironment.update` with `faviconPath` and `projectIcon` for every
+    /// checkout of a project group (`setProjectIcon`).
+    fn set_project_icon(
+        &self,
+        project_ids: &[String],
+        favicon_path: Option<String>,
+        project_icon: Option<crate::state::models::ProjectIcon>,
+        cx: &mut App,
+    ) -> SetupResult;
     /// `runStorageCleanup`.
     fn run_storage_cleanup(&self, cx: &mut App);
     fn delete_thread(&self, thread_id: &str, cx: &mut App);

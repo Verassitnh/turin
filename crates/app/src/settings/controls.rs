@@ -287,6 +287,8 @@ pub struct SelectItem {
     pub label: AnyElement,
     pub selected: bool,
     pub disabled: bool,
+    /// `MenuSeparator`: a rule instead of a row.
+    pub separator: bool,
 }
 
 impl SelectItem {
@@ -296,6 +298,18 @@ impl SelectItem {
             label: label.into_any_element(),
             selected: false,
             disabled: false,
+            separator: false,
+        }
+    }
+
+    /// `MenuSeparator`.
+    pub fn separator() -> Self {
+        Self {
+            id: SharedString::from("--separator"),
+            label: div().into_any_element(),
+            selected: false,
+            disabled: true,
+            separator: true,
         }
     }
 
@@ -347,6 +361,15 @@ pub fn popup_list(
         .children(items.into_iter().map(move |item| {
             let pick = on_pick.clone();
             let item_id = item.id.clone();
+            if item.separator {
+                return div()
+                    .id(SharedString::from(format!("{id:?}-separator")))
+                    .mx(px(-4.))
+                    .my_1()
+                    .h(px(1.))
+                    .bg(theme.border)
+                    .into_any_element();
+            }
             div()
                 .id(SharedString::from(format!("{id:?}-{}", item.id)))
                 .flex()
@@ -367,6 +390,7 @@ pub fn popup_list(
                         .on_click(move |_, window, cx| pick(item_id.clone(), window, cx))
                 })
                 .child(div().min_w_0().flex_1().child(item.label))
+                .into_any_element()
         }))
 }
 

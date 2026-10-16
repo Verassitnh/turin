@@ -9,6 +9,7 @@ name = "turin"
 path = "src/main.rs"
 
 [dependencies]
+unicode-segmentation.workspace = true
 uuid.workspace = true
 turin-contracts.workspace = true
 turin-review.workspace = true

@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use super::controls::MenuState;
 use super::layout::{SettingsMetrics, SettingsSearchTarget};
-use super::search::{SettingsPath, SettingsScopeKind};
+use super::search::SettingsPath;
 use super::view_model::{SettingsStore, SettingsViewModel};
 use crate::components::drag_region::DragRegion as _;
 use crate::components::sidebar::sidebar_chrome::{SidebarChromeFooter, SidebarChromeHeader};
@@ -31,6 +31,7 @@ use crate::components::workspace_breadcrumb::{
 use crate::components::workspace_titlebar::{
     workspace_controls_left, workspace_titlebar_content_left,
 };
+use crate::settings_logic::settings_scope::SettingsScopeSearch;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
 use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};
@@ -71,24 +72,6 @@ impl SettingsRoute {
 pub enum Which {
     Client,
     Server,
-}
-
-/// What a settings page is targeting: all projects, or one project's overrides
-/// (`SettingsScopeSearch.project`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum SettingsScope {
-    #[default]
-    AllProjects,
-    Project(String),
-}
-
-impl SettingsScope {
-    pub fn kind(&self) -> SettingsScopeKind {
-        match self {
-            Self::AllProjects => SettingsScopeKind::All,
-            Self::Project(_) => SettingsScopeKind::Project,
-        }
-    }
 }
 
 type InputCommit = Rc<dyn Fn(&mut SettingsView, String, &mut Window, &mut Context<SettingsView>)>;
@@ -132,7 +115,11 @@ pub(super) enum SettingsToastKind {
 pub struct SettingsView {
     pub(super) store: Entity<SettingsStore>,
     pub(super) route: SettingsRoute,
-    pub(super) scope: SettingsScope,
+    /// The selected scope (`SettingsScopeSearch`: project, machine, checkout).
+    pub(super) scope_search: SettingsScopeSearch,
+    /// The resolved scope for one view model and selection ([`Self::scope_context`]).
+    pub(super) scope_cache:
+        std::cell::RefCell<Option<(usize, SettingsScopeSearch, Rc<super::scope::ScopeContext>)>>,
     pub(super) menus: MenuState,
     pub(super) inputs: HashMap<SharedString, Entity<InputState>>,
     input_commits: HashMap<SharedString, InputCommit>,
@@ -153,7 +140,7 @@ pub struct SettingsView {
     pub(super) capture_focus: gpui_kit::FocusHandle,
     /// Toasts queued by actions that have no window at hand (`toastManager.add`);
     /// the next render pushes them.
-    toasts: Vec<SettingsToast>,
+    toasts: std::cell::RefCell<Vec<SettingsToast>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -176,7 +163,8 @@ impl SettingsView {
         Self {
             store,
             route: SettingsRoute::Section(SettingsPath::General),
-            scope: SettingsScope::default(),
+            scope_search: SettingsScopeSearch::default(),
+            scope_cache: std::cell::RefCell::new(None),
             menus: MenuState::default(),
             inputs: HashMap::new(),
             input_commits: HashMap::new(),
@@ -191,7 +179,7 @@ impl SettingsView {
             slider_bounds: HashMap::new(),
             slider_drag: None,
             capture_focus: cx.focus_handle(),
-            toasts: Vec::new(),
+            toasts: std::cell::RefCell::new(Vec::new()),
             _subscriptions: subscriptions,
         }
     }
@@ -207,18 +195,19 @@ impl SettingsView {
 
     /// Queues a toast; the next render shows it.
     pub(super) fn toast(
-        &mut self,
+        &self,
         kind: SettingsToastKind,
         title: impl Into<String>,
         description: impl Into<String>,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
-        self.toasts.push(SettingsToast {
+        self.toasts.borrow_mut().push(SettingsToast {
             kind,
             title: title.into(),
             description: description.into(),
         });
-        cx.notify();
+        // The view observes the store, so poking it re-renders the view.
+        self.store.update(cx, |_, cx| cx.notify());
     }
 
     pub fn vm(&self, cx: &App) -> Rc<SettingsViewModel> {
@@ -242,6 +231,15 @@ impl SettingsView {
                 }
             }
             "add-provider" => self.open_add_provider(cx),
+            other if other.starts_with("scope:") => {
+                let wanted = &other["scope:".len()..];
+                let groups = super::scope::settings_project_groups(&self.vm(cx));
+                self.scope_search.project = groups
+                    .iter()
+                    .find(|group| wanted == "first" || group.project_key == wanted)
+                    .map(|group| group.project_key.clone())
+                    .or_else(|| Some(wanted.to_owned()));
+            }
             "bg-dialog" => self.dialog = Some(super::dialog::Dialog::BackgroundActivity),
             other if other.starts_with("editor-scroll:") => {
                 if let Ok(offset) = other["editor-scroll:".len()..].parse::<f32>() {
@@ -287,10 +285,18 @@ impl SettingsView {
         source.update_server(patch, cx);
     }
 
+    /// `useUpdateScopedSettings`: a server patch at a project scope writes
+    /// project overrides; anywhere else it writes the environment.
     pub(super) fn update(&self, which: Which, patch: Value, cx: &mut App) {
         match which {
             Which::Client => self.update_client(patch, cx),
-            Which::Server => self.update_server(patch, cx),
+            Which::Server => {
+                if self.scope_context(cx).is_project_scope() {
+                    self.update_scoped(patch, cx);
+                } else {
+                    self.update_server(patch, cx);
+                }
+            }
         }
     }
 
@@ -592,7 +598,7 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use gpui_kit::component::WindowExt as _;
         use gpui_kit::component::notification::Notification;
-        for toast in std::mem::take(&mut self.toasts) {
+        for toast in std::mem::take(&mut *self.toasts.borrow_mut()) {
             let notification = match toast.kind {
                 SettingsToastKind::Success => Notification::success(toast.description),
                 SettingsToastKind::Warning => Notification::warning(toast.description),

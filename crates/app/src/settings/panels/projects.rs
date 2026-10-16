@@ -39,6 +39,8 @@ pub struct ProjectsState {
     pub script: ScriptDraft,
     /// The project whose last rename was refused for a blank title.
     pub title_refused: Option<String>,
+    /// `ProjectIconPickerDialog`.
+    pub icon_picker: Option<super::super::project_icon_picker_dialog::IconPicker>,
 }
 
 #[derive(Default, Clone)]

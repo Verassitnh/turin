@@ -22,6 +22,10 @@ mod state;
 // Pure settings logic is ported ahead of the views that consume it.
 #[allow(dead_code)]
 mod settings;
+// Scope resolution and settings planning from task/R3-settings-logic (the
+// scope UI of `settings` is its first caller).
+#[allow(dead_code)]
+mod settings_logic;
 mod theme;
 mod timestamp_format;
 // The ui primitives are a library: every upstream variant and size is ported

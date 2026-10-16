@@ -3197,7 +3197,10 @@ async fn v2_stop_interrupts_an_announced_child_before_the_call_attaches() {
         })
         .await
         .unwrap();
-    session.start_turn(turn(thread.clone(), "hi")).await.unwrap();
+    session
+        .start_turn(turn(thread.clone(), "hi"))
+        .await
+        .unwrap();
     script
         .frames
         .send(Some(sse(

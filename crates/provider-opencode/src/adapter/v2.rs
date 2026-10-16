@@ -664,12 +664,7 @@ impl OpenCodeV2Session {
         }
         let mut backgrounds: Vec<OpenSubagent> =
             guard.background.drain().map(|(_, open)| open).collect();
-        backgrounds.extend(
-            guard
-                .unattached_background
-                .drain()
-                .map(|(_, open)| open),
-        );
+        backgrounds.extend(guard.unattached_background.drain().map(|(_, open)| open));
         for open in &backgrounds {
             guard.settled_calls.insert(open.native_item_id.clone());
         }
@@ -1288,9 +1283,7 @@ impl OpenCodeV2Session {
                     }
                     if let Some(child_session) = child_session {
                         inner.unattached_background.remove(call_id);
-                        inner
-                            .background
-                            .insert(child_session.to_owned(), tracked);
+                        inner.background.insert(child_session.to_owned(), tracked);
                     } else {
                         inner
                             .unattached_background
@@ -1475,13 +1468,7 @@ impl OpenCodeV2Session {
             if !same_turn {
                 if let Some(host) = host {
                     self.show_ask_on_held_turn(
-                        &mut guard,
-                        &host,
-                        session_id,
-                        &open,
-                        native_id,
-                        ask,
-                        kind,
+                        &mut guard, &host, session_id, &open, native_id, ask, kind,
                     );
                 }
                 return;
@@ -1621,72 +1608,72 @@ impl OpenCodeV2Session {
             else {
                 return;
             };
-        let provider_turn_id = open.provider_turn_id.clone();
-        let thread_id = open.thread_id.clone();
-        let root_node_id = open.root_node_id.clone();
-        let provider_thread_id = open.provider_thread_id.clone();
-        let request_id =
-            IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(native_id));
-        let ordinal = next_ordinal(ordinals, next, native_id);
-        let of = NodeOf {
-            thread_id: &thread_id,
-            root_node_id: &root_node_id,
-            provider_thread_id: &provider_thread_id,
-            provider_turn_id: &provider_turn_id,
-            native_item_id: native_id,
-            weak_ref: false,
-        };
-        let node = request_node(
-            &self.driver,
-            &of,
-            &request_id,
-            matches!(ask, Ask::Form(_)),
-            now,
-        );
-        let body = match &ask {
-            Ask::Permission {
-                action,
-                resources,
-                save,
-            } => RequestBody::Approval {
-                request_kind: match kind {
-                    "file-read" => ProviderRequestKind::FileRead,
-                    "file-change" => ProviderRequestKind::FileChange,
-                    _ => ProviderRequestKind::Command,
+            let provider_turn_id = open.provider_turn_id.clone();
+            let thread_id = open.thread_id.clone();
+            let root_node_id = open.root_node_id.clone();
+            let provider_thread_id = open.provider_thread_id.clone();
+            let request_id =
+                IdAllocator.runtime_request(&self.driver, Some(&provider_turn_id), Some(native_id));
+            let ordinal = next_ordinal(ordinals, next, native_id);
+            let of = NodeOf {
+                thread_id: &thread_id,
+                root_node_id: &root_node_id,
+                provider_thread_id: &provider_thread_id,
+                provider_turn_id: &provider_turn_id,
+                native_item_id: native_id,
+                weak_ref: false,
+            };
+            let node = request_node(
+                &self.driver,
+                &of,
+                &request_id,
+                matches!(ask, Ask::Form(_)),
+                now,
+            );
+            let body = match &ask {
+                Ask::Permission {
+                    action,
+                    resources,
+                    save,
+                } => RequestBody::Approval {
+                    request_kind: match kind {
+                        "file-read" => ProviderRequestKind::FileRead,
+                        "file-change" => ProviderRequestKind::FileChange,
+                        _ => ProviderRequestKind::Command,
+                    },
+                    title: Some(action.clone()),
+                    prompt: Some(if resources.is_empty() {
+                        action.clone()
+                    } else {
+                        resources.join("\n")
+                    }),
+                    options: Some(permission_options(action, save)),
                 },
-                title: Some(action.clone()),
-                prompt: Some(if resources.is_empty() {
-                    action.clone()
-                } else {
-                    resources.join("\n")
-                }),
-                options: Some(permission_options(action, save)),
-            },
-            Ask::Form(form) => RequestBody::UserInput {
-                questions: form_questions(form).unwrap_or_default(),
-            },
-        };
-        let item = request_turn_item(&of, &request_id, ordinal, now, body);
-        let request = OrchestrationV2RuntimeRequest {
-            id: request_id.clone(),
-            node_id: node.id.clone(),
-            provider_turn_id: Some(provider_turn_id),
-            native_request_ref: Some(native_ref(native_id, false)),
-            kind: match kind {
-                "file-read" => OrchestrationV2RuntimeRequestKind::FileRead,
-                "file-change" => OrchestrationV2RuntimeRequestKind::FileChange,
-                "user_input" => OrchestrationV2RuntimeRequestKind::UserInput,
-                _ => OrchestrationV2RuntimeRequestKind::Command,
-            },
-            status: OrchestrationV2RuntimeRequestStatus::Pending,
-            response_capability: OrchestrationV2ResponseCapability::Live {
-                provider_session_id: self.provider_session_id.clone(),
-            },
-            created_at: now,
-            resolved_at: None,
-            decision: None,
-            answers: None,
-        };
+                Ask::Form(form) => RequestBody::UserInput {
+                    questions: form_questions(form).unwrap_or_default(),
+                },
+            };
+            let item = request_turn_item(&of, &request_id, ordinal, now, body);
+            let request = OrchestrationV2RuntimeRequest {
+                id: request_id.clone(),
+                node_id: node.id.clone(),
+                provider_turn_id: Some(provider_turn_id),
+                native_request_ref: Some(native_ref(native_id, false)),
+                kind: match kind {
+                    "file-read" => OrchestrationV2RuntimeRequestKind::FileRead,
+                    "file-change" => OrchestrationV2RuntimeRequestKind::FileChange,
+                    "user_input" => OrchestrationV2RuntimeRequestKind::UserInput,
+                    _ => OrchestrationV2RuntimeRequestKind::Command,
+                },
+                status: OrchestrationV2RuntimeRequestStatus::Pending,
+                response_capability: OrchestrationV2ResponseCapability::Live {
+                    provider_session_id: self.provider_session_id.clone(),
+                },
+                created_at: now,
+                resolved_at: None,
+                decision: None,
+                answers: None,
+            };
             thread.requests.push(request.clone());
             (request, item, node, request_id, thread_id)
         };
@@ -4052,7 +4039,11 @@ fn sessions_of(guard: &V2Inner, root: &str) -> Vec<String> {
         .filter(|child| child.as_str() != root && session_owns(guard, root, child))
         .cloned()
         .collect();
-    for open in guard.background.values().chain(guard.unattached_background.values()) {
+    for open in guard
+        .background
+        .values()
+        .chain(guard.unattached_background.values())
+    {
         if open.child_session.is_empty() {
             continue;
         }

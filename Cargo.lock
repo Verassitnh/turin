@@ -7362,6 +7362,7 @@ name = "turin-acp"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "futures",
  "libc",
  "parking_lot",
@@ -7374,6 +7375,7 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+ "turin-provider-core",
  "turin-shared",
  "uuid",
 ]

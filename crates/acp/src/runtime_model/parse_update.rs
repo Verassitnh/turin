@@ -12,7 +12,7 @@ use super::tool_call::{
 };
 use super::util::{bounded_content_metadata, is_record};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpPlanStepStatus {
     Pending,
     InProgress,

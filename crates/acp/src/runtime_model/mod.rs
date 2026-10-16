@@ -20,8 +20,8 @@ pub use initialize::{
 };
 pub use mcp_identity::{AcpMcpToolCallIdentity, extract_mcp_tool_call_identity};
 pub use parse_update::{
-    AcpParsedSessionEvent, AcpPermissionRequest, AcpPlanUpdate, ParseSessionUpdateResult,
-    embedded_terminal_ids_from_session_update, parse_permission_request,
+    AcpParsedSessionEvent, AcpPermissionRequest, AcpPlanStep, AcpPlanStepStatus, AcpPlanUpdate,
+    ParseSessionUpdateResult, embedded_terminal_ids_from_session_update, parse_permission_request,
     parse_session_update_event,
 };
 pub use replay::{

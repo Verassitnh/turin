@@ -19,6 +19,7 @@ pub mod label;
 pub mod menu;
 pub mod morph_icon;
 pub mod number_field;
+pub mod panel_tab_close_button;
 pub mod popover;
 pub mod radio_group;
 pub mod refresh_icon;

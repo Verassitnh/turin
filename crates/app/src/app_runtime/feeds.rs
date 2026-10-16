@@ -19,7 +19,9 @@ use turin_orchestration::projection::thread_live_event_coalescer::ThreadLiveEven
 use turin_persistence::ApplicationStoredEvent;
 
 use super::Stores;
-use super::feed_retry::{refetch_max_attempts, refetch_retry_delay_ms, stream_resubscribe_delay_ms};
+use super::feed_retry::{
+    refetch_max_attempts, refetch_retry_delay_ms, stream_resubscribe_delay_ms,
+};
 
 pub type ShellResync =
     Arc<dyn Fn() -> futures::future::BoxFuture<'static, anyhow::Result<u64>> + Send + Sync>;
@@ -45,7 +47,9 @@ pub async fn shell(
                     failure_count,
                     "shell feed stopped; resubscribing"
                 );
-                sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message.clone())));
+                sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
+                    message.clone(),
+                )));
                 let delay = stream_resubscribe_delay_ms(failure_count);
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 match (resync_shell)().await {
@@ -152,11 +156,7 @@ async fn shell_item(
 }
 
 /// One thread's timeline with resubscribe on live-stream failure.
-pub async fn thread(
-    stores: Arc<Stores>,
-    sender: ClientStateSender,
-    thread_id: ThreadId,
-) {
+pub async fn thread(stores: Arc<Stores>, sender: ClientStateSender, thread_id: ThreadId) {
     let mut failure_count = 0u32;
     loop {
         match thread_once(Arc::clone(&stores), sender.clone(), thread_id.clone()).await {
@@ -251,7 +251,11 @@ async fn thread_once(
 }
 
 /// Runs a thread feed in an inner task so a panic surfaces as [`FeedStatus::Failed`].
-pub async fn thread_supervised(stores: Arc<Stores>, sender: ClientStateSender, thread_id: ThreadId) {
+pub async fn thread_supervised(
+    stores: Arc<Stores>,
+    sender: ClientStateSender,
+    thread_id: ThreadId,
+) {
     let thread_for_panic = thread_id.clone();
     let sender_for_panic = sender.clone();
     match tokio::spawn(async move { thread(stores, sender, thread_id).await }).await {
@@ -275,10 +279,8 @@ pub async fn shell_supervised(
     resync_shell: ShellResync,
 ) {
     let sender_for_panic = sender.clone();
-    match tokio::spawn(async move {
-        shell(stores, sender, after_sequence, resync_shell).await
-    })
-    .await
+    match tokio::spawn(async move { shell(stores, sender, after_sequence, resync_shell).await })
+        .await
     {
         Ok(()) => {}
         Err(error) if error.is_panic() => {

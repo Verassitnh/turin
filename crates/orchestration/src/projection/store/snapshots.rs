@@ -23,8 +23,8 @@ use crate::projection::store::shell::{
     ShellSnapshotLocation, ShellSnapshotOptions, read_shell_snapshot_rows,
 };
 use crate::projection::thread_history_paging::{
-    compute_latest_local_turn_ordinal, projected_row_encoded_bytes,
-    select_recent_timeline_window, ThreadHistoryPagePolicy,
+    ThreadHistoryPagePolicy, compute_latest_local_turn_ordinal, projected_row_encoded_bytes,
+    select_recent_timeline_window,
 };
 use crate::projection::turn_item;
 
@@ -151,8 +151,8 @@ fn bounded_turn_items(
 mod tests {
     use super::*;
     use crate::projection::thread_history_paging::{
-        compute_latest_local_turn_ordinal, projected_row_encoded_bytes,
-        select_recent_timeline_window, ThreadHistoryPagePolicy,
+        ThreadHistoryPagePolicy, compute_latest_local_turn_ordinal, projected_row_encoded_bytes,
+        select_recent_timeline_window,
     };
     use serde_json::json;
     use turin_contracts::orchestration_v2::{
@@ -183,11 +183,7 @@ mod tests {
         .unwrap()
     }
 
-    fn interrupt_item(
-        id: &str,
-        type_tag: &str,
-        ordinal: u64,
-    ) -> OrchestrationV2TurnItem {
+    fn interrupt_item(id: &str, type_tag: &str, ordinal: u64) -> OrchestrationV2TurnItem {
         serde_json::from_value(json!({
             "id": id, "type": type_tag, "threadId": THREAD, "runId": "run-interrupt-1",
             "nodeId": "node-interrupt-1", "providerThreadId": null, "providerTurnId": null,
@@ -219,7 +215,10 @@ mod tests {
     fn make_projection(
         visible_turn_items: Vec<OrchestrationV2ProjectedTurnItem>,
     ) -> OrchestrationV2ThreadProjection {
-        let turn_items: Vec<_> = visible_turn_items.iter().map(|row| row.item.clone()).collect();
+        let turn_items: Vec<_> = visible_turn_items
+            .iter()
+            .map(|row| row.item.clone())
+            .collect();
         crate::pipeline::test_support::projection(
             THREAD,
             "project-1",
@@ -243,21 +242,19 @@ mod tests {
         let local_older = make_row(0, None);
         let local_mid = make_row(1, None);
         let mut inherited = make_row(2, None);
-        inherited.visibility =
-            OrchestrationV2ProjectedTurnItemVisibility::Inherited;
-        inherited.source_thread_id =
-            ThreadId::new("parent-thread").expect("parent thread id");
-        let full = make_projection(vec![local_older.clone(), local_mid.clone(), inherited.clone()]);
+        inherited.visibility = OrchestrationV2ProjectedTurnItemVisibility::Inherited;
+        inherited.source_thread_id = ThreadId::new("parent-thread").expect("parent thread id");
+        let full = make_projection(vec![
+            local_older.clone(),
+            local_mid.clone(),
+            inherited.clone(),
+        ]);
         let inherited_only = OrchestrationV2ThreadProjection {
             visible_turn_items: vec![inherited],
             turn_items: vec![local_older.item, local_mid.item],
             ..full
         };
-        let bounded = build_bounded_thread_projection(
-            inherited_only,
-            2,
-            Some(items_budget(1)),
-        );
+        let bounded = build_bounded_thread_projection(inherited_only, 2, Some(items_budget(1)));
         assert_eq!(
             bounded
                 .projection
@@ -322,16 +319,20 @@ mod tests {
             .collect();
         turn_ids.sort();
         assert_eq!(turn_ids, vec!["interrupt-req", "item-2"]);
-        assert!(bounded
-            .projection
-            .turn_items
-            .iter()
-            .any(|item| turn_item::type_tag(item) == "run_interrupt_request"));
-        assert!(!bounded
-            .projection
-            .turn_items
-            .iter()
-            .any(|item| turn_item::type_tag(item) == "run_interrupt_result"));
+        assert!(
+            bounded
+                .projection
+                .turn_items
+                .iter()
+                .any(|item| turn_item::type_tag(item) == "run_interrupt_request")
+        );
+        assert!(
+            !bounded
+                .projection
+                .turn_items
+                .iter()
+                .any(|item| turn_item::type_tag(item) == "run_interrupt_result")
+        );
     }
 
     #[test]
@@ -345,12 +346,8 @@ mod tests {
             max_encoded_bytes,
         };
         let bounded = build_bounded_thread_projection(full, 1, Some(policy));
-        let history_page = select_recent_timeline_window(
-            &rows,
-            1,
-            Some(policy),
-            &projected_row_encoded_bytes,
-        );
+        let history_page =
+            select_recent_timeline_window(&rows, 1, Some(policy), &projected_row_encoded_bytes);
         let history_bytes: usize = history_page
             .items
             .iter()

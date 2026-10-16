@@ -137,9 +137,7 @@ pub struct SelectTimelinePageResult<Row> {
 
 /// Max ordinal over the full projection's `turnItems` before the bounded window
 /// trims them (`computeLatestLocalTurnOrdinal`).
-pub fn compute_latest_local_turn_ordinal(
-    turn_items: &[OrchestrationV2TurnItem],
-) -> Option<u64> {
+pub fn compute_latest_local_turn_ordinal(turn_items: &[OrchestrationV2TurnItem]) -> Option<u64> {
     turn_items
         .iter()
         .map(|item| turn_item::common(item).ordinal)

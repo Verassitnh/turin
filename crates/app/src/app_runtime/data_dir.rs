@@ -20,9 +20,7 @@ pub fn resolve_data_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir));
     }
     let base = resolve_base_dir_from_env().ok()?;
-    Some(
-        derive_server_paths(&base, None, DeriveServerPathsOptions::default()).state_dir,
-    )
+    Some(derive_server_paths(&base, None, DeriveServerPathsOptions::default()).state_dir)
 }
 
 pub fn database_path(data_dir: &Path) -> PathBuf {
@@ -36,10 +34,7 @@ mod tests {
     #[test]
     fn override_wins_over_runtime_default() {
         std::env::set_var(DATA_DIR_ENV, "/tmp/dev-turin");
-        assert_eq!(
-            resolve_data_dir(),
-            Some(PathBuf::from("/tmp/dev-turin"))
-        );
+        assert_eq!(resolve_data_dir(), Some(PathBuf::from("/tmp/dev-turin")));
         std::env::remove_var(DATA_DIR_ENV);
     }
 
@@ -47,8 +42,8 @@ mod tests {
     fn empty_override_uses_runtime_state_dir() {
         std::env::set_var(DATA_DIR_ENV, "");
         let base = resolve_base_dir_from_env().expect("home");
-        let expected = derive_server_paths(&base, None, DeriveServerPathsOptions::default())
-            .state_dir;
+        let expected =
+            derive_server_paths(&base, None, DeriveServerPathsOptions::default()).state_dir;
         assert_eq!(resolve_data_dir(), Some(expected));
         std::env::remove_var(DATA_DIR_ENV);
     }

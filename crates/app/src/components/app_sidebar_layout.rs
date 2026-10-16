@@ -42,6 +42,7 @@ use super::git_actions_control::mock_source::MockGitActionsBackend;
 use super::no_active_thread_state::NoActiveThreadState;
 use super::quit_hold_overlay::QuitHoldOverlay;
 use super::reopen_closed_view_shortcut::try_reopen_closed_view;
+use super::preview_panel_shell::{PreviewPanelMode, PreviewPanelShell};
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
@@ -51,6 +52,7 @@ use super::thread_sidebar_width::{
     THREAD_SIDEBAR_DEFAULT_WIDTH, THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width,
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
 };
+use super::usage::live_source::LiveUsageBackend;
 use super::usage::mock_source::{MockUsageBackend, UsageScenario};
 use super::usage::usage_page::{UsagePage, UsagePageEvent};
 use super::workspace_titlebar::workspace_controls_left;
@@ -78,6 +80,9 @@ use crate::shell::environment_coordinator::poll_environment_notifications;
 use crate::shell::live_settings::{LiveShellHandle, open_setting_by_id, open_settings_named};
 use crate::shell::pr_preferences::LocalPreferenceStorage;
 use crate::shell::reopen_closed_view::{ReopenOwnerState, closed_view_entries_from_store};
+use crate::state::right_panel_layout::{
+    ThreadPanelPresentation, right_panel_presentation_for_width,
+};
 use crate::state::right_panel_store::RightPanelStore;
 use crate::state::store::ClientStoreGlobal;
 use crate::theme::color::with_alpha;
@@ -117,6 +122,8 @@ actions!(
         OpenUsage,
         /// ⌘Q key-down (quit-hold handler).
         QuitShortcut,
+        /// `thread.undo` (mod+z).
+        UndoLatestThread,
     ]
 );
 
@@ -133,6 +140,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-b", ToggleThreadDetails, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-u", OpenUsage, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-z", UndoLatestThread, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-q", QuitShortcut, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
@@ -233,6 +241,9 @@ pub struct AppSidebarLayout {
     _store_watch: Subscription,
     _activation: Subscription,
     toast_viewport: Entity<crate::ui::toast::ToastViewport>,
+    anchored_toast_viewport: Entity<crate::ui::toast::AnchoredToastViewport>,
+    draft_host: Entity<crate::shell::composer_draft_host::ComposerDraftHost>,
+    _keybindings_warning: Subscription,
 }
 
 impl AppSidebarLayout {
@@ -325,6 +336,13 @@ impl AppSidebarLayout {
         });
         Self::watch_client_settings(client_settings_path.clone(), cx);
         let toast_viewport = crate::ui::toast::toasts(cx);
+        let anchored_toast_viewport = crate::ui::toast::anchored_toasts(cx);
+        let draft_host = cx.new(|_| crate::shell::composer_draft_host::ComposerDraftHost::new());
+        crate::shell::composer_draft_host::ComposerDraftHost::register(draft_host.clone(), cx);
+        let _keybindings_warning = live
+            .as_ref()
+            .map(|live| crate::shell::keybindings_warning::start(live.bus.clone(), cx))
+            .unwrap_or_else(Subscription::empty);
         Self {
             focus_handle,
             sidebar_open: true,
@@ -364,7 +382,32 @@ impl AppSidebarLayout {
             _store_watch: store_watch,
             _activation: activation,
             toast_viewport,
+            anchored_toast_viewport,
+            draft_host,
+            _keybindings_warning,
         }
+    }
+
+    fn undo_latest_thread_action(
+        &mut self,
+        _: &UndoLatestThread,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.draft_host.update(cx, |host, cx| {
+            if let Some(message) = host.undo_latest() {
+                crate::ui::toast::toast_manager(cx).update(cx, |store, cx| {
+                    store.add(
+                        crate::ui::toast_logic::ToastOptions::new("Failed to restore draft")
+                            .type_(crate::ui::toast_logic::ToastType::Error)
+                            .description(message),
+                        cx,
+                    );
+                });
+            }
+            cx.notify();
+        });
+        cx.notify();
     }
 
     fn settings_window_options(&self, cx: &App) -> gpui_kit::WindowOptions {
@@ -468,8 +511,12 @@ impl AppSidebarLayout {
         }
         self.pull_requests = None;
         self.main_content = None;
-        // T22 swaps the mock backend for the live usage service.
-        let backend = MockUsageBackend::shared(UsageScenario::from_env());
+        let backend: std::rc::Rc<dyn super::usage::backend::UsageBackend> =
+            if let Some(live) = &self.live {
+                LiveUsageBackend::shared(live.bus.clone())
+            } else {
+                MockUsageBackend::shared(UsageScenario::from_env())
+            };
         let page = cx.new(|cx| {
             let mut page = UsagePage::new(backend, MemoryLocalStorage::shared(), window, cx);
             page.apply_dev_overrides(window, cx);
@@ -1322,7 +1369,10 @@ impl Render for AppSidebarLayout {
         }
         let on_usage = usage_page.is_some();
         let right_panel_open = self.right_panel_open && !on_usage;
+        let panel_presentation = right_panel_presentation_for_width(viewport_width);
+        let right_panel_sheet = panel_presentation == ThreadPanelPresentation::Popover;
         let maximized = right_panel_open && self.right_panel_maximized;
+        let right_panel_content = self.right_panel_content.clone();
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
         let routed_thread_id = self.routed_thread_id(cx);
@@ -1461,6 +1511,7 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::toggle_right_panel))
             .on_action(cx.listener(Self::toggle_thread_details))
             .on_action(cx.listener(Self::open_usage_action))
+            .on_action(cx.listener(Self::undo_latest_thread_action))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_file_picker))
             .on_action(cx.listener(Self::toggle_project_search))
@@ -1543,33 +1594,42 @@ impl Render for AppSidebarLayout {
                                     }),
                                 }
                             })
-                            .when(right_panel_open, |this| {
+                            .when(right_panel_open && !right_panel_sheet, |this| {
+                                let body = match right_panel_content.clone() {
+                                    Some(content) => content.into_any_element(),
+                                    None => RightPanelTabs.into_any_element(),
+                                };
                                 this.child(
-                                    div()
-                                        .relative()
-                                        .h_full()
-                                        .min_h_0()
-                                        .min_w_0()
-                                        .border_l_1()
-                                        .border_color(theme.border)
-                                        .map(|this| {
-                                            if maximized {
-                                                this.flex_1()
-                                            } else {
-                                                this.flex_shrink_0().w(px(right_panel_width))
-                                            }
-                                        })
-                                        .child(match self.right_panel_content.clone() {
-                                            Some(content) => content.into_any_element(),
-                                            None => RightPanelTabs.into_any_element(),
-                                        }),
+                                    PreviewPanelShell::new(PreviewPanelMode::Inline, right_panel_width)
+                                        .maximized(maximized)
+                                        .open(true)
+                                        .child(body),
                                 )
                             }),
                     ),
             )
             .when(sidebar_open, |this| this.child(sidebar_rail))
-            .when(right_panel_open && !maximized, |this| {
+            .when(right_panel_open && !maximized && !right_panel_sheet, |this| {
                 this.child(right_panel_handle)
+            })
+            .when(right_panel_open && right_panel_sheet, |this| {
+                let body = match right_panel_content {
+                    Some(content) => content.into_any_element(),
+                    None => RightPanelTabs.into_any_element(),
+                };
+                this.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .justify_end()
+                        .child(
+                            PreviewPanelShell::new(PreviewPanelMode::Sheet, right_panel_width)
+                                .maximized(false)
+                                .open(true)
+                                .child(body),
+                        ),
+                )
             })
             .child(sidebar_toggle)
             .when(!on_usage, |this| this.child(layout_controls))
@@ -1577,6 +1637,7 @@ impl Render for AppSidebarLayout {
             .child(self.confirm_dialog.clone())
             .child(self.quit_overlay.clone())
             .child(self.toast_viewport.clone())
+            .child(self.anchored_toast_viewport.clone())
             // The ⌘K overlay renders last so it covers the whole window.
             .child(self.palette.clone())
     }

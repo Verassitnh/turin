@@ -15,13 +15,11 @@ Shell reads `CommandBus` from `CommandBusGlobal` and `ClientStore` from
 | Shared services | `bus.commands()?.runtime()` → `Arc<WriteRuntime>` |
 | Settings read/write | `commands.server_settings()`, `update_server_settings`, `update_provider_instance` |
 | Git status / refs / switch | `commands.git_status(cwd)`, `git_branches`, `git_switch_branch` |
-| Usage page | `commands.usage_summary(input)` |
+| Usage page | `commands.usage_summary(input)` via `shell/usage_commands.rs` |
 | Dock badge (approvals) | Prefer `commands.pending_approval_count()`; fallback counts shell rows with `has_pending_approvals` / `has_pending_user_input` |
 | Provider list (onboarding, sidebar) | `bus.providers()` watch |
 
-When `WriteRuntime` exposes `git`, `usage`, `source_control`, etc., live
-adapters should switch from interim `turin_git::GitVcsDriver` calls to the
-Commands facade (same Tokio executor via `bus.task` / `bus.spawn`).
+Live adapters use concrete `WriteRuntime` fields (merged `task/WIRE-runtime`).
 
 ## Settings (WIRE-settings)
 
@@ -35,113 +33,76 @@ use crate::shell::live_settings::start_live_client_settings;
 start_live_client_settings(runtime.handle(), DesktopFileClientSettingsPersistence::new(path));
 ```
 
-Open window:
+Open window: `shell/live_settings::{open_settings_named, open_setting_by_id}` →
+`settings::live_window`.
 
-```rust
-use crate::shell::live_settings::{LiveShellHandle, open_settings_named};
-use crate::settings::live_window;
-
-open_settings_named(&live, "general", window_options, window, cx);
-```
-
-`LiveSettingsServices` field sources: table in `settings/live_bindings.rs`.
-Shell builds via `shell::live_settings::build_live_settings_services` when every
-`WriteRuntime` optional service field is `Some` (WIRE-runtime Sol populates in
-`WriteRuntime::build`):
-
-| `WriteRuntime` field | Type |
-|----------------------|------|
-| `server_settings` | `Option<Arc<ServerSettingsService>>` |
-| `keybindings` | `Option<Arc<Keybindings>>` |
-| `provider_auth` | `Option<Arc<ProviderAuthService>>` |
-| `provider_installation` | `Option<Arc<ProviderInstallation>>` |
-| `source_control` | `Option<Arc<SourceControlDiscovery>>` |
-| `storage_cleanup` | `Option<Arc<StorageCleanup>>` |
-| `provider_maintenance` | `Option<Arc<ProviderMaintenanceRunner>>` |
+`build_live_settings_services` maps concrete `WriteRuntime` fields per
+`settings/live_bindings.rs` (`source_control_discovery` for discovery).
 
 Palette/sidebar routes: `AppSidebarLayout::open_live_settings` →
 `live_window::open_named` / `open_setting_by_id`.
 
+## Chat navigation (WIRE-chat)
+
+Each layout frame:
+
+```rust
+if let Some(thread_id) = components::chat::thread_navigation::take_thread_open_request(cx) {
+    // scoped_thread_key(local_environment_id(), &ThreadId::new(thread_id)?)
+    sidebar.navigate_to_thread(&key, cx);
+}
+```
+
+`LiveSource::open_thread` enqueues via `request_open_thread`.
+
+## Onboarding (WIRE-onboarding)
+
+Live app (`main.rs`, not mock UI):
+
+```rust
+LiveOnboarding::start(client_store, command_bus, data_dir, cx);
+FirstRunGate::new(backend.clone(), backend, true, layout);
+```
+
+See `../WIRE-onboarding/docs/handoff/WIRE-onboarding.md`.
+
 ## Pull requests (WIRE-pr-ui + WIRE-pr-backend)
 
-**Store**
-
-```rust
-pull_request::live_source::start(
-    bus: CommandBus,
-    client: ClientStateHandle,
-    cx: &mut App,
-) -> Entity<PullRequestStore>
-```
-
-Optional:
-
-```rust
-pull_request::live_source::start_with_navigation(
-    bus,
-    client,
-    Arc<dyn Fn(&ThreadId, &mut App) + Send + Sync>,
-    cx,
-) -> Entity<PullRequestStore>
-```
-
-Requires `WriteRuntime.pull_requests: Arc<PullRequestService>` and
-`.review_guides: Arc<PullRequestReviewGuideService>` (direct fields, not nested
-under `source_control`).
-
-Shell wiring (live app):
-
-```rust
-let host = pull_request::live_navigation::mount_route(
-    bus,
-    client.handle().clone(),
-    Some(Arc::new(|thread_id, cx| { /* navigate sidebar to thread */ })),
-    search,
-    &LocalPreferenceStorage(pr_preferences),
-    window,
-    cx,
-);
-layout.set_main_content(Some(host.read(cx).page_view()), cx);
-// PullRequestsRouteEvent::OpenPanel → set_right_panel_content(panel_view)
-```
-
-**Navigation host**
-
-PR UI supplies `pull_request::live_navigation` to mount list page, detail
-panel, and link dialog. Shell calls it once from `AppSidebarLayout` for:
-
-- `SidebarEvent::OpenPullRequestsPage`
-- `CommandPaletteEvent::OpenPullRequests`
-- `CommandPaletteEvent::LinkPullRequest`
-- `CommandPaletteEvent::ShowLinkedPullRequests` (right panel; may reuse thread panel host)
-
-Pattern (from demo): `PullRequestsPage` main column +
-`PullRequestPanelHost` right panel; list `Select` opens detail tab.
+`pull_request::live_navigation::mount_route` from `AppSidebarLayout` with
+`open_thread` navigating the sidebar.
 
 ## Composer draft undo
 
-Runtime does **not** own drafts. Shell/composer keep
-`composer::draft_store::DraftStore` and `discard_composer_draft` /
-`DiscardedDrafts` on the shell or chat host; no duplicate store in runtime.
+- Global `shell/composer_draft_host::ComposerDraftHost` (draft store + `DiscardedDrafts` + `ThreadUndoNotices`).
+- `ChatComposer` reads/writes the shared store when the global is registered.
+- Sidebar `SidebarThreadUndoNotice` + `UndoLatestThread` (`mod-z` in shell context) call `undo_latest`.
+- Live sidebar `discard_draft` → `discard_composer_draft`.
+
+Thread archive/settle undo still lives in `ThreadActions` (not shell-wired).
+
+## Shell UI overlays
+
+| Piece | Location |
+|-------|----------|
+| Stacked toasts | `ui::toast::toasts` on layout root |
+| Anchored toasts | `ui::toast::anchored_toasts` on layout root |
+| Keybindings issues | `shell/keybindings_warning::start` when live bindings exist |
+| Right panel inline | `PreviewPanelShell` inline column + resize handle |
+| Right panel ≤980px | `PreviewPanelShell` sheet overlay (`right_panel_presentation_for_width`) |
 
 ## Shell-owned live modules
 
 | Module | Replaces |
 |--------|----------|
-| `components/sidebar/live_source.rs` | Mock sidebar (wired) |
-| `components/command_palette/live_source.rs` | Mock palette (wired) |
-| `components/onboarding/live_source.rs` | Mock first-run |
-| `components/git_actions_control/live_source.rs` | Mock git actions |
-| `components/branch_toolbar/live_source.rs` | Mock branch toolbar |
-| `components/usage/live_source.rs` | Mock usage (when runtime usage wired) |
-| `shell/environment_coordinator.rs` | Dock badge from shell snapshot |
-| `main.rs` | `ui::toast::init` for shell window |
+| `components/usage/live_source.rs` | Mock usage when `live` bindings present |
+| `shell/composer_draft_host.rs` | Local composer draft store for undo |
+| `shell/usage_commands.rs` | `Commands::usage_summary` |
+| `shell/keybindings_warning.rs` | Keybindings config issue toast |
 
-## Deviations until merge
+## Deviations / limits
 
-- Git live backends call `GitVcsDriver` directly until `Commands::git_*` lands on
-  the merged runtime branch.
-- Onboarding `complete_onboarding` writes `settings.json` until
-  `update_server_settings` is available.
-- PR list/detail routes wait for `pull_request::live_source` / `live_navigation`
-  from WIRE-pr-ui.
+- Git live backends may still call `GitVcsDriver` directly until shell switches to `Commands::git_*` everywhere.
+- `UndoLatestThread` only runs draft restore via `ComposerDraftHost`; thread lifecycle undo needs a shared `ThreadActions` host.
+- Usage price writes patch global `ServerSettings` (`usage_price_overrides` / aliases); per-environment pricing in the UI is not modeled separately on desktop yet.
+- Question-attachment upload on respond: staged in chat; full transmit is WIRE-chat / worker follow-up (`WIRE-chat.md`).
+- Keybindings warning uses `open` / `xdg-open` for “Open keybindings.json” (no preferred-editor registry yet).

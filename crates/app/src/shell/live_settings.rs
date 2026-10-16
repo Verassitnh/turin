@@ -15,6 +15,7 @@ use crate::settings::search::{SETTINGS_SEARCH_ITEMS, SettingsSearchItem};
 use crate::settings::view::SettingsRoute;
 use crate::settings::view_model::EnvironmentInfo;
 use crate::state::store::ClientStore;
+use turin_shared::keybindings::is_mac_platform;
 
 /// Maps `WriteRuntime` per `settings/live_bindings.rs`.
 pub fn build_live_settings_services(
@@ -39,7 +40,7 @@ pub fn build_live_settings_services(
 }
 
 fn settings_platform(_cx: &App) -> String {
-    if cfg!(target_os = "macos") {
+    if is_mac_platform() {
         "MacIntel".into()
     } else {
         "Linux x86_64".into()

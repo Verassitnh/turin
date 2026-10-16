@@ -277,15 +277,17 @@ fn main() {
                             let backend =
                                 MockOnboardingBackend::shared(FirstRunScenario::from_env());
                             (backend.clone(), backend)
-                        } else if let (Some(data_dir), Some(bus), Some(store)) = (
+                        } else if let (Some(data_dir), Some(store)) = (
                             app_runtime::data_dir::resolve_data_dir(),
-                            cx.try_global::<app_runtime::write::bus::CommandBusGlobal>()
-                                .map(|global| global.0.clone()),
                             cx.try_global::<state::store::ClientStoreGlobal>()
                                 .map(|global| global.0.clone()),
                         ) {
-                            let backend =
-                                LiveOnboarding::start(store, bus, data_dir, cx);
+                            let backend = LiveOnboarding::start(
+                                store,
+                                command_bus.clone(),
+                                data_dir,
+                                cx,
+                            );
                             (backend.clone(), backend)
                         } else {
                             let backend =

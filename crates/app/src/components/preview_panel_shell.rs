@@ -23,8 +23,6 @@
 //! owner that animates it), and `pointer-events-none` on a closed panel (it
 //! is clipped to zero width). See PORTING.md Deviations.
 
-// Consumers are wired by the shell and PR page tasks (T22).
-#![allow(dead_code)]
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

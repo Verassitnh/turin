@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use turin_contracts::orchestration_v2::OrchestrationV2Command;
+use turin_contracts::provider_instance::ProviderInstanceMutation;
+use turin_contracts::settings::{ServerSettings, ServerSettingsPatch};
 use turin_contracts::{CommandId, EventId, MessageId, ProjectId, ThreadId, UtcDateTime};
 use turin_orchestration::pipeline::effect_worker::error_chain;
 use turin_orchestration::pipeline::event_sink::ProjectCommit;
@@ -464,6 +466,48 @@ impl Commands {
             target.extend(extra);
         }
         self.dispatch(command).await.map(drop)
+    }
+
+    pub async fn server_settings(&self) -> Result<ServerSettings, CommandError> {
+        let service = self
+            .runtime
+            .server_settings
+            .as_ref()
+            .ok_or_else(|| CommandError::new("Server settings are not available yet."))?;
+        service
+            .get_settings()
+            .await
+            .map_err(|error| CommandError::new(error.to_string()))
+    }
+
+    pub async fn update_server_settings(
+        &self,
+        patch: ServerSettingsPatch,
+    ) -> Result<ServerSettings, CommandError> {
+        let service = self
+            .runtime
+            .server_settings
+            .as_ref()
+            .ok_or_else(|| CommandError::new("Server settings are not available yet."))?;
+        service
+            .update_settings(&patch)
+            .await
+            .map_err(|error| CommandError::new(error.to_string()))
+    }
+
+    pub async fn update_provider_instance(
+        &self,
+        mutation: ProviderInstanceMutation,
+    ) -> Result<ServerSettings, CommandError> {
+        let service = self
+            .runtime
+            .server_settings
+            .as_ref()
+            .ok_or_else(|| CommandError::new("Server settings are not available yet."))?;
+        service
+            .update_provider_instance(&mutation, None)
+            .await
+            .map_err(|error| CommandError::new(error.to_string()))
     }
 }
 

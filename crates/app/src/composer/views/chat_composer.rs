@@ -77,6 +77,7 @@ pub enum Layer {
 pub struct ChatComposer {
     pub(super) store: Entity<ComposerStore>,
     pub(super) editor: Entity<PromptEditor>,
+    draft_host: Option<Entity<crate::shell::composer_draft_host::ComposerDraftHost>>,
     pub(super) drafts: ComposerDraftStore,
     pub(super) thread_key: String,
     pub(super) validation: Option<String>,
@@ -131,6 +132,15 @@ pub struct TriggerBounds {
 
 impl ChatComposer {
     pub fn new(store: Entity<ComposerStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_draft_host(store, None, window, cx)
+    }
+
+    pub fn new_with_draft_host(
+        store: Entity<ComposerStore>,
+        draft_host: Option<Entity<crate::shell::composer_draft_host::ComposerDraftHost>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let editor = cx.new(|cx| {
             PromptEditor::new(
                 "",
@@ -152,9 +162,14 @@ impl ChatComposer {
                 },
             ),
         ];
+        let draft_host = draft_host.or_else(|| {
+            cx.try_global::<crate::shell::composer_draft_host::ComposerDraftHostGlobal>()
+                .map(|global| global.0.clone())
+        });
         let mut this = Self {
             store,
             editor,
+            draft_host,
             drafts: ComposerDraftStore::new(),
             thread_key: String::new(),
             validation: None,
@@ -228,7 +243,7 @@ impl ChatComposer {
         );
         let prompt = format!("Why does {quote} fail with {terminal} here? ");
         let key = "local:thread-1".to_owned();
-        self.drafts.set_prompt(&key, &prompt);
+        self.update_drafts(cx, |drafts| drafts.set_prompt(&key, &prompt));
         if !open_comment {
             return;
         }
@@ -273,7 +288,7 @@ impl ChatComposer {
         };
         if let Some(prompt) = prompt {
             let key = "local:thread-1".to_owned();
-            self.drafts.set_prompt(&key, prompt);
+            self.update_drafts(cx, |drafts| drafts.set_prompt(&key, prompt));
         }
         if scenario.starts_with("citation") {
             self.apply_citation_demo(scenario == "citation-comment", window, cx);
@@ -301,8 +316,8 @@ impl ChatComposer {
                 "Draft release notes for 0.9",
             ] {
                 let id = self.next_demo_stash_id();
-                self.drafts
-                    .push_stash_entry(crate::composer::draft_store::PromptStashEntry {
+                self.update_drafts(cx, |drafts| {
+                    drafts.push_stash_entry(crate::composer::draft_store::PromptStashEntry {
                         id,
                         created_at: chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -312,7 +327,8 @@ impl ChatComposer {
                         dropped_image_names: Vec::new(),
                         unreadable_image_names: Vec::new(),
                         pending_image_count: 0,
-                    });
+                    })
+                });
             }
         }
         let layer = match scenario.as_str() {
@@ -399,7 +415,7 @@ impl ChatComposer {
             editor.insert_assistant_citation(citation, window, cx);
         });
         let prompt = self.prompt(cx);
-        self.drafts.set_prompt(&self.thread_key, &prompt);
+        self.update_drafts(cx, |drafts| drafts.set_prompt(&self.thread_key, &prompt));
         cx.notify();
     }
 
@@ -492,32 +508,52 @@ impl ChatComposer {
         self.store.read(cx).source()
     }
 
+    fn update_drafts(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut ComposerDraftStore)) {
+        if let Some(host) = &self.draft_host {
+            host.update(cx, |host, cx| {
+                edit(&mut host.store);
+                cx.notify();
+            });
+        } else {
+            edit(&mut self.drafts);
+        }
+    }
+
+    fn draft_store<'a>(&'a self, cx: &'a App) -> Option<ComposerThreadDraft> {
+        if let Some(host) = &self.draft_host {
+            host.read(cx, |host, _| {
+                host.store
+                    .get_composer_draft(&self.thread_key)
+                    .cloned()
+            })
+        } else {
+            self.drafts.get_composer_draft(&self.thread_key).cloned()
+        }
+    }
+
     /// The prompt as last reported by the editor (kept in the draft).
-    pub(super) fn prompt(&self, _cx: &App) -> String {
-        self.drafts
-            .get_composer_draft(&self.thread_key)
-            .map(|draft| draft.prompt.clone())
+    pub(super) fn prompt(&self, cx: &App) -> String {
+        self.draft_store(cx)
+            .map(|draft| draft.prompt)
             .unwrap_or_default()
     }
 
-    pub(super) fn draft_images(&self) -> Vec<ComposerImageAttachment> {
-        self.drafts
-            .get_composer_draft(&self.thread_key)
-            .map(|draft| draft.images.clone())
+    pub(super) fn draft_images(&self, cx: &App) -> Vec<ComposerImageAttachment> {
+        self.draft_store(cx)
+            .map(|draft| draft.images)
             .unwrap_or_default()
     }
 
-    pub(super) fn draft_files(&self) -> Vec<ComposerFileAttachment> {
-        self.drafts
-            .get_composer_draft(&self.thread_key)
-            .map(|draft| draft.files.clone())
+    pub(super) fn draft_files(&self, cx: &App) -> Vec<ComposerFileAttachment> {
+        self.draft_store(cx)
+            .map(|draft| draft.files)
             .unwrap_or_default()
     }
 
     pub(super) fn has_sendable_content(&self, cx: &App) -> bool {
         !self.prompt(cx).trim().is_empty()
-            || !self.draft_images().is_empty()
-            || !self.draft_files().is_empty()
+            || !self.draft_images(cx).is_empty()
+            || !self.draft_files(cx).is_empty()
     }
 
     /// Swap the editor and attachments when the thread changes (the draft is
@@ -529,7 +565,7 @@ impl ChatComposer {
         let previous = std::mem::replace(&mut self.thread_key, vm.thread_key.clone());
         if !previous.is_empty() {
             let prompt = self.prompt(cx);
-            self.drafts.set_prompt(&previous, &prompt);
+            self.update_drafts(cx, |drafts| drafts.set_prompt(&previous, &prompt));
         }
         let prompt = self
             .drafts
@@ -551,7 +587,7 @@ impl ChatComposer {
                 .get_composer_draft(&previous)
                 .is_some_and(|draft| draft.prompt == saved.replaced_value)
         {
-            self.drafts.set_prompt(&previous, &saved.saved_value);
+            self.update_drafts(cx, |drafts| drafts.set_prompt(&previous, &saved.saved_value));
         }
         let _ = window;
     }
@@ -586,7 +622,9 @@ impl ChatComposer {
     ) {
         match event {
             PromptEditorEvent::Changed(snapshot) => {
-                self.drafts.set_prompt(&self.thread_key, &snapshot.value);
+                self.update_drafts(cx, |drafts| {
+                    drafts.set_prompt(&self.thread_key, &snapshot.value)
+                });
                 self.validation = None;
                 self.after_prompt_changed(snapshot, cx);
                 cx.notify();
@@ -637,7 +675,9 @@ impl ChatComposer {
             PromptEditorEvent::CitationDraftSaved(saved) => {
                 // `if (replacedValue === prompt) setPrompt(savedValue)`.
                 if self.prompt(cx) == saved.replaced_value {
-                    self.drafts.set_prompt(&self.thread_key, &saved.saved_value);
+                    self.update_drafts(cx, |drafts| {
+                        drafts.set_prompt(&self.thread_key, &saved.saved_value)
+                    });
                 }
             }
         }
@@ -920,8 +960,8 @@ impl ChatComposer {
             return;
         }
         let prompt = self.prompt(cx);
-        let images = self.draft_images();
-        let files = self.draft_files();
+        let images = self.draft_images(cx);
+        let files = self.draft_files(cx);
         if prompt.trim().is_empty() && images.is_empty() && files.is_empty() {
             return;
         }
@@ -978,7 +1018,7 @@ impl ChatComposer {
     }
 
     pub(super) fn clear_draft(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.drafts.clear_composer_content(&self.thread_key);
+        self.update_drafts(cx, |drafts| drafts.clear_composer_content(&self.thread_key));
         self.history_position = None;
         self.editor
             .update(cx, |editor, cx| editor.set_value("", 0, cx));

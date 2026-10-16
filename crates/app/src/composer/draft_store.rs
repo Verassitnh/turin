@@ -164,6 +164,22 @@ impl ComposerDraftStore {
         self.update(thread_key, |draft| draft.prompt = prompt.to_owned());
     }
 
+    /// Puts a full draft back (discard undo).
+    pub fn replace_composer_draft(&mut self, thread_key: &str, draft: ComposerThreadDraft) {
+        if thread_key.is_empty() {
+            return;
+        }
+        if draft.is_empty() {
+            self.drafts.remove(thread_key);
+        } else {
+            self.drafts.insert(thread_key.to_owned(), draft);
+        }
+    }
+
+    pub fn clear_composer_content(&mut self, thread_key: &str) {
+        self.set_prompt(thread_key, "");
+    }
+
     /// `setModelSelection`.
     pub fn set_model_selection(
         &mut self,

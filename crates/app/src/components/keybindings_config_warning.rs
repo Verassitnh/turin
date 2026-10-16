@@ -11,9 +11,6 @@
 //! an empty editor list disables the button (PORTING.md Deviations). The toast
 //! host is the shell's (T22), so the view takes the click handler.
 
-// Seam for the shell, which owns the toast host; nothing calls this yet.
-#![allow(dead_code)]
-
 use std::rc::Rc;
 
 use async_trait::async_trait;

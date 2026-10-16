@@ -3,33 +3,37 @@
 use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
     approvals::{Decision, PendingRequest},
+    goal::{self, GoalCommand},
+    items,
     params::RuntimePolicy,
+    projection::{self, RuntimeState, TurnState},
     runtime::CodexRuntimeConfig,
+    subagent,
 };
 use async_trait::async_trait;
 use futures::stream;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use std::{
-    collections::{HashMap, VecDeque},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
 use turin_codex_app_server::{client::Client, errors::AppServerError};
 use turin_contracts::{
-    PositiveInt, ProviderSessionId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
+    ProviderSessionId, ThreadId, TrimmedNonEmptyString, UtcDateTime,
     model::ProviderOptionSelectionValue,
     model_selection::ModelSelection,
     orchestration_v2::{
-        OrchestrationV2NativeRefStrength, OrchestrationV2ProviderCapabilities,
-        OrchestrationV2ProviderRef, OrchestrationV2ProviderSession,
-        OrchestrationV2ProviderSessionStatus, OrchestrationV2ProviderThread,
-        OrchestrationV2ProviderThreadDisposition, OrchestrationV2ProviderThreadForkedFrom,
+        OrchestrationV2ExecutionNode, OrchestrationV2ExecutionNodeKind,
+        OrchestrationV2ExecutionNodeStatus, OrchestrationV2NativeRefStrength,
+        OrchestrationV2ProviderCapabilities, OrchestrationV2ProviderRef,
+        OrchestrationV2ProviderSession, OrchestrationV2ProviderSessionStatus,
+        OrchestrationV2ProviderThread, OrchestrationV2ProviderThreadForkedFrom,
         OrchestrationV2ProviderThreadStatus, OrchestrationV2ProviderTurn,
-        OrchestrationV2ProviderTurnStatus,
+        OrchestrationV2ProviderTurnStatus, OrchestrationV2ResponseCapability,
+        OrchestrationV2RuntimeRequest, OrchestrationV2RuntimeRequestKind,
+        OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
+        OrchestrationV2TurnItemStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    provider_policy::ProviderApprovalDecision,
+    provider_policy::{ProviderApprovalDecision, ProviderRequestKind},
 };
 use turin_provider_core::{
     failure::ProviderFailureCause,
@@ -41,8 +45,8 @@ use turin_provider_core::{
         ProviderAdapterV2ReadThreadSnapshotInput, ProviderAdapterV2ResumeThreadInput,
         ProviderAdapterV2RollbackTarget, ProviderAdapterV2RollbackThreadInput,
         ProviderAdapterV2RuntimeRequestResponseInput, ProviderAdapterV2SteerInput,
-        ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput,
-        ProviderAdapterV2TurnTerminalStatus, ProviderEventStream, ProviderSessionRuntime,
+        ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2TurnInput, ProviderEventStream,
+        ProviderSessionRuntime,
     },
     selection_transition::{
         ProviderSelectionTransitionInput, ProviderSelectionTransitionPlan,
@@ -50,13 +54,13 @@ use turin_provider_core::{
     },
 };
 
-fn driver() -> ProviderDriverKind {
+pub(crate) fn driver() -> ProviderDriverKind {
     ProviderDriverKind::new("codex").expect("driver kind")
 }
 fn nonempty(value: &str) -> TrimmedNonEmptyString {
     TrimmedNonEmptyString::new(value).expect("nonempty provider value")
 }
-fn native_ref(id: &str) -> OrchestrationV2ProviderRef {
+pub(crate) fn native_ref(id: &str) -> OrchestrationV2ProviderRef {
     OrchestrationV2ProviderRef {
         driver: driver(),
         native_id: Some(nonempty(id)),
@@ -189,8 +193,20 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
                     e,
                 )
             })?;
-        let events = Mutex::new(session.take_events());
-        let requests = Mutex::new(session.take_requests());
+        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(session);
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let turn_registered = Arc::new(tokio::sync::Notify::new());
+        let out = out_tx.clone();
+        let pump = tokio::spawn(project_pump(
+            session.take_events(),
+            session.take_requests(),
+            state.clone(),
+            session.clone(),
+            turn_registered.clone(),
+            input.provider_session_id.clone(),
+            out_tx,
+        ));
         let now = UtcDateTime::now();
         let cwd = input
             .runtime_policy
@@ -210,37 +226,226 @@ impl ProviderAdapterV2 for CodexProviderAdapter {
             last_error: None,
         };
         Ok(Arc::new(CodexProviderRuntime {
+            out,
             instance_id: self.instance_id.clone(),
             driver: self.driver.clone(),
             provider_session_id: input.provider_session_id,
             provider_session,
-            session: Arc::new(session),
-            events,
-            requests,
-            state: Arc::new(Mutex::new(RuntimeState::default())),
+            session,
+            events: Mutex::new(Some(out_rx)),
+            pump,
+            turn_registered,
+            state,
             config: self.config.clone(),
         }))
     }
 }
 
-#[derive(Default)]
-struct RuntimeState {
-    turns: HashMap<String, ProviderAdapterV2TurnInput>,
-    requests: HashMap<RuntimeRequestId, u64>,
-    /// Native item ids per native turn, in first-seen order.
-    item_positions: HashMap<String, Vec<String>>,
-}
-
 pub struct CodexProviderRuntime {
+    /// Sends the events a command projects outside the pump, in stream order.
+    out: tokio::sync::mpsc::UnboundedSender<ProviderAdapterV2Event>,
     instance_id: ProviderInstanceId,
     driver: ProviderDriverKind,
     provider_session_id: ProviderSessionId,
     provider_session: OrchestrationV2ProviderSession,
     session: Arc<CodexSession>,
-    events: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<CodexEvent>>>,
-    requests: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>>>,
+    events: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ProviderAdapterV2Event>>>,
+    /// Projects notifications as they arrive, not when the stream is polled, so
+    /// interrupt sees the running commands the turn has started.
+    pump: tokio::task::JoinHandle<()>,
+    /// Wakes the pump when `turn/start` registers a turn that parked events wait on.
+    turn_registered: Arc<tokio::sync::Notify>,
     state: Arc<Mutex<RuntimeState>>,
     config: CodexRuntimeConfig,
+}
+
+impl Drop for CodexProviderRuntime {
+    fn drop(&mut self) {
+        self.pump.abort();
+    }
+}
+
+async fn recv_raw(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<CodexEvent>>,
+) -> Option<CodexEvent> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn recv_request(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>>,
+) -> PendingRequest {
+    match rx {
+        Some(rx) => match rx.recv().await {
+            Some(request) => request,
+            None => std::future::pending().await,
+        },
+        None => std::future::pending().await,
+    }
+}
+
+/// Owns the raw notification and request channels. Each frame is projected in
+/// arrival order under the state lock, and the events go to the stream.
+/// A notification or request whose turn is not registered yet. `turn/start`
+/// returns after its first notifications can arrive, so they wait here.
+enum Parked {
+    Event(CodexEvent),
+    Request(PendingRequest),
+}
+
+/// Bounds the parked queue. A turn that never registers is dropped once it is
+/// this old, so a stray notification cannot grow memory without bound.
+const PARKED_LIMIT: usize = 4096;
+
+impl Parked {
+    fn turn(&self) -> Option<&str> {
+        match self {
+            Parked::Event(event) => projection::turn_scoped(&event.method, &event.params),
+            Parked::Request(request) => request.params.get("turnId").and_then(Value::as_str),
+        }
+    }
+}
+
+fn project_parked(
+    item: Parked,
+    state: &mut RuntimeState,
+    session_id: &ProviderSessionId,
+) -> Vec<ProviderAdapterV2Event> {
+    match item {
+        Parked::Event(event) => projection::project_event(event, state),
+        Parked::Request(request) => project_request(request, state, session_id),
+    }
+}
+
+/// Whether an item's turn is registered, or is the first `turn/started` of a
+/// registered subagent, which opens a child turn when it projects.
+fn admitted(item: &Parked, state: &RuntimeState) -> bool {
+    match item.turn() {
+        None => true,
+        Some(turn) => {
+            state.turns.contains_key(turn)
+                || state.settled.contains_key(turn)
+                || match item {
+                    Parked::Event(event) => {
+                        let thread = event
+                            .params
+                            .get("threadId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        event.method == "turn/started"
+                            && subagent::opens_child_turn(state, thread, turn)
+                    }
+                    Parked::Request(_) => false,
+                }
+        }
+    }
+}
+
+/// Projects one arrival in order. It parks the arrival if its turn is not
+/// admitted, or if an earlier parked item for the same turn is still waiting.
+fn ingest(
+    parked: &mut VecDeque<Parked>,
+    item: Parked,
+    state: &mut RuntimeState,
+    session_id: &ProviderSessionId,
+) -> Vec<ProviderAdapterV2Event> {
+    let behind_parked = item
+        .turn()
+        .is_some_and(|turn| parked.iter().any(|p| p.turn() == Some(turn)));
+    if behind_parked || !admitted(&item, state) {
+        if parked.len() >= PARKED_LIMIT {
+            parked.pop_front();
+        }
+        parked.push_back(item);
+        return vec![];
+    }
+    project_parked(item, state, session_id)
+}
+
+/// Projects every parked item that is admitted now, keeping arrival order. A
+/// projected item can register a subagent that an earlier parked item waits on,
+/// so the pass repeats until it makes no progress.
+fn drain_parked(
+    parked: &mut VecDeque<Parked>,
+    state: &mut RuntimeState,
+    session_id: &ProviderSessionId,
+) -> Vec<ProviderAdapterV2Event> {
+    let mut events = vec![];
+    loop {
+        let mut progressed = false;
+        let mut index = 0;
+        while index < parked.len() {
+            if admitted(&parked[index], state) {
+                let item = parked.remove(index).expect("index in range");
+                events.extend(project_parked(item, state, session_id));
+                progressed = true;
+            } else {
+                index += 1;
+            }
+        }
+        if !progressed {
+            return events;
+        }
+    }
+}
+
+async fn project_pump(
+    mut events: Option<tokio::sync::mpsc::UnboundedReceiver<CodexEvent>>,
+    mut requests: Option<tokio::sync::mpsc::UnboundedReceiver<PendingRequest>>,
+    state: Arc<Mutex<RuntimeState>>,
+    session: Arc<CodexSession>,
+    registered: Arc<tokio::sync::Notify>,
+    session_id: ProviderSessionId,
+    out: tokio::sync::mpsc::UnboundedSender<ProviderAdapterV2Event>,
+) {
+    let mut parked = VecDeque::new();
+    loop {
+        let flush = projection::next_flush(&state.lock());
+        let mut batch = tokio::select! {
+            raw = recv_raw(&mut events) => match raw {
+                Some(raw) => ingest(&mut parked, Parked::Event(raw), &mut state.lock(), &session_id),
+                None => return,
+            },
+            request = recv_request(&mut requests) => {
+                ingest(&mut parked, Parked::Request(request), &mut state.lock(), &session_id)
+            }
+            _ = registered.notified() => vec![],
+            _ = async {
+                match flush {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => projection::flush_due(&mut state.lock(), tokio::time::Instant::now()),
+        };
+        batch.extend(drain_parked(&mut parked, &mut state.lock(), &session_id));
+        let interrupts = std::mem::take(&mut state.lock().interrupts);
+        for (thread, turn) in interrupts {
+            // Upstream interrupts a late child turn and does not wait on it: the
+            // interrupt is bounded by a timeout, and its failure is only logged.
+            let session = session.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    session.interrupt_turn(&thread, &turn),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(cause)) => {
+                        tracing::warn!(thread, turn, %cause, "late subagent interrupt failed")
+                    }
+                    Err(_) => tracing::warn!(thread, turn, "late subagent interrupt timed out"),
+                }
+            });
+        }
+        for event in batch {
+            if out.send(event).is_err() {
+                return;
+            }
+        }
+    }
 }
 
 fn thread_from(
@@ -319,6 +524,88 @@ fn turn_input(text: &str) -> Vec<Value> {
         vec![json!({"type":"text","text":text})]
     }
 }
+/// Upstream `isTerminalProviderTurn`: a turn with a native ref that has stopped.
+fn is_terminal_turn(turn: &OrchestrationV2ProviderTurn) -> bool {
+    turn.native_turn_ref.is_some()
+        && matches!(
+            turn.status,
+            OrchestrationV2ProviderTurnStatus::Completed
+                | OrchestrationV2ProviderTurnStatus::Interrupted
+                | OrchestrationV2ProviderTurnStatus::Failed
+                | OrchestrationV2ProviderTurnStatus::Cancelled
+        )
+}
+
+/// Upstream `resolveCodexRollbackTurnCount`: the stopped turns a rollback reverts.
+/// A turn boundary reverts the terminal turns after it, and the boundary must be
+/// in the thread's own history.
+fn rollback_turn_count(input: &ProviderAdapterV2RollbackThreadInput) -> Result<usize, String> {
+    let turns = &input.provider_thread_turns;
+    match &input.target {
+        ProviderAdapterV2RollbackTarget::ThreadStart { .. } => {
+            Ok(turns.iter().filter(|turn| is_terminal_turn(turn)).count())
+        }
+        ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => {
+            if provider_turn.provider_thread_id != input.provider_thread.id {
+                return Err(format!(
+                    "Cannot roll back Codex thread {} to provider turn {}: target turn belongs to provider thread {}.",
+                    input.provider_thread.id, provider_turn.id, provider_turn.provider_thread_id,
+                ));
+            }
+            let Some(boundary) = turns.iter().find(|turn| turn.id == provider_turn.id) else {
+                return Err(format!(
+                    "Cannot roll back Codex thread {} to provider turn {}: target turn was not found in durable provider turn history.",
+                    input.provider_thread.id, provider_turn.id,
+                ));
+            };
+            Ok(turns
+                .iter()
+                .filter(|turn| turn.ordinal > boundary.ordinal && is_terminal_turn(turn))
+                .count())
+        }
+    }
+}
+
+/// Upstream `resolveCodexForkBoundary`. A native turn boundary forks at that turn:
+/// `lastTurnId` is inclusive on the Codex side, so later turns are omitted. A
+/// boundary without a native ref needs fork-then-revert, which is not ported, so
+/// it is refused rather than forking the whole thread. Upstream's
+/// `resolveCodexForkRollbackTurnCount` errors for a boundary the source thread does
+/// not have.
+fn fork_last_turn(input: &ProviderAdapterV2ForkThreadInput) -> Result<Option<String>, String> {
+    let (Some(target), Some(turns)) = (&input.provider_turn_id, &input.source_provider_turns)
+    else {
+        return Ok(None);
+    };
+    let source_turns: Vec<&OrchestrationV2ProviderTurn> = turns
+        .iter()
+        .filter(|turn| turn.provider_thread_id == input.source_provider_thread.id)
+        .collect();
+    let Some(boundary) = source_turns.iter().find(|turn| turn.id == *target) else {
+        return Err(format!(
+            "Cannot fork Codex thread from provider turn {target}: source turn was not found in provider thread {}.",
+            input.source_provider_thread.id,
+        ));
+    };
+    if let Some(native) = boundary
+        .native_turn_ref
+        .as_ref()
+        .and_then(|r| r.native_id.as_ref())
+    {
+        return Ok(Some(native.as_str().to_owned()));
+    }
+    let later = source_turns
+        .iter()
+        .filter(|turn| turn.ordinal > boundary.ordinal && is_terminal_turn(turn))
+        .count();
+    if later == 0 {
+        return Ok(None);
+    }
+    Err(format!(
+        "Cannot fork Codex thread from provider turn {target}: the turn has no native reference and {later} turn(s) follow it. Fork-then-rollback is not ported."
+    ))
+}
+
 fn snapshot(
     thread: OrchestrationV2ProviderThread,
     payload: Option<Value>,
@@ -329,6 +616,220 @@ fn snapshot(
         messages: vec![],
         runtime_requests: vec![],
         provider_payload: payload,
+    }
+}
+
+impl CodexProviderRuntime {
+    fn send(&self, events: Vec<ProviderAdapterV2Event>) {
+        for event in events {
+            let _ = self.out.send(event);
+        }
+    }
+
+    /// Upstream `runGoalCommand`. `/goal` runs through Codex's native goal API, as the
+    /// Codex TUI does. Set and resume start the goal's first turn, which carries the
+    /// objective, and Codex continues later goal turns itself. The other commands
+    /// settle with a reply and start no Codex turn.
+    #[allow(clippy::result_large_err)]
+    async fn run_goal_command(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+        command: GoalCommand,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        let thread = native_id(&input.provider_thread)?.to_owned();
+        let fail = |cause: AppServerError| {
+            error(
+                ProviderAdapterErrorKind::TurnStart {
+                    driver: self.driver.clone(),
+                    thread_id: input.thread_id.clone(),
+                    provider_thread_id: input.provider_thread.id.clone(),
+                    run_id: input.run_id.clone(),
+                },
+                cause,
+            )
+        };
+        let goal_of = |response: Option<Value>| {
+            response
+                .as_ref()
+                .and_then(|response| response.get("goal"))
+                .filter(|goal| !goal.is_null())
+                .and_then(goal::provider_goal_from_codex)
+        };
+        let client = self.session.client();
+        self.state
+            .lock()
+            .goal_threads
+            .insert(thread.clone(), input.provider_thread.clone());
+        let current = goal_of(
+            client
+                .request("thread/goal/get", Some(json!({"threadId": thread})))
+                .await
+                .map_err(fail)?,
+        );
+        let events = goal::set_goal(&mut self.state.lock(), &thread, current.clone());
+        self.send(events);
+
+        match &command {
+            GoalCommand::Show => {
+                let reply = current
+                    .as_ref()
+                    .map_or_else(|| "No goal is set.".to_owned(), goal::describe);
+                self.send(goal::reply_events(&input, &reply));
+                return Ok(());
+            }
+            GoalCommand::Clear => {
+                let response = client
+                    .request("thread/goal/clear", Some(json!({"threadId": thread})))
+                    .await
+                    .map_err(fail)?;
+                let cleared = response
+                    .as_ref()
+                    .and_then(|response| response.get("cleared"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                let events = goal::set_goal(&mut self.state.lock(), &thread, None);
+                self.send(events);
+                let reply = if cleared {
+                    "Goal cleared."
+                } else {
+                    "No goal to clear."
+                };
+                self.send(goal::reply_events(&input, reply));
+                return Ok(());
+            }
+            GoalCommand::Pause if current.is_none() => {
+                self.send(goal::reply_events(&input, "No goal is set."));
+                return Ok(());
+            }
+            GoalCommand::Resume if current.is_none() => {
+                self.send(goal::reply_events(&input, "No goal is set."));
+                return Ok(());
+            }
+            GoalCommand::Pause => {
+                let response = client
+                    .request(
+                        "thread/goal/set",
+                        Some(json!({"threadId": thread, "status": "paused"})),
+                    )
+                    .await
+                    .map_err(fail)?;
+                let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
+                self.send(events);
+                self.send(goal::reply_events(
+                    &input,
+                    "Goal paused. Send /goal resume to continue.",
+                ));
+                return Ok(());
+            }
+            GoalCommand::Set(_) | GoalCommand::Resume => {}
+        }
+
+        // Set and resume start the goal's first turn.
+        let objective = match &command {
+            GoalCommand::Set(objective) => Some(objective.clone()),
+            _ => None,
+        };
+        if let Some(objective) = &objective {
+            if current.is_some() {
+                client
+                    .request("thread/goal/clear", Some(json!({"threadId": thread})))
+                    .await
+                    .map_err(fail)?;
+            }
+            // Paused until our turn runs, so Codex does not start one first.
+            let response = client
+                .request(
+                    "thread/goal/set",
+                    Some(json!({"threadId": thread, "objective": objective, "status": "paused"})),
+                )
+                .await
+                .map_err(fail)?;
+            let events = goal::set_goal(&mut self.state.lock(), &thread, goal_of(response));
+            self.send(events);
+        }
+        // Until the goal is active, a fast first turn holds the run.
+        self.state.lock().goal_activations.insert(thread.clone());
+        let mut turn_input = input.clone();
+        if let Some(objective) = objective {
+            turn_input.message.text = objective;
+        }
+        let outcome = async {
+            self.start_native_turn(turn_input).await?;
+            let response = client
+                .request(
+                    "thread/goal/set",
+                    Some(json!({"threadId": thread, "status": "active"})),
+                )
+                .await
+                .map_err(fail)?;
+            Ok::<_, ProviderAdapterV2Error>(goal_of(response))
+        }
+        .await;
+        let mut state = self.state.lock();
+        state.goal_activations.remove(&thread);
+        let active = goal::is_active(&state, &thread);
+        let mut events = match &outcome {
+            Ok(goal) => goal::set_goal(&mut state, &thread, goal.clone()),
+            Err(_) => vec![],
+        };
+        // A run held for an activation that did not happen settles now.
+        if !goal::is_active(&state, &thread) || !active {
+            events.extend(goal::release_hold(&mut state, &thread));
+        }
+        drop(state);
+        self.send(events);
+        outcome.map(|_| ())
+    }
+    /// Starts a native Codex turn for this run's configuration. Upstream `startNativeTurn`.
+    #[allow(clippy::result_large_err)]
+    async fn start_native_turn(
+        &self,
+        input: ProviderAdapterV2TurnInput,
+    ) -> Result<(), ProviderAdapterV2Error> {
+        let thread = native_id(&input.provider_thread)?.to_owned();
+        let policy = runtime_policy(&input.runtime_policy, &self.config.cwd);
+        let model = input.model_selection.model.as_str();
+        // The thread is starting a turn until the turn is registered, so a child turn
+        // that starts first waits for its parent rather than running under a stale one.
+        self.state.lock().starting.insert(thread.clone());
+        let started = self
+            .session
+            .start_turn(
+                &thread,
+                turn_input(&input.message.text),
+                model,
+                option(&input.model_selection, "reasoningEffort"),
+                option(&input.model_selection, "serviceTier"),
+                &policy,
+            )
+            .await;
+        let native_turn = match started {
+            Ok(native_turn) => native_turn,
+            Err(e) => {
+                self.state.lock().starting.remove(&thread);
+                return Err(error(
+                    ProviderAdapterErrorKind::TurnStart {
+                        driver: self.driver.clone(),
+                        thread_id: input.thread_id.clone(),
+                        provider_thread_id: input.provider_thread.id.clone(),
+                        run_id: input.run_id.clone(),
+                    },
+                    e,
+                ));
+            }
+        };
+        {
+            let mut state = self.state.lock();
+            state.starting.remove(&thread);
+            state
+                .goal_threads
+                .insert(thread.clone(), input.provider_thread.clone());
+            state
+                .turns
+                .insert(native_turn.clone(), TurnState::new(native_turn, input));
+        }
+        self.turn_registered.notify_one();
+        Ok(())
     }
 }
 
@@ -350,29 +851,9 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         let Some(events) = self.events.lock().take() else {
             return Box::pin(stream::empty());
         };
-        let requests = self.requests.lock().take();
-        let state = self.state.clone();
-        let session_id = self.provider_session_id.clone();
-        Box::pin(stream::unfold(
-            (events, requests, VecDeque::<ProviderAdapterV2Event>::new()),
-            move |(mut events, mut requests, mut queue)| {
-                let state = state.clone();
-                let session_id = session_id.clone();
-                async move {
-                    loop {
-                        if let Some(event) = queue.pop_front() {
-                            return Some((Ok(event), (events, requests, queue)));
-                        }
-                        tokio::select! {
-                            raw=events.recv()=>{let raw=raw?;queue.extend(project_event(raw,&state));},
-                            request=async {match &mut requests {Some(rx)=>rx.recv().await,None=>std::future::pending().await}}=>{
-                                let request=request?;queue.extend(project_request(request,&state,&session_id));
-                            }
-                        }
-                    }
-                }
-            },
-        ))
+        Box::pin(stream::unfold(events, |mut rx| async move {
+            rx.recv().await.map(|event| (Ok(event), rx))
+        }))
     }
     fn can_reuse_context_usage(
         &self,
@@ -469,33 +950,14 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         &self,
         input: ProviderAdapterV2TurnInput,
     ) -> Result<(), ProviderAdapterV2Error> {
-        let thread = native_id(&input.provider_thread)?.to_owned();
-        let policy = runtime_policy(&input.runtime_policy, &self.config.cwd);
-        let model = input.model_selection.model.as_str();
-        let native_turn = self
-            .session
-            .start_turn(
-                &thread,
-                turn_input(&input.message.text),
-                model,
-                option(&input.model_selection, "reasoningEffort"),
-                option(&input.model_selection, "serviceTier"),
-                &policy,
-            )
-            .await
-            .map_err(|e| {
-                error(
-                    ProviderAdapterErrorKind::TurnStart {
-                        driver: self.driver.clone(),
-                        thread_id: input.thread_id.clone(),
-                        provider_thread_id: input.provider_thread.id.clone(),
-                        run_id: input.run_id.clone(),
-                    },
-                    e,
-                )
-            })?;
-        self.state.lock().turns.insert(native_turn, input);
-        Ok(())
+        // A `/goal` message runs through Codex's goal API, not a turn of its own.
+        if input.message.attachments.is_empty()
+            && input.restart_continuation_of_run_id.is_none()
+            && let Some(command) = goal::parse_command(&input.message.text)
+        {
+            return self.run_goal_command(input, command).await;
+        }
+        self.start_native_turn(input).await
     }
     async fn steer_turn(
         &self,
@@ -537,19 +999,48 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             .find(|(id, _)| derive::provider_turn(&self.driver, id) == input.provider_turn_id)
             .map(|(id, _)| id.clone())
             .unwrap_or_else(|| input.provider_turn_id.as_str().to_owned());
+        let interrupt_error = |e| {
+            error(
+                ProviderAdapterErrorKind::Interrupt {
+                    driver: self.driver.clone(),
+                    provider_thread_id: input.provider_thread.id.clone(),
+                    provider_turn_id: input.provider_turn_id.clone(),
+                },
+                e,
+            )
+        };
         self.session
             .interrupt_turn(&thread, &native_turn)
             .await
-            .map_err(|e| {
-                error(
-                    ProviderAdapterErrorKind::Interrupt {
-                        driver: self.driver.clone(),
-                        provider_thread_id: input.provider_thread.id,
-                        provider_turn_id: input.provider_turn_id,
-                    },
-                    e,
-                )
+            .map_err(interrupt_error)?;
+        // Commands still running under this turn keep their background terminal
+        // alive after the turn stops, so Codex needs an explicit terminate.
+        let processes: Vec<String> = self
+            .state
+            .lock()
+            .turns
+            .get(&native_turn)
+            .map(|turn| {
+                turn.running_commands
+                    .iter()
+                    .filter_map(|command| command.process_id.clone())
+                    .collect()
             })
+            .unwrap_or_default();
+        for process_id in processes {
+            // Upstream calls this through the raw client: the method is not in the
+            // pinned typed surface.
+            self.session
+                .client()
+                .raw
+                .request(
+                    "thread/backgroundTerminals/terminate",
+                    Some(json!({"threadId": thread, "processId": process_id})),
+                )
+                .await
+                .map_err(interrupt_error)?;
+        }
+        Ok(())
     }
     async fn respond_to_runtime_request(
         &self,
@@ -626,35 +1117,29 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         input: ProviderAdapterV2RollbackThreadInput,
     ) -> Result<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error> {
         let native = native_id(&input.provider_thread)?.to_owned();
-        let count = match &input.target {
-            ProviderAdapterV2RollbackTarget::ThreadStart { .. } => input
-                .provider_thread_turns
-                .iter()
-                .filter(|t| {
-                    matches!(
-                        t.status,
-                        OrchestrationV2ProviderTurnStatus::Completed
-                            | OrchestrationV2ProviderTurnStatus::Interrupted
-                            | OrchestrationV2ProviderTurnStatus::Failed
-                            | OrchestrationV2ProviderTurnStatus::Cancelled
-                    )
-                })
-                .count(),
-            ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => input
-                .provider_thread_turns
-                .iter()
-                .filter(|t| {
-                    t.ordinal > provider_turn.ordinal
-                        && matches!(
-                            t.status,
-                            OrchestrationV2ProviderTurnStatus::Completed
-                                | OrchestrationV2ProviderTurnStatus::Interrupted
-                                | OrchestrationV2ProviderTurnStatus::Failed
-                                | OrchestrationV2ProviderTurnStatus::Cancelled
-                        )
-                })
-                .count(),
+        let count = rollback_turn_count(&input).map_err(|cause| {
+            error(
+                ProviderAdapterErrorKind::RollbackThread {
+                    driver: self.driver.clone(),
+                    provider_thread_id: input.provider_thread.id.clone(),
+                    checkpoint_id: None,
+                },
+                cause,
+            )
+        })?;
+        let head_ref = match &input.target {
+            ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => {
+                provider_turn.native_turn_ref.clone()
+            }
+            ProviderAdapterV2RollbackTarget::ThreadStart { .. } => None,
         };
+        // Upstream returns the idle thread without a request when nothing reverts.
+        if count == 0 {
+            let mut thread = input.provider_thread;
+            thread.status = OrchestrationV2ProviderThreadStatus::Idle;
+            thread.native_conversation_head_ref = head_ref;
+            return Ok(snapshot(thread, None));
+        }
         let native_thread = self
             .session
             .revert_thread(&native, count as u64)
@@ -672,12 +1157,7 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
         let mut thread = input.provider_thread;
         thread.status = OrchestrationV2ProviderThreadStatus::Idle;
         thread.updated_at = time(native_thread.get("updatedAt"));
-        thread.native_conversation_head_ref = match input.target {
-            ProviderAdapterV2RollbackTarget::ProviderTurn { provider_turn, .. } => {
-                provider_turn.native_turn_ref
-            }
-            _ => None,
-        };
+        thread.native_conversation_head_ref = head_ref;
         Ok(snapshot(thread, Some(native_thread)))
     }
     async fn fork_thread(
@@ -690,14 +1170,17 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
             input.model_selection.as_ref().map(|m| m.model.as_str()),
         );
         params["threadId"] = json!(native);
-        if let (Some(target), Some(turns)) = (&input.provider_turn_id, &input.source_provider_turns)
-            && let Some(turn) = turns.iter().find(|turn| &turn.id == target)
-            && let Some(id) = turn
-                .native_turn_ref
-                .as_ref()
-                .and_then(|r| r.native_id.as_ref())
-        {
-            params["lastTurnId"] = json!(id.as_str());
+        let last_turn = fork_last_turn(&input).map_err(|cause| {
+            error(
+                ProviderAdapterErrorKind::ForkThread {
+                    driver: self.driver.clone(),
+                    provider_thread_id: input.source_provider_thread.id.clone(),
+                },
+                cause,
+            )
+        })?;
+        if let Some(last_turn) = last_turn {
+            params["lastTurnId"] = json!(last_turn);
         }
         let response = self
             .session
@@ -738,192 +1221,9 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
     }
 }
 
-fn project_event(raw: CodexEvent, state: &Mutex<RuntimeState>) -> Vec<ProviderAdapterV2Event> {
-    let Some(native_turn) = raw
-        .params
-        .pointer("/turn/id")
-        .and_then(Value::as_str)
-        .or_else(|| raw.params.get("turnId").and_then(Value::as_str))
-    else {
-        return vec![];
-    };
-    let Some(context) = state.lock().turns.get(native_turn).cloned() else {
-        return vec![];
-    };
-    if raw.method == "item/completed" {
-        return assistant_message_item(&raw, native_turn, &context, state)
-            .into_iter()
-            .collect();
-    }
-    let ordinal =
-        PositiveInt::new(context.provider_turn_ordinal.max(1) as u64).expect("positive ordinal");
-    let provider_turn_id = derive::provider_turn(&driver(), native_turn);
-    let (status, terminal) = match raw.method.as_str() {
-        "turn/started" => (OrchestrationV2ProviderTurnStatus::Running, None),
-        "turn/completed" => {
-            let (status, terminal) =
-                match raw.params.pointer("/turn/status").and_then(Value::as_str) {
-                    Some("completed") => (
-                        OrchestrationV2ProviderTurnStatus::Completed,
-                        ProviderAdapterV2TurnTerminalStatus::Completed,
-                    ),
-                    Some("interrupted") => (
-                        OrchestrationV2ProviderTurnStatus::Interrupted,
-                        ProviderAdapterV2TurnTerminalStatus::Interrupted,
-                    ),
-                    Some("cancelled") => (
-                        OrchestrationV2ProviderTurnStatus::Cancelled,
-                        ProviderAdapterV2TurnTerminalStatus::Cancelled,
-                    ),
-                    _ => (
-                        OrchestrationV2ProviderTurnStatus::Failed,
-                        ProviderAdapterV2TurnTerminalStatus::Failed,
-                    ),
-                };
-            (status, Some(terminal))
-        }
-        _ => return vec![],
-    };
-    let turn = OrchestrationV2ProviderTurn {
-        id: provider_turn_id.clone(),
-        provider_thread_id: context.provider_thread.id.clone(),
-        node_id: context.root_node_id.clone(),
-        run_attempt_id: Some(context.attempt_id.clone()),
-        native_turn_ref: Some(native_ref(native_turn)),
-        ordinal,
-        status,
-        started_at: Some(time(raw.params.pointer("/turn/startedAt"))),
-        completed_at: terminal.map(|_| time(raw.params.pointer("/turn/completedAt"))),
-        token_usage: None,
-        turn_token_usage: None,
-    };
-    let mut events = vec![ProviderAdapterV2Event::ProviderTurnUpdated {
-        driver: driver(),
-        thread_id: Some(context.thread_id.clone()),
-        provider_turn: turn,
-    }];
-    if let Some(status) = terminal {
-        events.push(ProviderAdapterV2Event::TurnTerminal {
-            driver: driver(),
-            provider_thread_id: context.provider_thread.id,
-            provider_turn_id,
-            run_ordinal: PositiveInt::new(context.run_ordinal.max(1) as u64)
-                .expect("positive ordinal"),
-            status,
-            failure: None,
-            failure_item_ordinal: None,
-            retry: None,
-            retry_started_at: None,
-            thread_disposition: OrchestrationV2ProviderThreadDisposition::Reusable,
-        });
-        state.lock().turns.remove(native_turn);
-    }
-    events
-}
-
-/// Turn-item position, as upstream's `resolveItemPosition`: the provider turn
-/// ordinal times 100, plus the item's first-seen position within the turn.
-fn item_ordinal(
-    state: &Mutex<RuntimeState>,
-    native_turn: &str,
-    native_item: &str,
-    provider_turn_ordinal: i64,
-) -> u64 {
-    let mut state = state.lock();
-    let items = state
-        .item_positions
-        .entry(native_turn.to_owned())
-        .or_default();
-    let index = match items.iter().position(|id| id == native_item) {
-        Some(index) => index,
-        None => {
-            items.push(native_item.to_owned());
-            items.len() - 1
-        }
-    };
-    provider_turn_ordinal.max(0) as u64 * 100 + index as u64 + 1
-}
-
-/// `item/completed` for an agent message becomes the assistant turn item.
-/// Streaming deltas are not mapped yet; the completed text is authoritative.
-fn assistant_message_item(
-    raw: &CodexEvent,
-    native_turn: &str,
-    context: &ProviderAdapterV2TurnInput,
-    state: &Mutex<RuntimeState>,
-) -> Option<ProviderAdapterV2Event> {
-    use turin_contracts::orchestration_v2::{
-        OrchestrationV2TurnItem, OrchestrationV2TurnItemStatus,
-    };
-    let item = raw.params.get("item")?;
-    if item.get("type").and_then(Value::as_str) != Some("agentMessage") {
-        return None;
-    }
-    let native_item = item.get("id").and_then(Value::as_str)?;
-    let text = item
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let now = UtcDateTime::now();
-    let turn_item = OrchestrationV2TurnItem::AssistantMessage {
-        tool_non_execution_kind: None,
-        tool_surface: None,
-        tool_icon: None,
-        tool_source: None,
-        id: derive::turn_item_from_provider_item(&driver(), native_item),
-        thread_id: context.thread_id.clone(),
-        run_id: Some(context.run_id.clone()),
-        node_id: Some(derive::node_from_provider_item(&driver(), native_item)),
-        provider_thread_id: Some(context.provider_thread.id.clone()),
-        provider_turn_id: Some(derive::provider_turn(&driver(), native_turn)),
-        native_item_ref: Some(native_ref(native_item)),
-        parent_item_id: None,
-        ordinal: item_ordinal(
-            state,
-            native_turn,
-            native_item,
-            context.provider_turn_ordinal,
-        ),
-        status: OrchestrationV2TurnItemStatus::Completed,
-        title: None,
-        started_at: None,
-        completed_at: Some(now),
-        updated_at: now,
-        message_id: derive::message_from_provider_item(&driver(), native_item),
-        text,
-        attachments: None,
-        streaming: false,
-    };
-    Some(ProviderAdapterV2Event::TurnItemUpdated {
-        driver: driver(),
-        turn_item,
-    })
-}
-
-fn project_request(
-    request: PendingRequest,
-    state: &Mutex<RuntimeState>,
-    session_id: &ProviderSessionId,
-) -> Vec<ProviderAdapterV2Event> {
-    use turin_contracts::orchestration_v2::{
-        OrchestrationV2ResponseCapability, OrchestrationV2RuntimeRequest,
-        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-    };
-    let native_turn = request.params.get("turnId").and_then(Value::as_str);
-    let context = native_turn.and_then(|id| state.lock().turns.get(id).cloned());
-    let Some(context) = context else {
-        return vec![];
-    };
-    let native_req = request
-        .params
-        .get("approvalId")
-        .or_else(|| request.params.get("itemId"))
-        .and_then(Value::as_str);
-    let provider_turn_id = native_turn.map(|id| derive::provider_turn(&driver(), id));
-    let id = IdAllocator.runtime_request(&driver(), provider_turn_id.as_ref(), native_req);
-    state.lock().requests.insert(id.clone(), request.id);
-    let kind = match request.method.as_str() {
+/// The runtime request kind for a Codex server request method.
+fn runtime_kind(method: &str) -> OrchestrationV2RuntimeRequestKind {
+    match method {
         "item/fileChange/requestApproval" | "applyPatchApproval" => {
             OrchestrationV2RuntimeRequestKind::FileChange
         }
@@ -931,25 +1231,197 @@ fn project_request(
         "mcpServer/elicitation/request" => OrchestrationV2RuntimeRequestKind::McpElicitation,
         "item/tool/requestUserInput" => OrchestrationV2RuntimeRequestKind::UserInput,
         _ => OrchestrationV2RuntimeRequestKind::Command,
+    }
+}
+
+/// The approval kind an approval node is raised for. Plan questions are not
+/// approvals, so they have none.
+fn approval_kind(method: &str) -> Option<ProviderRequestKind> {
+    match runtime_kind(method) {
+        OrchestrationV2RuntimeRequestKind::Command => Some(ProviderRequestKind::Command),
+        OrchestrationV2RuntimeRequestKind::FileRead => Some(ProviderRequestKind::FileRead),
+        OrchestrationV2RuntimeRequestKind::FileChange => Some(ProviderRequestKind::FileChange),
+        OrchestrationV2RuntimeRequestKind::Permission => Some(ProviderRequestKind::Permission),
+        OrchestrationV2RuntimeRequestKind::McpElicitation => {
+            Some(ProviderRequestKind::McpElicitation)
+        }
+        OrchestrationV2RuntimeRequestKind::UserInput
+        | OrchestrationV2RuntimeRequestKind::DynamicToolCall
+        | OrchestrationV2RuntimeRequestKind::AuthRefresh => None,
+    }
+}
+
+/// Upstream `item/tool/requestUserInput`: a plan question is answered on the turn
+/// that asked it, with its node and item under that turn's root.
+fn project_user_input(
+    request: PendingRequest,
+    state: &mut RuntimeState,
+    session_id: &ProviderSessionId,
+) -> Vec<ProviderAdapterV2Event> {
+    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
+        return vec![];
+    };
+    let Some(turn) = state.turns.get_mut(native_turn) else {
+        return vec![];
+    };
+    let native_item = request
+        .params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let questions = items::codex_questions(request.params.get("questions").unwrap_or(&Value::Null));
+    let artifacts = items::user_input_request(
+        turn,
+        native_item,
+        native_item,
+        questions,
+        Some(session_id.clone()),
+        UtcDateTime::now(),
+    );
+    let thread_id = turn.input.thread_id.clone();
+    state
+        .requests
+        .insert(artifacts.request.id.clone(), request.id);
+    vec![
+        ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node: artifacts.node,
+        },
+        ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item: artifacts.turn_item,
+        },
+        ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: driver(),
+            thread_id: Some(thread_id),
+            runtime_request: artifacts.request,
+        },
+    ]
+}
+
+/// Upstream `buildApprovalRequestArtifacts`. A request from a subagent is asked on
+/// the top-level turn that owns it, under the subagent that asked, so the user can
+/// answer where they can see it. Native subagent threads are hidden.
+fn project_request(
+    request: PendingRequest,
+    state: &mut RuntimeState,
+    session_id: &ProviderSessionId,
+) -> Vec<ProviderAdapterV2Event> {
+    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
+        return vec![];
+    };
+    if runtime_kind(&request.method) == OrchestrationV2RuntimeRequestKind::UserInput {
+        return project_user_input(request, state, session_id);
+    }
+    let Some(context) = state.turns.get(native_turn) else {
+        return vec![];
+    };
+    let owner_native = subagent::owner_native_turn(state, context);
+    let native_item = request.params.get("itemId").and_then(Value::as_str);
+    let native_req = request
+        .params
+        .get("approvalId")
+        .or_else(|| request.params.get("itemId"))
+        .and_then(Value::as_str);
+    let parent_node = subagent::subagent_node(state, context).unwrap_or_else(|| {
+        derive::node_from_provider_item(&driver(), native_item.or(native_req).unwrap_or_default())
+    });
+    let Some(owner) = state.turns.get_mut(&owner_native) else {
+        return vec![];
+    };
+    let now = UtcDateTime::now();
+    let provider_turn_id = derive::provider_turn(&driver(), &owner_native);
+    let id = IdAllocator.runtime_request(&driver(), Some(&provider_turn_id), native_req);
+    state.requests.insert(id.clone(), request.id);
+    let kind = runtime_kind(&request.method);
+    let Some(item_kind) = approval_kind(&request.method) else {
+        return vec![];
+    };
+    let ordinal_key = format!(
+        "{}:approval:{}",
+        native_item.or(native_req).unwrap_or_default(),
+        native_req.unwrap_or_default()
+    );
+    let (ordinal, _) = items::resolve_position(owner, &ordinal_key, None, now);
+    let prompt = request
+        .params
+        .get("reason")
+        .or_else(|| request.params.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let node_id = derive::approval_node(&id);
+    let turn_item_id = derive::approval_turn_item(&id);
+    let node = OrchestrationV2ExecutionNode {
+        id: node_id.clone(),
+        thread_id: owner.input.thread_id.clone(),
+        run_id: owner.run_id(),
+        parent_node_id: Some(parent_node),
+        root_node_id: owner.input.root_node_id.clone(),
+        kind: OrchestrationV2ExecutionNodeKind::ApprovalRequest,
+        status: OrchestrationV2ExecutionNodeStatus::Waiting,
+        counts_for_run: false,
+        provider_thread_id: Some(owner.input.provider_thread.id.clone()),
+        provider_turn_id: Some(provider_turn_id.clone()),
+        native_item_ref: native_item.map(items::native_item_ref),
+        runtime_request_id: Some(id.clone()),
+        checkpoint_scope_id: None,
+        started_at: Some(now),
+        completed_at: None,
+    };
+    let turn_item = OrchestrationV2TurnItem::ApprovalRequest {
+        tool_non_execution_kind: None,
+        tool_surface: None,
+        tool_icon: None,
+        tool_source: None,
+        id: turn_item_id,
+        thread_id: owner.input.thread_id.clone(),
+        run_id: owner.run_id(),
+        node_id: Some(node_id.clone()),
+        provider_thread_id: Some(owner.input.provider_thread.id.clone()),
+        provider_turn_id: Some(provider_turn_id.clone()),
+        native_item_ref: native_item.map(items::native_item_ref),
+        parent_item_id: None,
+        ordinal,
+        status: OrchestrationV2TurnItemStatus::Waiting,
+        title: None,
+        started_at: Some(now),
+        completed_at: None,
+        updated_at: now,
+        request_id: id.clone(),
+        request_kind: item_kind,
+        prompt,
+        app_name: None,
+        options: None,
     };
     let runtime_request = OrchestrationV2RuntimeRequest {
         id,
-        node_id: context.root_node_id,
-        provider_turn_id,
+        node_id,
+        provider_turn_id: Some(provider_turn_id),
         native_request_ref: native_req.map(native_ref),
         kind,
         status: OrchestrationV2RuntimeRequestStatus::Pending,
         response_capability: OrchestrationV2ResponseCapability::Live {
             provider_session_id: session_id.clone(),
         },
-        created_at: UtcDateTime::now(),
+        created_at: now,
         resolved_at: None,
         decision: None,
         answers: None,
     };
-    vec![ProviderAdapterV2Event::RuntimeRequestUpdated {
-        driver: driver(),
-        thread_id: Some(context.thread_id),
-        runtime_request,
-    }]
+    let thread_id = owner.input.thread_id.clone();
+    vec![
+        ProviderAdapterV2Event::NodeUpdated {
+            driver: driver(),
+            node,
+        },
+        ProviderAdapterV2Event::TurnItemUpdated {
+            driver: driver(),
+            turn_item,
+        },
+        ProviderAdapterV2Event::RuntimeRequestUpdated {
+            driver: driver(),
+            thread_id: Some(thread_id),
+            runtime_request,
+        },
+    ]
 }

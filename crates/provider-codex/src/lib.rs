@@ -20,11 +20,17 @@ pub mod codex_skills;
 pub mod codex_turn_token_usage;
 pub mod codex_usage_limits;
 pub mod driver;
+pub mod goal;
+pub mod items;
 pub mod orchestration_adapter;
 pub mod params;
+pub mod projection;
 #[cfg(test)]
 mod replay_tests;
+pub mod retry;
 pub mod runtime;
+pub mod subagent;
+pub mod tool_presentation;
 
 pub use driver::CodexDriver;
 pub use orchestration_adapter::CodexProviderAdapter;

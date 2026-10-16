@@ -29,6 +29,8 @@ use crate::projection::turn_item;
 mod finalize;
 #[cfg(test)]
 mod ingestion_tests;
+#[cfg(test)]
+mod routing_tests;
 mod service;
 #[cfg(test)]
 mod start_tests;

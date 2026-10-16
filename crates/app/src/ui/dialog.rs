@@ -184,7 +184,7 @@ pub fn dialog_panel(
         .id(id)
         .flex()
         .flex_col()
-        .flex_1()
+        .flex_auto()
         .min_h_0()
         .overflow_y_scroll()
         .gap_4()

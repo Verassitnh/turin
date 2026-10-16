@@ -22,6 +22,8 @@ mod ui;
 use gpui_kit::*;
 
 use components::app_sidebar_layout::{self, AppSidebarLayout};
+use components::onboarding::first_run_gate::FirstRunGate;
+use components::onboarding::mock_source::{FirstRunScenario, MockOnboardingBackend};
 
 /// Upstream's Electron window: 1100×780 default, 840×620 minimum,
 /// `titleBarStyle: "hiddenInset"` with the traffic lights centred in the
@@ -127,7 +129,7 @@ fn main() {
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);
             gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-                cx.new(|cx| {
+                let layout = cx.new(|cx| {
                     let mut layout = AppSidebarLayout::new(window, cx);
                     layout.set_right_panel_open(right_panel);
                     // Screenshot harness: `TURIN_PAGE=usage` opens the Usage route.
@@ -135,7 +137,10 @@ fn main() {
                         layout.open_usage(window, cx);
                     }
                     layout
-                })
+                });
+                // T22 swaps the mock backend for the live settings and workspace state.
+                let backend = MockOnboardingBackend::shared(FirstRunScenario::from_env());
+                cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
             })
             .expect("failed to open window");
             schedule_screenshot(cx);

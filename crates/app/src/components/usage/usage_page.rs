@@ -63,7 +63,7 @@ use super::usage_shortcuts::{
     shortcut_label_for_command,
 };
 use super::usage_ui::{
-    figure_opacity, inline_button, menu_checkbox_item, menu_separator, rich_tooltip,
+    figure_opacity, inline_button, menu_checkbox_item, menu_item, menu_separator, rich_tooltip,
 };
 use super::view_model::{
     EnvironmentSelection, EnvironmentUsageStatus, UsageView, UsageViewMemory, compute_usage_view,
@@ -200,7 +200,7 @@ impl UsagePage {
     }
 
     /// Dev override for screenshots (`TURIN_USAGE_TAB`, `TURIN_USAGE_WINDOW`).
-    pub fn apply_dev_overrides(&mut self, cx: &mut Context<Self>) {
+    pub fn apply_dev_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Ok(tab) = std::env::var("TURIN_USAGE_TAB") {
             self.preferences.metric = match tab.as_str() {
                 "cost" => UsagePageMetric::Cost,
@@ -219,7 +219,55 @@ impl UsagePage {
         if std::env::var("TURIN_USAGE_BREAKDOWN").is_ok_and(|value| value == "time") {
             self.breakdown = Breakdown::Time;
         }
+        match std::env::var("TURIN_USAGE_OPEN").as_deref() {
+            Ok("env-menu") => self.menu = Some(OpenMenu::Environment),
+            Ok("provider-menu") => self.menu = Some(OpenMenu::Provider),
+            Ok("metric-menu") => self.menu = Some(OpenMenu::Metric),
+            Ok("period-menu") => self.menu = Some(OpenMenu::Period),
+            Ok(open @ ("model-dialog" | "price-dialog" | "limits-popup")) => {
+                let open = open.to_owned();
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(700))
+                        .await;
+                    this.update_in(cx, |this, window, cx| match open.as_str() {
+                        "model-dialog" => this.demo_model_dialog(window, cx),
+                        "price-dialog" => {
+                            this.open_price_dialog(Some("deepseek-v4-pro".into()), window, cx)
+                        }
+                        _ => this
+                            .limits
+                            .update(cx, |limits, cx| limits.demo_open_first(cx)),
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            _ => {}
+        }
         cx.notify();
+    }
+
+    fn demo_model_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let environments = self.backend.usage_environments(&self.window_input);
+        let merged = super::view_model::merge_answered_usage(&environments, None);
+        let Some(model) = merged.models.iter().find(|m| m.model == "gpt-5.5").cloned() else {
+            return;
+        };
+        let w = &self.window_input;
+        let chart_window = UsageChartWindow {
+            days: enumerate_days(w.since_day.as_str(), w.until_day.as_str()),
+            hours: Vec::new(),
+            resolution: UsageResolution::Day,
+            time_zone: w.time_zone.as_str().to_owned(),
+            reference_time: None,
+        };
+        let metric = if self.preferences.metric == UsagePageMetric::Tokens {
+            UsageChartMetric::Tokens
+        } else {
+            UsageChartMetric::Cost
+        };
+        self.open_model_dialog(model, chart_window, metric, environments, window, cx);
     }
 
     fn hidden_providers(&self) -> HashSet<UsageProviderKind> {
@@ -1171,9 +1219,8 @@ impl UsagePage {
             }
             let prices_entity = entity.clone();
             content = content.child(menu_separator(&theme)).child(
-                menu_checkbox_item(
+                menu_item(
                     "usage-model-prices",
-                    false,
                     div()
                         .flex()
                         .items_center()
@@ -1845,7 +1892,7 @@ impl UsagePage {
                     .child(
                         div()
                             .flex()
-                            .items_baseline()
+                            .items_center()
                             .justify_between()
                             .gap_4()
                             .child(
@@ -2075,7 +2122,7 @@ impl UsagePage {
                 UsageShareBar::new(
                     "Tokens by type",
                     token_type_segments(merged.into()),
-                    |value| format_tokens(value),
+                    format_tokens,
                 )
                 .into_any_element(),
             );
@@ -2377,17 +2424,13 @@ impl UsagePage {
                         .into_any_element(),
                 );
             }
-            let last = d.breakdown_periods.len().saturating_sub(1);
             for (index, period) in d.breakdown_periods.iter().enumerate() {
                 rows.push(
                     div()
                         .id(SharedString::from(format!("usage-period-row:{index}")))
                         .flex()
                         .border_b_1()
-                        .border_color(with_alpha(
-                            theme.border,
-                            if index == last { 0.5 } else { 0.5 },
-                        ))
+                        .border_color(with_alpha(theme.border, 0.5))
                         .hover({
                             let hover = with_alpha(theme.muted, 0.5);
                             move |style| style.bg(hover)

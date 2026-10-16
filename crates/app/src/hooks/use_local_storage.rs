@@ -5,6 +5,9 @@
 //! [`MemoryLocalStorage`] stands in until the settings task wires a file-backed
 //! store (upstream keys are kept verbatim so a later import can find them).
 
+// Ported whole (rule 3); the file-backed store (settings task) uses the rest.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

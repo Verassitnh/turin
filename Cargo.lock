@@ -7331,11 +7331,14 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "similar",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "turin-contracts",
+ "turin-persistence",
+ "turin-shared",
  "unicode-normalization",
  "url",
 ]
@@ -7685,6 +7688,28 @@ dependencies = [
  "tokio",
  "tracing",
  "turin-contracts",
+]
+
+[[package]]
+name = "turin-text-generation"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "libc",
+ "pretty_assertions",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "turin-acp",
+ "turin-contracts",
+ "turin-provider-core",
+ "turin-provider-opencode",
+ "url",
 ]
 
 [[package]]

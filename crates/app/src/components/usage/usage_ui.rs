@@ -194,3 +194,26 @@ pub fn compact_input(
                 .disabled(disabled),
         )
 }
+
+/// `MenuItem`: `min-h-7 rounded-sm px-2 py-1 text-sm`, no check column.
+pub fn menu_item(
+    id: impl Into<ElementId>,
+    child: impl IntoElement,
+    theme: &AppTheme,
+) -> Stateful<Div> {
+    let accent = theme.accent;
+    let accent_fg = theme.accent_foreground;
+    div()
+        .id(id)
+        .flex()
+        .min_h(rems(1.75))
+        .items_center()
+        .rounded(px(6.))
+        .py_1()
+        .px_2()
+        .cursor(CursorStyle::PointingHand)
+        .text_size(TEXT_SM.size)
+        .text_color(theme.foreground)
+        .hover(move |style| style.bg(accent).text_color(accent_fg))
+        .child(child)
+}

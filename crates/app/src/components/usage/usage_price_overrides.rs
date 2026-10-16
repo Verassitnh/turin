@@ -12,9 +12,9 @@ use std::rc::Rc;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, deferred, div, px, relative, rems,
+    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, deferred, div, px, relative, rems,
 };
 use indexmap::IndexMap;
 use turin_contracts::EnvironmentId;
@@ -665,6 +665,7 @@ impl Render for UsagePriceOverrides {
             div()
                 .h(rems(2.5))
                 .flex()
+                .flex_shrink_0()
                 .items_center()
                 .px_2()
                 .font_weight(FontWeight::MEDIUM)

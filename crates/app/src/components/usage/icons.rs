@@ -7,6 +7,7 @@ use gpui_kit::assets::icon_assets;
 icon_assets!(
     pub UsageIcons,
     [
+        Database,
         Gauge,
         Monitor,
         RotateCcw,

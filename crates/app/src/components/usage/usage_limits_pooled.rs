@@ -205,13 +205,16 @@ struct RedeemState {
     status: Option<String>,
 }
 
+/// Builds the Cursor enable prompt among the pools.
+pub type CursorPrompt = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
 pub struct LimitsProps {
     /// Already narrowed to the selected environments and visible providers.
     pub environments: Vec<LimitsEnvironment>,
     /// Epoch milliseconds the page advances on explicit refresh.
     pub now: f64,
     pub timestamp_format: TimestampFormat,
-    pub cursor_prompt: Option<Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>>,
+    pub cursor_prompt: Option<CursorPrompt>,
 }
 
 #[derive(Clone, Default)]
@@ -251,6 +254,8 @@ pub struct UsageLimitsPooled {
     width_probes: HashMap<String, WidthProbe>,
     revealed: HashSet<String>,
     redeem: HashMap<String, RedeemState>,
+    /// First segment drawn, for the screenshot harness.
+    first_key: Option<String>,
 }
 
 impl UsageLimitsPooled {
@@ -266,7 +271,15 @@ impl UsageLimitsPooled {
             width_probes: HashMap::new(),
             revealed: HashSet::new(),
             redeem: HashMap::new(),
+            first_key: None,
         }
+    }
+
+    /// Screenshot harness: opens the first segment's popover and pins it.
+    pub fn demo_open_first(&mut self, cx: &mut Context<Self>) {
+        self.popup = self.first_key.clone();
+        self.pinned = true;
+        cx.notify();
     }
 
     pub fn set_props(&mut self, props: LimitsProps) {
@@ -578,6 +591,7 @@ impl UsageLimitsPooled {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn pool_segment(
         &mut self,
         pool_key: &str,
@@ -593,6 +607,9 @@ impl UsageLimitsPooled {
         let window_data = &member.window;
         let now = self.props.now;
         let key = format!("{pool_key}:{}", account.key);
+        if self.first_key.is_none() {
+            self.first_key = Some(key.clone());
+        }
         let remaining = remaining_percent(window_data);
         let resets_in = format_resets_in(window_data, now);
         let credits = account

@@ -1,5 +1,9 @@
 //! Ports of upstream/apps/web/src/components/usage.
 
+// Ports of the upstream components are complete ahead of their callers (the
+// live backend wiring, the composer's limits panel); unused pieces are intentional.
+#![allow(dead_code)]
+
 pub mod backend;
 pub mod icons;
 pub mod mock_source;

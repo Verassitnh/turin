@@ -352,8 +352,10 @@ pub fn reset_credits_summary(
 
 /// The confirm for a redeem. Redeeming spends a credit the provider granted the
 /// user, so it never fires on a bare click.
+type ConfirmHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
 pub struct ResetCreditConfirm {
-    on_confirm: Rc<dyn Fn(&mut Window, &mut App)>,
+    on_confirm: ConfirmHandler,
     disabled: bool,
 }
 

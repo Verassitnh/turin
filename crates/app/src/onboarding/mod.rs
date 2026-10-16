@@ -6,6 +6,9 @@
 //! and T3 Connect relays for the cut Connect step) and `useProjectScans.ts`
 //! (an Effect atom subscription; the wizard's scan seam replaces it).
 
+// The hosted-static decision is ported (and tested) with the rest of firstRun.logic.
+#![allow(dead_code)]
+
 pub mod first_run_logic;
 pub mod project_import_logic;
 pub mod provider_readiness_logic;

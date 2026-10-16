@@ -40,21 +40,26 @@ pub struct UsageChartWindow {
     pub reference_time: Option<String>,
 }
 
+type SetPrice = Rc<dyn Fn(&mut Window, &mut App)>;
+
 pub struct UsageModelDialog {
     pub model: ModelTotals,
     pub environments: Vec<EnvironmentUsageStatus>,
     pub metric: UsageChartMetric,
     pub chart_window: UsageChartWindow,
-    pub on_set_price: Rc<dyn Fn(&mut Window, &mut App)>,
+    pub on_set_price: SetPrice,
 }
 
 /// What the faster speeds cost above standard rates, beside the speed bar.
 pub fn speed_premium(premium_usd: f64, cx: &App) -> AnyElement {
     let theme = cx.app_theme();
     div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
         .text_size(TEXT_XS.size)
         .text_color(theme.muted_foreground)
-        .child("Premium ")
+        .child("Premium")
         .child(
             div()
                 .text_color(theme.foreground)
@@ -130,7 +135,7 @@ impl Render for UsageModelDialog {
             UsageShareBar::new(
                 "Tokens by type",
                 token_type_segments((&model.tokens).into()),
-                |value| format_tokens(value),
+                format_tokens,
             )
             .into_any_element(),
         );

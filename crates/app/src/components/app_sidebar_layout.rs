@@ -160,7 +160,7 @@ impl AppSidebarLayout {
         let backend = MockUsageBackend::shared(UsageScenario::from_env());
         let page = cx.new(|cx| {
             let mut page = UsagePage::new(backend, MemoryLocalStorage::shared(), window, cx);
-            page.apply_dev_overrides(cx);
+            page.apply_dev_overrides(window, cx);
             page
         });
         let subscription = cx.subscribe(&page, |this, _, event: &UsagePageEvent, cx| match event {

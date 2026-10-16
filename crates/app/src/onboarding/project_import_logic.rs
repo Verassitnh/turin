@@ -617,7 +617,11 @@ mod tests {
             HashMap::from([(first.clone(), "first-project")]);
         assert!(!completed.contains_key(&second));
         assert_eq!(
-            resolve_onboarding_landing_project(&[second.clone()], &completed, &completed),
+            resolve_onboarding_landing_project(
+                std::slice::from_ref(&second),
+                &completed,
+                &completed
+            ),
             None
         );
         completed.insert(second.clone(), "second-project");

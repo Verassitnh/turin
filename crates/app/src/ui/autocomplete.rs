@@ -153,7 +153,6 @@ impl RenderOnce for AutocompletePopup {
                     .top_full()
                     .left_0()
                     .mt(px(4.))
-                    .relative()
                     .min_w_full()
                     .max_h(rems(23.))
                     .flex()

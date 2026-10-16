@@ -14,6 +14,7 @@ pub mod kbd;
 pub mod label;
 pub mod menu;
 pub mod popover;
+pub mod radio_group;
 pub mod scroll_area;
 pub mod separator;
 pub mod sidebar;

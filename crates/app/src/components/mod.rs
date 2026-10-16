@@ -12,6 +12,9 @@ pub mod command_palette;
 pub mod drag_region;
 pub mod git_actions_control;
 pub mod jetbrains_icons;
+// Shown by the thread route when no thread is open; the shell always routes a thread today.
+#[allow(dead_code)]
+pub mod no_active_thread_state;
 pub mod project_favicon;
 pub mod project_monogram;
 pub mod prompt_links;

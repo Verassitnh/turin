@@ -29,6 +29,9 @@ mod timestamp_format;
 #[allow(dead_code)]
 mod ui;
 mod utils;
+// The thread route does not look bare filenames up yet.
+#[allow(dead_code)]
+mod workspace_basename_lookup;
 
 use gpui_kit::*;
 

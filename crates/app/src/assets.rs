@@ -18,6 +18,7 @@ icon_assets!(
         ArrowDownUp,
         ArrowLeft,
         ArrowRight,
+        ArrowUpLeft,
         ArrowRightLeft,
         ArrowUp,
         Blocks,

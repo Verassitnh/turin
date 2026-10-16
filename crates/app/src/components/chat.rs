@@ -21,6 +21,9 @@ pub mod context_window;
 // Chat-lane geometry for the canvas.
 pub mod chat_canvas_layout;
 pub mod provider_status_banner;
+// Replaces the composer on a provider-native subagent thread; no thread route reads it yet.
+#[allow(dead_code)]
+pub mod provider_subagent_bar;
 pub mod subagent_tooltip_content;
 pub mod thread_error_banner;
 // The composer notice for a usage-limit stop; the composer source owns its action state.
@@ -42,6 +45,9 @@ pub mod composer_pending_panels;
 // Embedded-script scan for command and tool views; no view calls it yet.
 #[allow(dead_code)]
 pub mod embedded_scripts;
+// The link context menu; the markdown link views do not open it yet.
+#[allow(dead_code)]
+pub mod external_link_context_menu;
 // Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
 pub mod markdown;
 #[allow(dead_code)]
@@ -76,6 +82,11 @@ pub mod timeline;
 pub mod timeline_message_rows;
 #[allow(dead_code)]
 pub mod timeline_minimap_items;
+// Gesture routing for the minimap and the timeline; the views do not call it yet.
+#[allow(dead_code)]
+pub mod timeline_minimap_wheel;
+#[allow(dead_code)]
+pub mod timeline_scroll_target;
 pub mod timeline_work_rows;
 // Scroll anchoring state for the timeline view; the view does not read it yet.
 #[allow(dead_code)]

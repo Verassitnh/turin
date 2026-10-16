@@ -11,6 +11,7 @@ mod provider_smoke_tests;
 pub mod providers;
 pub mod runtime;
 pub mod settings;
+pub mod source_control;
 pub mod smoke;
 pub mod text_generation;
 pub mod thread_commands;

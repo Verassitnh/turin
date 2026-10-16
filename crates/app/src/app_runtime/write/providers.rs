@@ -26,8 +26,13 @@ use turin_provider_core::provider_host_live::{
     DesktopProviderHost, DesktopSettingsHandle, ShouldRunBackgroundWork,
 };
 use turin_provider_core::provider_instance_registry::ProviderInstanceRegistry;
-use turin_provider_core::provider_instance_registry_hydration::ProviderInstanceRegistryHydration;
+use turin_provider_core::provider_instance_registry_hydration::{
+    DefaultInstanceDriver, ProviderInstanceRegistryHydration,
+};
 use turin_providers::built_in_drivers::{BuiltInDriverSlots, built_in_drivers};
+use turin_providers::provider_installation::{
+    InstallationError, ManagedInstallation, ProviderInstallation,
+};
 
 use super::opencode_driver::OpenCodeDriver;
 use turin_providers::provider_registry::{ProviderRegistry, ProviderRegistryOptions};
@@ -40,6 +45,9 @@ pub struct Providers {
     pub settings: DesktopSettingsHandle,
     pub hydration: ProviderInstanceRegistryHydration,
     pub registry: Arc<ProviderRegistry>,
+    pub installation: Arc<ProviderInstallation>,
+    pub maintenance: Arc<turin_providers::provider_maintenance_runner::ProviderMaintenanceRunner>,
+    pub usage_readers: Vec<turin_usage::usage_service::UsageReader>,
 }
 
 impl Providers {
@@ -63,7 +71,7 @@ impl Providers {
                 &host,
             )),
         ));
-        let codex = codex_driver(base_dir, &host, &manifest).await?;
+        let (codex, codex_installation) = codex_driver(base_dir, &host, &manifest).await?;
         let drivers = built_in_drivers(
             Arc::clone(&host),
             BuiltInDriverSlots {
@@ -71,13 +79,34 @@ impl Providers {
                 opencode: Some(Box::new(|_host| Arc::new(OpenCodeDriver::new()))),
             },
         );
+        let defaults = drivers
+            .iter()
+            .map(|driver| DefaultInstanceDriver {
+                driver_kind: driver.driver_kind().clone(),
+                has_default_instance: driver.metadata().has_default_instance,
+            })
+            .collect();
+        let mut usage_readers = Vec::new();
+        for kind in turin_providers::built_in_drivers::BUILT_IN_USAGE_DRIVER_ORDER {
+            if let Some(driver) = drivers
+                .iter()
+                .find(|driver| driver.driver_kind().as_str() == kind)
+            {
+                if let Some(reader) = driver.usage() {
+                    usage_readers.push(turin_usage::usage_service::UsageReader {
+                        driver_kind: kind.to_owned(),
+                        reader: reader.clone(),
+                    });
+                }
+            }
+        }
         let hydration = ProviderInstanceRegistryHydration::new(drivers, &host)
             .await
             .context("hydrating the provider instance registry")?;
         let registry = Arc::new(
             ProviderRegistry::start(
                 hydration.registry.clone(),
-                manifest,
+                manifest.clone(),
                 ProviderRegistryOptions {
                     provider_status_cache_dir: (&host.paths.provider_status_cache_dir).into(),
                     t3_code_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -86,7 +115,27 @@ impl Providers {
             )
             .await,
         );
+        let installation = Arc::new(ProviderInstallation::new(
+            Arc::new(CodexInstaller(codex_installation)),
+            hydration.registry.clone(),
+            registry.clone(),
+            host.clone(),
+            defaults,
+        ));
+        use turin_providers::provider_maintenance_runner::{
+            LiveMaintenanceVersions, ProviderMaintenanceRunner, ProviderMaintenanceRunnerDeps,
+            TokioCommandSpawner,
+        };
+        let maintenance = Arc::new(ProviderMaintenanceRunner::new(ProviderMaintenanceRunnerDeps {
+            registry: registry.clone(), manifest,
+            spawner: Arc::new(TokioCommandSpawner),
+            versions: Arc::new(LiveMaintenanceVersions::new(Arc::new(turin_provider_core::provider_latest_versions::ProviderLatestVersions::default()), reqwest::Client::new())),
+            t3_code_version: env!("CARGO_PKG_VERSION").to_owned(),
+        }));
         Ok(Self {
+            maintenance,
+            installation,
+            usage_readers,
             host,
             settings,
             hydration,
@@ -123,7 +172,7 @@ async fn codex_driver(
     base_dir: &Path,
     host: &Arc<ProviderHost>,
     manifest: &Arc<ModelManifest>,
-) -> anyhow::Result<Arc<CodexDriver>> {
+) -> anyhow::Result<(Arc<CodexDriver>, Arc<CodexInstallation>)> {
     let state_dir = std::path::PathBuf::from(&host.paths.state_dir);
     let secrets_directory = state_dir.join("secrets");
     let secrets: Arc<dyn SecretStore> = Arc::new(
@@ -144,19 +193,70 @@ async fn codex_driver(
         validator: Arc::new(CommandRuntimeValidator),
     })
     .await;
-    Ok(Arc::new(CodexDriver::with_managed_host(CodexManagedHost {
+    let driver = Arc::new(CodexDriver::with_managed_host(CodexManagedHost {
         state_dir,
         user_home: dirs_home(),
         server_url: "http://localhost:3773".to_owned(),
         secrets,
         secrets_directory: Some(secrets_directory),
         environment_id: crate::state::local_environment_id().to_string(),
-        installation,
+        installation: installation.clone(),
         discovery_url: None,
         catalog_url: None,
-    })))
+    }));
+    Ok((driver, installation))
 }
 
 fn dirs_home() -> String {
     std::env::var("HOME").unwrap_or_default()
+}
+
+/// Shares the exact installer leased by Codex's managed runtime.
+struct CodexInstaller(Arc<CodexInstallation>);
+
+fn install_error(
+    error: turin_provider_codex::codex_installation::CodexInstallationError,
+) -> InstallationError {
+    InstallationError {
+        operation: error.operation.to_owned(),
+        detail: error.detail,
+    }
+}
+
+#[async_trait::async_trait]
+impl ManagedInstallation for CodexInstaller {
+    async fn start(
+        &self,
+    ) -> Result<turin_contracts::provider_setup::ProviderInstallState, InstallationError> {
+        self.0.start().await.map_err(install_error)
+    }
+    async fn cancel(
+        &self,
+        operation_id: &str,
+    ) -> Result<turin_contracts::provider_setup::ProviderInstallState, InstallationError> {
+        self.0.cancel(operation_id).await.map_err(install_error)
+    }
+    async fn state(&self) -> turin_contracts::provider_setup::ProviderInstallState {
+        self.0.state()
+    }
+    fn changes(
+        &self,
+    ) -> futures::stream::BoxStream<'static, turin_contracts::provider_setup::ProviderInstallState>
+    {
+        let receiver = self.0.subscribe();
+        Box::pin(futures::stream::unfold(
+            (receiver, true),
+            |(mut receiver, first)| async move {
+                if !first && receiver.changed().await.is_err() {
+                    return None;
+                }
+                let state = receiver.borrow_and_update().clone();
+                Some((state, (receiver, false)))
+            },
+        ))
+    }
+    async fn remove(&self, paths: Vec<String>) -> Result<(), InstallationError> {
+        let paths: Vec<std::path::PathBuf> = paths.into_iter().map(Into::into).collect();
+        self.0.remove(&paths).await.map_err(install_error)
+    }
 }

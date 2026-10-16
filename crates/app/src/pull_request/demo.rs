@@ -172,9 +172,11 @@ pub fn install(
             {
                 reference.number = number;
             }
+            let reference_for_seed = reference.clone();
             host.update(cx, |host, cx| {
                 host.open(demo_environment_id(), reference, tab, window, cx)
             });
+            super::pickers::demo_seed(&store, &reference_for_seed, cx);
             layout.update(cx, |layout, cx| {
                 layout.set_right_panel_content(Some(host.clone().into()), cx);
             });

@@ -216,5 +216,5 @@ pub fn cleanup_report(report: &StorageCleanupReport) -> CleanupReport {
 }
 
 pub fn read_client_settings() -> ClientSettings {
-    super::settings_logic::use_settings::get_client_settings()
+    crate::settings_logic::use_settings::get_client_settings()
 }

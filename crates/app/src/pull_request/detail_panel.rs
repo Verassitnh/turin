@@ -440,7 +440,6 @@ impl PullRequestDetailPanel {
         if let Some(source) = store.read(cx).source() {
             source.open_detail(&reference, cx);
         }
-        super::pickers::demo_seed(&store, &reference, cx);
         let panel = cx.entity().downgrade();
         let nav = DetailNav {
             open_commit: {

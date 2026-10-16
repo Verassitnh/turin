@@ -554,10 +554,10 @@ impl CodeTab {
         if batch.is_empty() {
             return;
         }
+        self.viewed.mark_inflight(batch.clone());
         if let Some(source) = self.ctx.source(cx) {
-            source.set_files_viewed(&self.ctx.reference, batch.clone(), cx);
+            source.set_files_viewed(&self.ctx.reference, batch, cx);
         }
-        self.viewed.acknowledge(&batch);
     }
 
     fn toggle_all_files(&mut self, all_collapsed: bool, cx: &mut Context<Self>) {
@@ -677,6 +677,16 @@ impl CodeTab {
             let Some(snapshot) = store.read(cx).detail(&reference) else {
                 return;
             };
+            if self.viewed.has_inflight() {
+                if snapshot.action_error.is_some() {
+                    self.viewed.revert_inflight();
+                    self.dirty = true;
+                } else if snapshot.pending_action.is_none() {
+                    if let Some(batch) = self.viewed.take_inflight() {
+                        self.viewed.acknowledge(&batch);
+                    }
+                }
+            }
             self.viewed.sync(&snapshot.files_viewed);
             let result = match snapshot.diffs.get(&self.commit) {
                 Some(Loadable::Ready(result)) => Some(result),

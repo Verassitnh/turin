@@ -9,9 +9,11 @@ use std::collections::{HashMap, HashSet};
 use indexmap::IndexMap;
 use turin_contracts::pull_request::PullRequestFileViewed;
 
+use turin_contracts::pull_request::PullRequestSetFilesViewedFile;
+
 use crate::pull_request::pull_request_files_viewed_logic::{
     FileViewedOverlay, FileViewedStates, answered_paths_after_read, count_viewed_files,
-    is_file_viewed, is_file_viewed_stale, settle_file_viewed_overlay,
+    is_file_viewed, is_file_viewed_stale, revert_file_viewed_overlay, settle_file_viewed_overlay,
 };
 
 #[derive(Default)]
@@ -29,6 +31,7 @@ pub struct FilesViewed {
     version: usize,
     last: Vec<PullRequestFileViewed>,
     seen: bool,
+    inflight: Option<Vec<(String, bool)>>,
 }
 
 impl FilesViewed {
@@ -101,6 +104,38 @@ impl FilesViewed {
         for (path, _) in batch {
             self.sent_by.remove(path);
             self.answered_from.insert(path.clone(), self.version);
+        }
+    }
+
+    pub fn has_inflight(&self) -> bool {
+        self.inflight.is_some()
+    }
+
+    pub fn mark_inflight(&mut self, batch: Vec<(String, bool)>) {
+        self.inflight = Some(batch);
+    }
+
+    pub fn take_inflight(&mut self) -> Option<Vec<(String, bool)>> {
+        self.inflight.take()
+    }
+
+    /// A failed write only rolls back presses this batch still owns.
+    pub fn revert_inflight(&mut self) {
+        let Some(batch) = self.inflight.take() else {
+            return;
+        };
+        let owned: HashSet<String> = batch.iter().map(|(path, _)| path.clone()).collect();
+        let payload: Vec<PullRequestSetFilesViewedFile> = batch
+            .iter()
+            .map(|(path, viewed)| PullRequestSetFilesViewedFile {
+                path: path.clone(),
+                viewed: *viewed,
+            })
+            .collect();
+        self.overlay = revert_file_viewed_overlay(&self.overlay, &payload, &owned);
+        for (path, _) in batch {
+            self.sent_by.remove(&path);
+            self.answered_from.remove(&path);
         }
     }
 

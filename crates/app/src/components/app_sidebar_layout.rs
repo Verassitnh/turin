@@ -75,6 +75,7 @@ use crate::pull_request::live_navigation::{PullRequestsRouteEvent, mount_route};
 use crate::pull_request::pull_requests_route_search::validate_pull_requests_search;
 use crate::shell::chat_route_shortcuts::{OpenCommandPalette, ReopenClosedView};
 use crate::shell::environment_coordinator::poll_environment_notifications;
+use crate::shell::live_settings::{LiveShellHandle, open_setting_by_id, open_settings_named};
 use crate::shell::pr_preferences::LocalPreferenceStorage;
 use crate::shell::reopen_closed_view::{ReopenOwnerState, closed_view_entries_from_store};
 use crate::state::right_panel_store::RightPanelStore;
@@ -171,11 +172,7 @@ struct PullRequestsRoute {
 }
 
 /// What the shell needs to run against Turin's own data.
-#[derive(Clone)]
-struct LiveShell {
-    client: Entity<ClientStore>,
-    bus: CommandBus,
-}
+type LiveShell = LiveShellHandle;
 
 /// The live bindings, unless `TURIN_MOCK_UI=1` asks for the fixture UI
 /// (screenshots, demos).
@@ -183,10 +180,10 @@ fn live_bindings(cx: &App) -> Option<LiveShell> {
     if std::env::var("TURIN_MOCK_UI").is_ok_and(|value| value == "1") {
         return None;
     }
-    Some(LiveShell {
-        client: cx.try_global::<ClientStoreGlobal>()?.0.clone(),
-        bus: cx.try_global::<CommandBusGlobal>()?.0.clone(),
-    })
+    Some(LiveShellHandle::new(
+        cx.try_global::<ClientStoreGlobal>()?.0.clone(),
+        cx.try_global::<CommandBusGlobal>()?.0.clone(),
+    ))
 }
 
 pub struct AppSidebarLayout {
@@ -235,6 +232,7 @@ pub struct AppSidebarLayout {
     _bounds: Subscription,
     _store_watch: Subscription,
     _activation: Subscription,
+    toast_viewport: Entity<crate::ui::toast::ToastViewport>,
 }
 
 impl AppSidebarLayout {
@@ -326,6 +324,7 @@ impl AppSidebarLayout {
             cx.notify();
         });
         Self::watch_client_settings(client_settings_path.clone(), cx);
+        let toast_viewport = crate::ui::toast::toasts(cx);
         Self {
             focus_handle,
             sidebar_open: true,
@@ -364,7 +363,38 @@ impl AppSidebarLayout {
             _bounds: bounds,
             _store_watch: store_watch,
             _activation: activation,
+            toast_viewport,
         }
+    }
+
+    fn settings_window_options(&self, cx: &App) -> gpui_kit::WindowOptions {
+        crate::desktop::merge_window_options(
+            gpui_kit::WindowOptions {
+                titlebar: Some(gpui_kit::TitlebarOptions {
+                    title: Some("Settings".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(gpui_kit::point(
+                        gpui_kit::px(16.),
+                        gpui_kit::px(19.),
+                    )),
+                }),
+                app_owns_titlebar_drag: true,
+                ..Default::default()
+            },
+            cx,
+        )
+    }
+
+    fn open_live_settings(&mut self, page: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.clone() else {
+            window.push_notification(
+                Notification::info("Settings is not available yet."),
+                cx,
+            );
+            return;
+        };
+        let options = self.settings_window_options(cx);
+        open_settings_named(&live, page, options, window, cx);
     }
 
     /// `navigate({ to: "/usage" })`.
@@ -545,13 +575,21 @@ impl AppSidebarLayout {
             }
             CommandPaletteEvent::OpenPullRequests => self.open_pull_requests(window, cx),
             CommandPaletteEvent::OpenUsage => self.open_usage(window, cx),
-            CommandPaletteEvent::OpenSettings | CommandPaletteEvent::OpenSetting { .. } => {
-                unavailable("Settings", window, cx)
+            CommandPaletteEvent::OpenSettings => self.open_live_settings("general", window, cx),
+            CommandPaletteEvent::OpenSetting { id } => {
+                let Some(live) = self.live.clone() else {
+                    unavailable("Settings", window, cx);
+                    return;
+                };
+                let options = self.settings_window_options(cx);
+                open_setting_by_id(&live, id, options, window, cx);
             }
             CommandPaletteEvent::OpenProjectSettings { .. } => {
-                unavailable("Project settings", window, cx)
+                self.open_live_settings("projects", window, cx);
             }
-            CommandPaletteEvent::ToggleThemeEditor => unavailable("Theme editor", window, cx),
+            CommandPaletteEvent::ToggleThemeEditor => {
+                self.open_live_settings("appearance", window, cx);
+            }
         }
     }
 
@@ -605,6 +643,10 @@ impl AppSidebarLayout {
                 cx.notify();
             }
             SidebarEvent::OpenUsage => self.open_usage(window, cx),
+            SidebarEvent::OpenSettings => self.open_live_settings("general", window, cx),
+            SidebarEvent::OpenProjectSettings(_) => {
+                self.open_live_settings("projects", window, cx);
+            }
             SidebarEvent::OpenPullRequests(_) | SidebarEvent::OpenPullRequestsPage => {
                 self.open_pull_requests(window, cx);
             }
@@ -625,23 +667,13 @@ impl AppSidebarLayout {
             SidebarEvent::NewThread { .. } if self.live.is_some() => {
                 self.new_thread_from_context(window, cx)
             }
-            // Screens owned by later tasks (composer, settings, PRs, usage).
-            other => {
-                let label = match other {
-                    SidebarEvent::NewThread { .. } => "New thread",
-                    SidebarEvent::AddProject => "Add project",
-                    SidebarEvent::OpenProjectSettings(_) => "Project settings",
-                    SidebarEvent::OpenSettings => "Settings",
-                    SidebarEvent::OpenPullRequestsPage => "",
-                    _ => "",
-                };
-                if !label.is_empty() {
-                    window.push_notification(
-                        Notification::info(format!("{label} is not available yet.")),
-                        cx,
-                    );
-                }
+            SidebarEvent::NewThread { .. } if self.live.is_none() => {
+                unavailable("New thread", window, cx);
             }
+            SidebarEvent::AddProject if self.live.is_none() => {
+                unavailable("Add project", window, cx);
+            }
+            _ => {}
         }
     }
 
@@ -1526,6 +1558,7 @@ impl Render for AppSidebarLayout {
             .children(self.overlay.clone())
             .child(self.confirm_dialog.clone())
             .child(self.quit_overlay.clone())
+            .child(self.toast_viewport.clone())
             // The ⌘K overlay renders last so it covers the whole window.
             .child(self.palette.clone())
     }

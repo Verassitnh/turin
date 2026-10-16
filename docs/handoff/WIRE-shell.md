@@ -25,13 +25,42 @@ Commands facade (same Tokio executor via `bus.task` / `bus.spawn`).
 
 ## Settings (WIRE-settings)
 
-Expected entry: `settings::live_window::open(route, open_menu, window, cx, bus)`
-(or equivalent from `docs/handoff/WIRE-settings.md` when published).
+Startup (live app, not `TURIN_MOCK_UI=1`):
 
-Shell routes palette/sidebar `OpenSettings`, `OpenProjectSettings`,
-`OpenSetting { .. }`, `ToggleThemeEditor` through
-`shell::settings_navigation` (overlay or secondary window — match settings
-agent’s helper).
+```rust
+use crate::settings::live_init::{boot_client_settings, hydrate_client_settings, initialize_live_settings};
+use crate::shell::client_settings_persistence::DesktopFileClientSettingsPersistence;
+use crate::shell::live_settings::start_live_client_settings;
+
+start_live_client_settings(runtime.handle(), DesktopFileClientSettingsPersistence::new(path));
+```
+
+Open window:
+
+```rust
+use crate::shell::live_settings::{LiveShellHandle, open_settings_named};
+use crate::settings::live_window;
+
+open_settings_named(&live, "general", window_options, window, cx);
+```
+
+`LiveSettingsServices` field sources: table in `settings/live_bindings.rs`.
+Shell builds via `shell::live_settings::build_live_settings_services` when every
+`WriteRuntime` optional service field is `Some` (WIRE-runtime Sol populates in
+`WriteRuntime::build`):
+
+| `WriteRuntime` field | Type |
+|----------------------|------|
+| `server_settings` | `Option<Arc<ServerSettingsService>>` |
+| `keybindings` | `Option<Arc<Keybindings>>` |
+| `provider_auth` | `Option<Arc<ProviderAuthService>>` |
+| `provider_installation` | `Option<Arc<ProviderInstallation>>` |
+| `source_control` | `Option<Arc<SourceControlDiscovery>>` |
+| `storage_cleanup` | `Option<Arc<StorageCleanup>>` |
+| `provider_maintenance` | `Option<Arc<ProviderMaintenanceRunner>>` |
+
+Palette/sidebar routes: `AppSidebarLayout::open_live_settings` →
+`live_window::open_named` / `open_setting_by_id`.
 
 ## Pull requests (WIRE-pr-ui + WIRE-pr-backend)
 

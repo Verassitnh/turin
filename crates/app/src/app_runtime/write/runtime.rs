@@ -85,6 +85,29 @@ pub struct WriteRuntime {
     /// `@` path completion over a workspace.
     pub workspace_entries: Arc<turin_git::workspace::workspace_entries::WorkspaceEntries>,
     pub sessions: Arc<ProviderSessionManager>,
+    pub provider_auth: Arc<turin_providers::provider_auth_service::ProviderAuthService>,
+    pub provider_installation: Arc<turin_providers::provider_installation::ProviderInstallation>,
+    pub provider_maintenance:
+        Arc<turin_providers::provider_maintenance_runner::ProviderMaintenanceRunner>,
+    pub server_settings: Arc<turin_runtime::server_settings::ServerSettingsService>,
+    pub keybindings: Arc<turin_runtime::keybindings::Keybindings>,
+    pub source_control_host: Arc<turin_git::server_source_control_host::ServerSourceControlHost>,
+    pub source_control:
+        Arc<turin_source_control::source_control::provider_registry::SourceControlProviderRegistry>,
+    pub source_control_discovery:
+        Arc<turin_source_control::source_control::discovery::SourceControlDiscovery>,
+    pub git: Arc<turin_git::git_vcs_driver_core::GitVcsDriverCore>,
+    pub git_manager: Arc<turin_git::git_manager::GitManager>,
+    pub pull_requests: Arc<turin_source_control::pull_request::service::PullRequestService>,
+    pub review_guides: Arc<
+        turin_source_control::pull_request::review_guide_service::PullRequestReviewGuideService,
+    >,
+    pub usage: Arc<turin_usage::usage_service::UsageService>,
+    pub(crate) usage_readers_available: bool,
+    settings_sync: Arc<tokio::sync::Mutex<()>>,
+    _settings_watcher: Option<turin_runtime::server_settings::service::SettingsWatcher>,
+    _keybindings_watcher: Option<turin_runtime::keybindings::KeybindingsWatcher>,
+    _settings_feed: AbortOnDropHandle<()>,
     effects: EffectDaemon,
     _continuations: ProviderContinuationService,
     recovery: Arc<ProviderRuntimeRecoveryService>,
@@ -93,14 +116,61 @@ pub struct WriteRuntime {
 
 impl WriteRuntime {
     /// Builds every service and starts the effect worker and the terminal-run
-    /// listener. `settings` seeds the provider host (instance configuration,
-    /// binary paths); persisting `settings.json` is a later slice.
+    /// listener. `settings` seeds new data directories; subsequent settings
+    /// reads and patches use the persistent service and its file watcher.
     pub async fn build(
         stores: Arc<Stores>,
         data_dir: &Path,
         settings: ServerSettings,
     ) -> anyhow::Result<Arc<Self>> {
-        let providers = Providers::build(data_dir, settings).await?;
+        let (server_settings, settings_watcher) =
+            super::settings::open_settings(data_dir, stores.db.clone(), &settings).await?;
+        let mut settings_changes = server_settings.subscribe();
+        let settings = super::settings::effective_settings(server_settings.get_settings().await?);
+        let mut providers = Providers::build(data_dir, settings).await?;
+        let keybindings =
+            turin_runtime::keybindings::Keybindings::new(data_dir.join("keybindings.json"));
+        let keybindings_watcher = keybindings.start().await.context("starting keybindings")?;
+        let settings_sync = Arc::new(tokio::sync::Mutex::new(()));
+        let settings_feed = {
+            let service = server_settings.clone();
+            let desktop = providers.settings.clone();
+            let sync = settings_sync.clone();
+            AbortOnDropHandle::new(tokio::spawn(async move {
+                while settings_changes.recv().await.is_some() {
+                    let _guard = sync.lock().await;
+                    match service.get_settings().await {
+                        Ok(settings) => {
+                            desktop
+                                .update_settings(super::settings::effective_settings(settings))
+                                .await
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "cannot apply settings to provider host")
+                        }
+                    }
+                }
+            }))
+        };
+        let source_control = super::source_control::SourceControlServices::build(
+            &stores,
+            data_dir,
+            providers.settings.clone(),
+            providers.registry.clone(),
+            providers.instances(),
+        )
+        .await;
+        let usage_readers_available = !providers.usage_readers.is_empty();
+        let usage = Arc::new(turin_usage::usage_service::UsageService::new(
+            turin_usage::usage_service::UsageServiceConfig {
+                state_dir: data_dir.join("userdata"),
+                readers: std::mem::take(&mut providers.usage_readers),
+                host_env: std::env::vars().collect(),
+                home_dir: std::env::var("HOME").unwrap_or_default(),
+                rates_url: turin_usage::usage_service::LITELLM_RATES_URL.to_owned(),
+                clock: turin_usage::usage_service::system_clock(),
+            },
+        ));
         let instances = providers.instances();
         let sink = Arc::new(stores.sink.clone());
         let projection = Arc::clone(&stores.projections);
@@ -139,6 +209,14 @@ impl WriteRuntime {
             projection.clone(),
             ProviderSessionManagerOptions::default(),
         ));
+
+        let provider_auth = Arc::new(
+            turin_providers::provider_auth_service::ProviderAuthService::new(
+                instances.clone(),
+                projection.clone(),
+                sessions.clone(),
+            ),
+        );
 
         // Turn services.
         let run_execution = Arc::new(RunExecutionService::new(
@@ -284,6 +362,24 @@ impl WriteRuntime {
         }
 
         Ok(Arc::new(Self {
+            provider_auth,
+            provider_installation: providers.installation.clone(),
+            provider_maintenance: providers.maintenance.clone(),
+            server_settings,
+            keybindings,
+            source_control_host: source_control.host,
+            source_control: source_control.providers,
+            source_control_discovery: source_control.discovery,
+            git: source_control.git,
+            git_manager: source_control.git_manager,
+            pull_requests: source_control.pull_requests,
+            review_guides: source_control.review_guides,
+            usage,
+            usage_readers_available,
+            settings_sync,
+            _settings_watcher: settings_watcher,
+            _keybindings_watcher: keybindings_watcher,
+            _settings_feed: settings_feed,
             stores,
             providers,
             orchestrator,
@@ -297,6 +393,21 @@ impl WriteRuntime {
             recovery,
             _terminal_runs: terminal_runs,
         }))
+    }
+
+    /// Publish the latest persisted settings. Read under the same bridge gate as
+    /// file reloads so an older notification cannot replace a newer patch.
+    pub async fn sync_provider_settings(
+        &self,
+    ) -> Result<ServerSettings, turin_contracts::settings::ServerSettingsError> {
+        let _guard = self.settings_sync.lock().await;
+        let settings =
+            super::settings::effective_settings(self.server_settings.get_settings().await?);
+        self.providers
+            .settings
+            .update_settings(settings.clone())
+            .await;
+        Ok(settings)
     }
 
     /// Shutdown order (upstream): stop the effect worker, let recovery queue

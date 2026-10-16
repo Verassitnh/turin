@@ -38,7 +38,6 @@ pub mod list_filters;
 pub mod list_page;
 pub mod list_row;
 pub mod list_states;
-pub mod live_source;
 pub mod mock_source;
 pub mod panel_host;
 pub mod pickers;

@@ -25,7 +25,7 @@ use super::live_commands::{self, update_provider_instance as persist_provider_in
 use super::live_projects::{delete_project, set_project_icons};
 use super::live_snapshot::{build_snapshot, cleanup_report, read_client_settings, LiveSnapshotInput};
 use super::mock_source::apply_appearance;
-use super::settings_logic::use_settings::{
+use crate::settings_logic::use_settings::{
     persist_client_settings_patch, prepare_model_preferences_patch,
 };
 use super::view_model::{
@@ -832,8 +832,9 @@ impl SettingsSource for LiveSettingsSource {
 
     fn run_storage_cleanup(&self, cx: &mut App) {
         let inner = self.inner.clone();
+        let cleanup = inner.borrow().services.storage_cleanup.clone();
         inner.borrow().services.bus.handle().spawn(async move {
-            let report = inner.borrow().services.storage_cleanup.run_now().await;
+            let report = cleanup.run_now().await;
             inner.borrow_mut().storage_cleanup = Some(cleanup_report(&report));
         });
         self.publish(cx);

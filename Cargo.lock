@@ -7654,6 +7654,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-shared",
  "url",
  "uuid",
 ]
@@ -7700,6 +7701,35 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "turin-contracts",
+]
+
+[[package]]
+name = "turin-providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "indexmap",
+ "parking_lot",
+ "pretty_assertions",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "turin-contracts",
+ "turin-orchestration",
+ "turin-provider-claude",
+ "turin-provider-core",
+ "turin-provider-cursor",
+ "turin-runtime",
+ "turin-shared",
 ]
 
 [[package]]

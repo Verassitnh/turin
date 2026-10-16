@@ -36,6 +36,30 @@ pub struct DesktopProviderHost {
     settings: Arc<DesktopSettings>,
 }
 
+/// The settings side of a [`DesktopProviderHost`], kept after `host` is moved
+/// into an `Arc` for the drivers (`Arc::new(live.host)`). Cloning is cheap; every
+/// clone writes to the same settings value the host reads.
+#[derive(Clone)]
+pub struct DesktopSettingsHandle {
+    settings: Arc<DesktopSettings>,
+}
+
+impl DesktopSettingsHandle {
+    /// The app's settings writer calls this after persisting a new settings
+    /// value. Publishing never waits on a provider driver.
+    pub async fn update_settings(&self, next: ServerSettings) {
+        *self.settings.current.write().await = next.clone();
+        self.settings
+            .subscribers
+            .lock()
+            .retain(|sender| sender.send(next.clone()).is_ok());
+    }
+
+    pub async fn settings(&self) -> ServerSettings {
+        self.settings.current.read().await.clone()
+    }
+}
+
 impl DesktopProviderHost {
     /// `base_dir` is the T3 home. Runtime state lives under `base_dir/userdata`
     /// (upstream's non-dev `stateDir`), with `secrets` and `attachments`
@@ -106,11 +130,15 @@ impl DesktopProviderHost {
     /// The app's settings writer calls this after persisting a new settings
     /// value. Publishing never waits on a provider driver.
     pub async fn update_settings(&self, next: ServerSettings) {
-        *self.settings.current.write().await = next.clone();
-        self.settings
-            .subscribers
-            .lock()
-            .retain(|sender| sender.send(next.clone()).is_ok());
+        self.settings_handle().update_settings(next).await;
+    }
+
+    /// Drivers take `Arc<ProviderHost>`, so the app moves `host` into an `Arc`
+    /// and keeps this handle to publish settings changes afterwards.
+    pub fn settings_handle(&self) -> DesktopSettingsHandle {
+        DesktopSettingsHandle {
+            settings: Arc::clone(&self.settings),
+        }
     }
 
     #[allow(clippy::result_large_err)]
@@ -153,6 +181,26 @@ mod tests {
                 .unwrap()
                 .enable_provider_update_checks
         );
+    }
+
+    #[tokio::test]
+    async fn the_settings_handle_outlives_the_host_moved_into_an_arc() {
+        let live = host(true);
+        let handle = live.settings_handle();
+        let shared = Arc::new(live.host);
+        let mut changes = shared.subscribe_settings();
+        let mut next = default_server_settings();
+        next.enable_provider_update_checks = false;
+        handle.update_settings(next).await;
+        assert!(!changes.recv().await.unwrap().enable_provider_update_checks);
+        assert!(
+            !shared
+                .get_settings()
+                .await
+                .unwrap()
+                .enable_provider_update_checks
+        );
+        assert!(!handle.settings().await.enable_provider_update_checks);
     }
 
     #[tokio::test]

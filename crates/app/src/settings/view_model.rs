@@ -120,6 +120,8 @@ pub struct SettingsViewModel {
     pub environment: EnvironmentInfo,
     pub keybindings: KeybindingsViewModel,
     pub providers: Vec<ServerProvider>,
+    /// A `refreshServerProviders` request is in flight (`isRefreshingProviders`).
+    pub providers_refreshing: bool,
     /// Live auth flows keyed by provider instance id (`providerAuthState` query).
     pub provider_auth: IndexMap<String, ProviderAuthState>,
     /// Managed runtime installs keyed by provider instance id
@@ -272,9 +274,21 @@ pub trait SettingsSource {
     fn delete_thread(&self, thread_id: &str, cx: &mut App);
 }
 
+/// A failed request the user must hear about (`toastManager.add({ type: "error",
+/// title, description })` after an atom command fails). The source picks the
+/// title, e.g. "Could not update provider instance" or "Unable to save
+/// keybinding", and the description, e.g. the error message or "The settings
+/// update failed.".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsFailure {
+    pub title: String,
+    pub description: String,
+}
+
 pub struct SettingsStore {
     vm: Rc<SettingsViewModel>,
     source: Rc<dyn SettingsSource>,
+    failures: std::cell::RefCell<Vec<SettingsFailure>>,
 }
 
 impl SettingsStore {
@@ -282,6 +296,7 @@ impl SettingsStore {
         Self {
             vm: Rc::new(vm),
             source,
+            failures: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -291,6 +306,34 @@ impl SettingsStore {
 
     pub fn source(&self) -> Rc<dyn SettingsSource> {
         self.source.clone()
+    }
+
+    /// The source calls this when a request failed; the view shows an error toast.
+    pub fn report_failure(
+        &mut self,
+        title: impl Into<String>,
+        description: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_failure(title, description);
+        cx.notify();
+    }
+
+    fn push_failure(&self, title: impl Into<String>, description: impl Into<String>) {
+        self.failures.borrow_mut().push(SettingsFailure {
+            title: title.into(),
+            description: description.into(),
+        });
+    }
+
+    #[cfg(test)]
+    pub(super) fn push_failure_for_tests(&self, title: &str, description: &str) {
+        self.push_failure(title, description);
+    }
+
+    /// Failures reported since the last call.
+    pub fn take_failures(&self) -> Vec<SettingsFailure> {
+        std::mem::take(&mut *self.failures.borrow_mut())
     }
 
     /// The source calls this when anything changed.

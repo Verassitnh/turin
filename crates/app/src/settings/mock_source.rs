@@ -248,6 +248,7 @@ fn mock_view_model() -> SettingsViewModel {
             config_path: "/Users/dev/.turin/keybindings.json".into(),
         },
         providers: mock_providers(),
+        providers_refreshing: false,
         provider_auth: mock_provider_auth(),
         provider_install: mock_provider_install(),
         chat_gpt_welcome_acknowledged: Vec::new(),
@@ -1072,6 +1073,33 @@ mod tests {
     use pretty_assertions::assert_eq;
     use turin_contracts::usage_limit_source_id::UsageLimitSourceId;
     use turin_runtime::settings_secrets::{SECRET_REDACTED, source_control_host_secret_name};
+
+    #[test]
+    fn failures_reach_the_store_once() {
+        let source = Rc::new(MockSettingsSource {
+            state: Rc::new(RefCell::new(MockState {
+                vm: mock_view_model(),
+                custom_keybindings: Vec::new(),
+                secrets: SecretStore::new(),
+                install_generation: 0,
+            })),
+            store: Rc::new(RefCell::new(None)),
+        });
+        let store = SettingsStore::new(mock_view_model(), source);
+        assert!(store.take_failures().is_empty());
+        store.push_failure_for_tests(
+            "Could not update provider instance",
+            "The settings update failed.",
+        );
+        assert_eq!(
+            store.take_failures(),
+            vec![crate::settings::view_model::SettingsFailure {
+                title: "Could not update provider instance".to_owned(),
+                description: "The settings update failed.".to_owned(),
+            }]
+        );
+        assert!(store.take_failures().is_empty());
+    }
 
     /// One save: the patch applied to `server`, then its secrets persisted.
     fn save(store: &mut SecretStore, server: &ServerSettings, patch: Value) -> ServerSettings {

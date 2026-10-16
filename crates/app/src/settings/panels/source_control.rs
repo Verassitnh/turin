@@ -1272,7 +1272,7 @@ impl SettingsView {
             let default_mode = default_style.get("mode").cloned().unwrap_or(Value::Null);
             let default_instructions = default_style.get("customInstructions").cloned().unwrap_or(json!(""));
             let action = self.cb(cx, move |this, _, cx| {
-                this.update_server(
+                this.update(Which::Server,
                     json!({ "sourceControlWritingStyle": { "mode": default_mode, "customInstructions": default_instructions } }),
                     cx,
                 );
@@ -1290,7 +1290,8 @@ impl SettingsView {
             SelectWidth::Fixed(14.),
             false,
             |this, value, _, cx| {
-                this.update_server(
+                this.update(
+                    Which::Server,
                     json!({ "sourceControlWritingStyle": { "mode": value } }),
                     cx,
                 );
@@ -1310,7 +1311,8 @@ impl SettingsView {
                 cx,
                 |this, text, _, cx| {
                     let text = text.trim().to_owned();
-                    this.update_server(
+                    this.update(
+                        Which::Server,
                         json!({ "sourceControlWritingStyle": { "customInstructions": text } }),
                         cx,
                     );
@@ -1337,7 +1339,7 @@ impl SettingsView {
             .unwrap_or(true);
         let templates_reset = (templates != default_templates).then(|| {
             let action = self.cb(cx, move |this, _, cx| {
-                this.update_server(json!({ "sourceControlWritingStyle": { "followChangeRequestTemplates": default_templates } }), cx);
+                this.update(Which::Server, json!({ "sourceControlWritingStyle": { "followChangeRequestTemplates": default_templates } }), cx);
             });
             setting_reset_button("reset-templates", "Reset to default", move |w, c| action(w, c)).into_any_element()
         });
@@ -1348,7 +1350,7 @@ impl SettingsView {
                 .reset_action(templates_reset)
                 .control(switch("switch-follow-templates", templates, false, cx, move |next, _, cx| {
                     entity.update(cx, |this, cx| {
-                        this.update_server(json!({ "sourceControlWritingStyle": { "followChangeRequestTemplates": next } }), cx);
+                        this.update(Which::Server, json!({ "sourceControlWritingStyle": { "followChangeRequestTemplates": next } }), cx);
                     });
                 })),
         );
@@ -1408,12 +1410,12 @@ impl SettingsView {
                 cx,
                 |this, text, _, cx| {
                     let text = text.trim().to_owned();
-                    this.update_server(json!({ "reviewGuideInstructions": text }), cx);
+                    this.update(Which::Server, json!({ "reviewGuideInstructions": text }), cx);
                 },
             );
             let reset = (!instructions.is_empty()).then(|| {
                 let action = self.cb(cx, |this, _, cx| {
-                    this.update_server(json!({ "reviewGuideInstructions": "" }), cx)
+                    this.update(Which::Server, json!({ "reviewGuideInstructions": "" }), cx)
                 });
                 setting_reset_button(
                     "reset-review-guide-instructions",
@@ -1470,7 +1472,7 @@ impl SettingsView {
                 providers,
                 &selection,
                 false,
-                move |this, value, cx| this.update_server(json!({ key: value }), cx),
+                move |this, value, cx| this.update(Which::Server, json!({ key: value }), cx),
             ));
         }
         let entity = cx.entity();
@@ -1485,7 +1487,9 @@ impl SettingsView {
                 } else {
                     Value::Null
                 };
-                entity.update(cx, |this, cx| this.update_server(json!({ key: value }), cx));
+                entity.update(cx, |this, cx| {
+                    this.update(Which::Server, json!({ key: value }), cx)
+                });
             },
         ));
         Self::base_row(search_id)
@@ -1554,7 +1558,11 @@ impl SettingsView {
                 window,
                 cx,
                 |this, text, _, cx| {
-                    this.update_server(json!({ "branchNamePrefix": text.trim() }), cx);
+                    this.update(
+                        Which::Server,
+                        json!({ "branchNamePrefix": text.trim() }),
+                        cx,
+                    );
                 },
             );
             rows.push(
@@ -1589,7 +1597,11 @@ impl SettingsView {
                 window,
                 cx,
                 |this, text, _, cx| {
-                    this.update_server(json!({ "branchNameInstructions": text.trim() }), cx);
+                    this.update(
+                        Which::Server,
+                        json!({ "branchNameInstructions": text.trim() }),
+                        cx,
+                    );
                 },
             );
             rows.push(

@@ -598,6 +598,13 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use gpui_kit::component::WindowExt as _;
         use gpui_kit::component::notification::Notification;
+        for failure in self.store.read(cx).take_failures() {
+            self.toasts.borrow_mut().push(SettingsToast {
+                kind: SettingsToastKind::Error,
+                title: failure.title,
+                description: failure.description,
+            });
+        }
         for toast in std::mem::take(&mut *self.toasts.borrow_mut()) {
             let notification = match toast.kind {
                 SettingsToastKind::Success => Notification::success(toast.description),

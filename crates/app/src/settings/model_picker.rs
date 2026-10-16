@@ -514,7 +514,11 @@ impl SettingsView {
                 &selection,
                 false,
                 |this, value, cx| {
-                    this.update_server(json!({ "textGenerationModelSelection": value }), cx)
+                    this.update(
+                        Which::Server,
+                        json!({ "textGenerationModelSelection": value }),
+                        cx,
+                    )
                 },
             )
         };

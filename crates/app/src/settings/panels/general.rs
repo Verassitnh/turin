@@ -179,7 +179,11 @@ impl SettingsView {
                     && days.fract() == 0.
                     && (1.0..=90.0).contains(&days)
                 {
-                    this.update_server(json!({ "sidebarAutoSettleAfterDays": days }), cx);
+                    this.update(
+                        Which::Server,
+                        json!({ "sidebarAutoSettleAfterDays": days }),
+                        cx,
+                    );
                 } else {
                     cx.notify();
                 }
@@ -204,7 +208,7 @@ impl SettingsView {
             cx,
             move |checked, _, cx| {
                 entity.update(cx, |this, cx| {
-                this.update_server(json!({ "sidebarAutoSettleAfterDays": if checked { json!(default_days) } else { Value::Null } }), cx)
+                this.update(Which::Server, json!({ "sidebarAutoSettleAfterDays": if checked { json!(default_days) } else { Value::Null } }), cx)
             });
             },
         );

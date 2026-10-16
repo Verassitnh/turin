@@ -19,8 +19,12 @@ use gpui_kit::{
     Window, div, px, rems,
 };
 use serde_json::{Map, Value, json};
-use turin_contracts::provider_instance::ProviderInstanceConfig;
-use turin_contracts::settings::{ProviderSettingsFormControl, resolve_provider_instance_enabled};
+use turin_contracts::base_schemas::ProjectId;
+use turin_contracts::provider_instance::{ProviderInstanceConfig, ProviderInstanceId};
+use turin_contracts::settings::{
+    ProviderSettingsFormControl, resolve_project_provider_instance_enabled,
+    resolve_provider_instance_enabled,
+};
 use turin_provider_core::server_provider::{
     ServerProvider, ServerProviderAuthStatus, ServerProviderState,
 };
@@ -28,7 +32,7 @@ use turin_provider_core::server_provider::{
 use super::super::add_provider_instance_logic::{CodexSetupMode, read_codex_setup_mode};
 use super::super::controls::{
     FieldSize, PopupAlign, SelectWidth, password_field, redacted_sensitive_text, switch,
-    text_field, with_popup,
+    text_field, toggle_menu, with_popup,
 };
 use super::super::folded_settings_section::{FoldedHeaderPlacement, FoldedSection};
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
@@ -47,15 +51,24 @@ use super::super::provider_form::{
     read_provider_config_string, read_provider_environment_variable, redact_saved_environment,
 };
 use super::super::provider_meta::driver_label;
+use super::super::provider_settings_logic::build_provider_instance_override_patch;
 use super::super::provider_status::{
     AdvisoryEmphasis, get_provider_summary, get_provider_version_advisory_presentation,
     get_provider_version_label,
 };
+use super::super::scope::LOCAL_ENVIRONMENT_ID;
 use super::super::search::searchable_setting;
 use super::super::time_format::{RelativeTimeState, get_relative_time_state};
-use super::super::view::{SettingsView, Which};
+use super::super::view::{SettingsToastKind, SettingsView, Which};
+use crate::components::provider_update_launch_notification_logic::is_provider_update_active;
+use crate::components::provider_updates_action::{
+    ProviderUpdateEnvironmentInput, provider_update_action_tooltip, provider_update_machines,
+    show_provider_updates_action,
+};
+use crate::pull_request::presentation_view::Spinner;
+use crate::state::contracts::EnvironmentId;
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_SM, TEXT_XS};
+use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_3XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip, scroll_area};
 use turin_shared::model::CustomModelDefinition;
@@ -92,6 +105,39 @@ pub struct ProvidersState {
     pub wizard: super::add_provider::AddProviderState,
     pub env_drafts:
         std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
+}
+
+/// `updateProgress` of `ProviderInstanceCard`: the running update's message,
+/// "Starting update" before the server's first report, `None` when idle.
+fn update_progress_message(provider: &ServerProvider) -> Option<String> {
+    use turin_provider_core::server_provider::ServerProviderUpdateStatus as UpdateStatus;
+    if !is_provider_update_active(provider) {
+        return None;
+    }
+    let state = provider.update_state.as_ref()?;
+    Some(
+        matches!(state.status, UpdateStatus::Queued | UpdateStatus::Running)
+            .then(|| {
+                state
+                    .message
+                    .as_ref()
+                    .map(|message| message.as_str().to_owned())
+            })
+            .flatten()
+            .unwrap_or_else(|| "Starting update".to_owned()),
+    )
+}
+
+/// `ProjectOverrideControl`: what the card needs when a project is in scope.
+struct ProviderProjectOverride {
+    /// Every checkout of the project shares the same choice.
+    project_ids: Vec<ProjectId>,
+    /// The project's explicit choice (`None` inherits the device).
+    value: Option<bool>,
+    /// What the switch shows.
+    effective: bool,
+    /// The device's own setting.
+    device: bool,
 }
 
 pub(crate) struct InstanceRow {
@@ -305,16 +351,59 @@ impl SettingsView {
                     None => format!("Checked {}", parts.value),
                 },
             };
+        // `disabled={isRefreshingProviders}`; the label turns into "Refreshing providers".
+        let refreshing = vm.providers_refreshing;
         let refresh = Button::new("refresh-providers")
             .variant(ButtonVariant::GhostMuted)
             .size(ButtonSize::Xs)
             .icon(IconName::RefreshCw)
-            .label(checked_label)
+            .disabled(refreshing)
+            .label(if refreshing {
+                "Refreshing providers".to_owned()
+            } else {
+                checked_label
+            })
             .tooltip(Tooltip::new("Refresh provider status"))
             .on_click(cx.listener(|this, _, _, cx| {
                 let source = this.store.read(cx).source();
                 source.refresh_providers(cx);
             }));
+        // `ProviderUpdatesAction`: every outdated provider with a one-click
+        // update; it stays while the updates run, since candidates leave the
+        // list once their servers report them queued.
+        let update_machines = provider_update_machines(&[ProviderUpdateEnvironmentInput {
+            environment_id: EnvironmentId::new(LOCAL_ENVIRONMENT_ID).expect("environment id"),
+            label: vm.environment.label.clone(),
+            connected: true,
+            providers: vm.providers.clone(),
+        }]);
+        let updates_pending = vm.providers.iter().any(is_provider_update_active);
+        let update_all =
+            show_provider_updates_action(&update_machines, updates_pending).then(|| {
+                let instance_ids: Vec<String> = update_machines
+                    .iter()
+                    .flat_map(|machine| machine.candidates.iter())
+                    .map(|candidate| candidate.instance_id.as_str().to_owned())
+                    .collect();
+                Button::new("update-all-providers")
+                    .variant(ButtonVariant::GhostMuted)
+                    .size(ButtonSize::Xs)
+                    .disabled(updates_pending)
+                    .label(if updates_pending {
+                        "Updating…"
+                    } else {
+                        "Update all"
+                    })
+                    .tooltip(Tooltip::new(provider_update_action_tooltip(
+                        &update_machines,
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let source = this.store.read(cx).source();
+                        for instance_id in &instance_ids {
+                            source.update_provider(instance_id, None, cx);
+                        }
+                    }))
+            });
         let add_button = Button::new("add-provider-title")
             .variant(ButtonVariant::GhostMuted)
             .size(ButtonSize::IconXs)
@@ -373,7 +462,11 @@ impl SettingsView {
                 .p_6()
                 .text_size(TEXT_SM.size)
                 .text_color(theme.muted_foreground)
-                .child("No providers configured.")
+                .child(match &self.panels.providers.selected {
+                    // `targetInstanceMissing`: the opened instance was deleted.
+                    Some(_) => "This provider instance is no longer available on this device.",
+                    None => "No providers configured.",
+                })
                 .into_any_element(),
         };
 
@@ -438,7 +531,15 @@ impl SettingsView {
             .id(id)
             .plain()
             .title_action(add_button)
-            .header_action(refresh)
+            .header_action(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .children(update_all)
+                    .child(refresh),
+            )
             .child(card)
             .into_any_element()
     }
@@ -447,8 +548,11 @@ impl SettingsView {
         &self,
         row: &InstanceRow,
         live: Option<&ServerProvider>,
+        project: Option<&ProviderProjectOverride>,
     ) -> (bool, ProviderStatus) {
-        let enabled = instance_enabled(row);
+        let enabled = project
+            .map(|project| project.effective)
+            .unwrap_or_else(|| instance_enabled(row));
         let status = if enabled {
             match live.map(|p| p.status) {
                 Some(ServerProviderState::Ready) => ProviderStatus::Ready,
@@ -482,7 +586,8 @@ impl SettingsView {
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let live = providers.iter().find(|p| p.instance_id.as_str() == row.id);
-        let (enabled, status) = self.provider_status_of(row, live);
+        let project = self.provider_project_override(row, cx);
+        let (enabled, status) = self.provider_status_of(row, live, project.as_ref());
         let summary = {
             let mut provider = live.cloned();
             if let (true, Some(provider)) = (enabled, provider.as_mut()) {
@@ -510,34 +615,8 @@ impl SettingsView {
                 enabled,
             )
         });
-        let has_compat_warning = live
-            .and_then(|p| p.compatibility_advisory.as_ref())
-            .is_some_and(|c| {
-                use turin_provider_core::server_provider::ServerProviderCompatibilityStatus as S;
-                enabled && !matches!(c.status, S::Supported | S::Unknown)
-            });
-        let advisory_icon = advisory.as_ref().map(|advisory| {
-            div()
-                .id(SharedString::from(format!("advisory-{id}")))
-                .flex()
-                .flex_shrink_0()
-                .tooltip({
-                    let tooltip = Tooltip::new(advisory.title.clone());
-                    move |window, cx| tooltip.clone().build(window, cx)
-                })
-                .child(
-                    Icon::new(if has_compat_warning {
-                        IconName::TriangleAlert
-                    } else {
-                        IconName::CircleArrowUp
-                    })
-                    .size(rems(0.875))
-                    .color(if has_compat_warning {
-                        theme.warning
-                    } else {
-                        theme.muted_foreground
-                    }),
-                )
+        let advisory_icon = advisory.map(|advisory| {
+            self.version_advisory_popover(&id, &display_name, advisory, live, true, cx)
         });
 
         let inline_detail = if needs_attention {
@@ -545,6 +624,7 @@ impl SettingsView {
         } else {
             None
         };
+        let update_progress = live.and_then(update_progress_message);
         let status_line = div()
             .mt(px(2.))
             .flex()
@@ -568,14 +648,20 @@ impl SettingsView {
                         ),
                 )
             })
-            .child(div().min_w_0().child(match inline_detail {
-                Some(detail) => format!("{} · {detail}", summary.headline),
-                None => summary.headline.clone(),
-            }));
+            .child(
+                div()
+                    .min_w_0()
+                    .child(match (&update_progress, inline_detail) {
+                        (Some(progress), _) => format!("Updating · {progress}"),
+                        (None, Some(detail)) => format!("{} · {detail}", summary.headline),
+                        (None, None) => summary.headline.clone(),
+                    }),
+            );
 
         let toggle = {
             let entity = cx.entity();
             let row_id = row.id.clone();
+            let project_ids = project.as_ref().map(|project| project.project_ids.clone());
             switch(
                 SharedString::from(format!("provider-enable-{id}")),
                 enabled,
@@ -583,6 +669,17 @@ impl SettingsView {
                 cx,
                 move |next, _, cx| {
                     entity.update(cx, |this, cx| {
+                        // `updateEnabled`: with a project in scope the switch
+                        // writes that project's override.
+                        if let Some(project_ids) = &project_ids {
+                            this.write_provider_project_override(
+                                project_ids,
+                                &row_id,
+                                Some(next),
+                                cx,
+                            );
+                            return;
+                        }
                         let rows = this.instance_rows(cx);
                         if let Some(row) = rows.iter().find(|row| row.id == row_id) {
                             this.update_instance(
@@ -595,6 +692,41 @@ impl SettingsView {
                 },
             )
         };
+        // `projectOverride?.value !== undefined`: the layers icon and the reset.
+        let override_controls = project
+            .as_ref()
+            .filter(|project| project.value.is_some())
+            .map(|project| {
+                let reset = {
+                    let entity = cx.entity();
+                    let row_id = row.id.clone();
+                    let project_ids = project.project_ids.clone();
+                    setting_reset_button(
+                        SharedString::from(format!("reset-provider-override-{id}")),
+                        "Reset to the device setting",
+                        move |_, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.write_provider_project_override(
+                                    &project_ids,
+                                    &row_id,
+                                    None,
+                                    cx,
+                                );
+                            });
+                        },
+                    )
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .child(self.project_override_inheritance(
+                        &id,
+                        project.value.unwrap_or(project.effective),
+                        project.device,
+                        cx,
+                    ))
+                    .child(reset)
+            });
 
         div()
             .id(SharedString::from(format!("provider-row-{id}")))
@@ -679,9 +811,168 @@ impl SettingsView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
+                    .children(override_controls)
                     .child(toggle),
             )
             .into_any_element()
+    }
+
+    // ── project override ────────────────────────────────────────────────
+
+    /// `projectOverride` of `ProviderSettingsPanel`: present when a project is
+    /// in scope, `None` for environment-wide editing.
+    fn provider_project_override(
+        &self,
+        row: &InstanceRow,
+        cx: &gpui_kit::App,
+    ) -> Option<ProviderProjectOverride> {
+        let context = self.scope_context(cx);
+        if !context.is_project_scope() {
+            return None;
+        }
+        let project_ids: Vec<ProjectId> = context
+            .targets
+            .iter()
+            .filter_map(|target| target.project_id.clone())
+            .collect();
+        let representative = project_ids.first()?;
+        let instance_id = ProviderInstanceId::new(&row.id).ok()?;
+        let server = &self.vm(cx).server;
+        let value = server
+            .project_settings_overrides
+            .get(representative)
+            .and_then(|overrides| overrides.provider_instances.as_ref())
+            .and_then(|instances| instances.get(&instance_id))
+            .and_then(|instance| instance.enabled);
+        Some(ProviderProjectOverride {
+            effective: resolve_project_provider_instance_enabled(
+                &server.provider_instances,
+                &server.project_settings_overrides,
+                Some(representative),
+                &instance_id,
+            ),
+            device: instance_enabled(row),
+            value,
+            project_ids,
+        })
+    }
+
+    /// `writeProjectOverride`: `Some` sets the project's choice, `None` resets
+    /// it back to the device's.
+    fn write_provider_project_override(
+        &mut self,
+        project_ids: &[ProjectId],
+        row_id: &str,
+        next: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(instance_id) = ProviderInstanceId::new(row_id) else {
+            return;
+        };
+        let patch = build_provider_instance_override_patch(
+            &self.vm(cx).server,
+            project_ids,
+            &instance_id,
+            next,
+        );
+        if let Ok(overrides) = serde_json::to_value(&patch) {
+            self.update_server(json!({ "projectSettingsOverrides": overrides }), cx);
+        }
+    }
+
+    /// `ProjectOverrideInheritance`: the layers icon; open it for the project
+    /// and device values side by side.
+    fn project_override_inheritance(
+        &mut self,
+        row_id: &str,
+        project_enabled: bool,
+        device_enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.app_theme().clone();
+        let menu_id = SharedString::from(format!("provider-override-{row_id}"));
+        let open = self.menus.is_open(&menu_id);
+        let trigger = Button::new(SharedString::from(format!(
+            "provider-override-trigger-{row_id}"
+        )))
+        .variant(ButtonVariant::GhostMuted)
+        .size(ButtonSize::IconMicro)
+        .tooltip(Tooltip::new("Overridden for this project"))
+        .child(
+            Icon::new(IconName::Layers)
+                .size(rems(0.75))
+                .color(theme.primary),
+        )
+        .on_click(toggle_menu(cx, |this| &mut this.menus, menu_id.clone()));
+        let popup = open.then(|| {
+            let layers = [
+                ("Project", project_enabled, true),
+                ("Device", device_enabled, false),
+            ];
+            let mut list = div().flex().flex_col().px_3().py(rems(0.625));
+            for (label, enabled, effective) in layers {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .rounded(RADIUS_MD)
+                        .px_2()
+                        .py_1()
+                        .text_size(TEXT_SM.size)
+                        .when(effective, |this| {
+                            this.bg(with_alpha(theme.foreground, 0.06))
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .when(effective, |this| {
+                                    this.font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.foreground)
+                                })
+                                .when(!effective, |this| this.text_color(theme.muted_foreground))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(rems(0.375))
+                                .text_color(if effective {
+                                    theme.foreground
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(if enabled { "On" } else { "Off" })
+                                .child(if effective {
+                                    Icon::new(IconName::Check)
+                                        .size(rems(0.875))
+                                        .color(theme.primary)
+                                        .into_any_element()
+                                } else {
+                                    div().size(rems(0.875)).into_any_element()
+                                }),
+                        ),
+                );
+            }
+            div()
+                .id(SharedString::from(format!(
+                    "provider-override-popup-{row_id}"
+                )))
+                .occlude()
+                .w(rems(16.))
+                .rounded(RADIUS_LG)
+                .border_1()
+                .border_color(crate::ui::tooltip::dropdown_glass_border(&theme))
+                .bg(theme.popover)
+                .shadow(tokens::shadow_popover(theme.is_dark()))
+                .text_color(theme.popover_foreground)
+                .child(list)
+                .into_any_element()
+        });
+        with_popup(trigger, popup, PopupAlign::End, px(20.)).into_any_element()
     }
 
     // ── editor ──────────────────────────────────────────────────────────
@@ -698,7 +989,8 @@ impl SettingsView {
             .iter()
             .find(|p| p.instance_id.as_str() == row.id)
             .cloned();
-        let (enabled, status) = self.provider_status_of(row, live.as_ref());
+        let project = self.provider_project_override(row, cx);
+        let (enabled, status) = self.provider_status_of(row, live.as_ref(), project.as_ref());
         let display_name = Self::display_name(row);
         let version = get_provider_version_label(
             live.as_ref()
@@ -715,8 +1007,16 @@ impl SettingsView {
                 enabled,
             )
         });
-        let advisory_node = advisory
-            .map(|advisory| self.version_advisory_popover(&row.id, &display_name, advisory, cx));
+        let advisory_node = advisory.map(|advisory| {
+            self.version_advisory_popover(
+                &row.id,
+                &display_name,
+                advisory,
+                live.as_ref(),
+                false,
+                cx,
+            )
+        });
         let delete = (!row.is_default).then(|| {
             let id = row.id.clone();
             Button::new(SharedString::from(format!("delete-instance-{id}")))
@@ -1031,38 +1331,95 @@ impl SettingsView {
         id: &str,
         display_name: &str,
         advisory: super::super::provider_status::VersionAdvisoryPresentation,
+        live: Option<&ServerProvider>,
+        list_mode: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use turin_provider_core::server_provider::ServerProviderUpdateStatus as UpdateStatus;
         let theme = cx.app_theme().clone();
         let menu_id = SharedString::from(format!("advisory-{id}"));
         let open = self.menus.is_open(&menu_id);
         let toggle_id = menu_id.clone();
         let has_warning = advisory.emphasis == AdvisoryEmphasis::Strong;
+        // `isUpdating`, `updateProgress` and `updateProblem` of the card: the
+        // server reports each update step; an active update with no message
+        // yet reads "Starting update".
+        let update_state = live.and_then(|provider| provider.update_state.as_ref());
+        let updating = live.is_some_and(is_provider_update_active);
+        let state_message = update_state
+            .and_then(|state| state.message.as_ref())
+            .map(|message| message.as_str().to_owned());
+        let progress = updating.then(|| {
+            update_state
+                .filter(|state| {
+                    matches!(state.status, UpdateStatus::Queued | UpdateStatus::Running)
+                })
+                .and_then(|_| state_message.clone())
+                .unwrap_or_else(|| "Starting update".to_owned())
+        });
+        let problem = (!updating)
+            .then(|| {
+                update_state
+                    .filter(|state| {
+                        matches!(state.status, UpdateStatus::Failed | UpdateStatus::Unchanged)
+                    })
+                    .and(state_message.clone())
+            })
+            .flatten();
+        let trigger_tooltip = if progress.is_some() {
+            "Updating".to_owned()
+        } else {
+            advisory.title.clone()
+        };
         let trigger = Button::new(SharedString::from(format!("advisory-trigger-{id}")))
             .variant(ButtonVariant::GhostMuted)
-            .size(ButtonSize::IconXs)
-            .icon(if has_warning {
-                IconName::TriangleAlert
+            .size(if list_mode {
+                ButtonSize::IconMicro
             } else {
-                IconName::CircleArrowUp
+                ButtonSize::IconXs
             })
-            .tooltip(Tooltip::new(advisory.title.clone()))
+            .tooltip(Tooltip::new(trigger_tooltip))
+            .child(if progress.is_some() {
+                Spinner::new(SharedString::from(format!("advisory-spin-{id}")))
+                    .size(rems(if list_mode { 0.875 } else { 1. }))
+                    .color(theme.muted_foreground)
+                    .into_any_element()
+            } else {
+                Icon::new(if has_warning {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::CircleArrowUp
+                })
+                .size(rems(if list_mode { 0.875 } else { 1. }))
+                .color(if has_warning {
+                    theme.warning
+                } else {
+                    theme.muted_foreground
+                })
+                .into_any_element()
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menus.toggle(toggle_id.clone());
                 cx.notify();
             }));
         let popup = open.then(|| {
-            let update_label = match &advisory.target_version {
-                Some(version) => format!(
-                    "Install {}",
-                    get_provider_version_label(Some(version)).unwrap_or_default()
-                ),
-                None => "Update now".to_owned(),
+            let update_label = if updating {
+                "Updating".to_owned()
+            } else {
+                match &advisory.target_version {
+                    Some(version) => format!(
+                        "Install {}",
+                        get_provider_version_label(Some(version)).unwrap_or_default()
+                    ),
+                    None => "Update now".to_owned(),
+                }
             };
+            let has_command = advisory.update_command.is_some();
             let instance_id = id.to_owned();
             let target = advisory.target_version.clone();
             let command = advisory.update_command.clone();
             let name = display_name.to_owned();
+            let copy_name = display_name.to_owned();
             div()
                 .id(SharedString::from(format!("advisory-popup-{id}")))
                 .occlude()
@@ -1100,14 +1457,42 @@ impl SettingsView {
                     Button::new(SharedString::from(format!("advisory-update-{id}")))
                         .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
-                        .icon(IconName::Download)
+                        .icon(if updating {
+                            IconName::LoaderCircle
+                        } else {
+                            IconName::Download
+                        })
                         .label(update_label)
+                        .disabled(updating)
                         .w_full()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let source = this.store.read(cx).source();
                             source.update_provider(&instance_id, target.clone(), cx);
                         })),
                 )
+                .children((progress.is_some() || problem.is_some()).then(|| {
+                    div()
+                        .text_size(TEXT_XS.size)
+                        .line_height(rems(1.))
+                        .text_color(if problem.is_some() {
+                            theme.warning
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(progress.clone().or(problem.clone()).unwrap_or_default())
+                }))
+                .children(has_command.then(|| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(TEXT_3XS.size)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child(div().h(px(1.)).flex_1().bg(theme.border))
+                        .child("OR, UPDATE MANUALLY USING")
+                        .child(div().h(px(1.)).flex_1().bg(theme.border))
+                }))
                 .children(command.map(|command| {
                     div()
                         .flex()
@@ -1137,11 +1522,17 @@ impl SettingsView {
                                 .icon(IconName::Copy)
                                 .icon_size(rems(0.75))
                                 .tooltip(Tooltip::new("Copy command"))
-                                .on_click(move |_, _, cx| {
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         command.clone(),
                                     ));
-                                }),
+                                    this.toast(
+                                        SettingsToastKind::Success,
+                                        format!("{copy_name} update command copied"),
+                                        "Run it in a terminal when you are ready to update.",
+                                        cx,
+                                    );
+                                })),
                         )
                 }))
                 .into_any_element()
@@ -2055,6 +2446,14 @@ impl SettingsView {
                         })),
                 );
             }
+            // `pickerTooltip`: the switch sits in a wrapper span that owns the tooltip.
+            let picker_tooltip = if model.is_custom {
+                "Custom models are always shown in the picker"
+            } else if hidden_now {
+                "Hidden from picker"
+            } else {
+                "Shown in picker"
+            };
             let picker_switch = {
                 let id = id.clone();
                 let slug = slug.clone();
@@ -2132,11 +2531,18 @@ impl SettingsView {
                     )
                     .child(actions)
                     .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .child(picker_switch),
+                        div().flex().flex_shrink_0().items_center().child(
+                            div()
+                                .id(SharedString::from(format!("model-visible-tip-{id}-{slug}")))
+                                .flex()
+                                .flex_shrink_0()
+                                .items_center()
+                                .tooltip({
+                                    let tooltip = Tooltip::new(picker_tooltip);
+                                    move |window, cx| tooltip.clone().build(window, cx)
+                                })
+                                .child(picker_switch),
+                        ),
                     ),
             );
             if model.is_custom

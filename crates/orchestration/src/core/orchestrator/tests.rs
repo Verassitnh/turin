@@ -52,20 +52,7 @@ pub(super) fn command_id(id: &str) -> CommandId {
     CommandId::new(id).expect("command id")
 }
 
-/// A kind whose handler is not ported yet (delegated tasks).
-fn unported_command(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
-    serde_json::from_value(json!({
-        "type": "thread.pull-request.unlink",
-        "commandId": command,
-        "threadId": thread_id,
-        "host": "github.com",
-        "repository": "o/r",
-        "number": 1,
-    }))
-    .expect("thread.pull-request.unlink decodes")
-}
-
-fn archive(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
+pub(super) fn archive(command: &str, thread_id: &str) -> OrchestrationV2ServerCommand {
     OrchestrationV2ServerCommand::Client(OrchestrationV2Command::ThreadArchive {
         command_id: command_id(command),
         thread_id: thread(thread_id),
@@ -93,30 +80,6 @@ async fn reads_report_an_unknown_thread_as_absent() {
     assert_eq!(
         orchestrator.get_thread_event_sequence(&id).await.unwrap(),
         0
-    );
-}
-
-#[tokio::test]
-async fn a_kind_without_a_handler_is_rejected_and_leaves_no_receipt() {
-    let (orchestrator, receipts) = harness().await;
-
-    let error = orchestrator
-        .dispatch(unported_command("command:unported", "thread:a"))
-        .await
-        .expect_err("unported kinds are rejected");
-
-    assert!(
-        matches!(error, OrchestratorError::CommandRejected { ref command_type, .. } if command_type == "thread.pull-request.unlink"),
-        "{error:?}"
-    );
-    assert!(error.was_not_accepted());
-    // No receipt, so the command can run once its handler is ported.
-    assert!(
-        receipts
-            .get_by_command_id(command_id("command:unported"))
-            .await
-            .unwrap()
-            .is_none()
     );
 }
 
@@ -391,7 +354,7 @@ async fn an_imported_native_thread_creates_its_provider_thread() {
 }
 
 /// A thread-row command: `kind` is the wire type, `extra` adds its fields.
-fn mutation(
+pub(super) fn mutation(
     kind: &str,
     command: &str,
     thread_id: &str,

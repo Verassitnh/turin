@@ -19,7 +19,7 @@ use super::{
     Orchestrator, checkpoint_rollback, delegated_commands, delegated_request, message_dispatch,
     prepared_run, queue_start, queued_run, run_stop, runtime_request, secret_request,
     thread_archive, thread_delete, thread_fork, thread_lifecycle, thread_merge_back,
-    thread_metadata, thread_mutation,
+    thread_metadata, thread_mutation, thread_pull_request,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::dispatch_mode_limit::{
@@ -797,6 +797,9 @@ async fn decide(
         return Ok(true);
     }
     if queued_run::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if thread_pull_request::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     if checkpoint_rollback::decide(orchestrator, command, decision).await? {

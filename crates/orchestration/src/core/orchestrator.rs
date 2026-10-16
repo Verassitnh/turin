@@ -80,6 +80,8 @@ mod thread_merge_back;
 mod thread_metadata;
 mod thread_mutation;
 mod thread_pull_request;
+#[cfg(test)]
+mod thread_pull_request_tests;
 
 use std::sync::Arc;
 

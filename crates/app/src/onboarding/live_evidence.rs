@@ -41,7 +41,7 @@ pub fn first_run_evidence(
         server_cwd: std::env::current_dir()
             .ok()
             .map(|path| path.to_string_lossy().into_owned()),
-        primary_environment_id: Some(local_environment_id()),
+        primary_environment_id: Some(local_environment_id().to_string()),
         bootstrap_project_id: None,
         bootstrap_thread_id: None,
         bootstrap_project_created: None,

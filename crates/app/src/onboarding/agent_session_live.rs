@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
+use turin_contracts::TrimmedNonEmptyString;
 use turin_contracts::agent_sessions::{
     AgentSessionImportInput, AgentSessionImportSource, AgentSessionScanResult,
 };
@@ -44,16 +45,14 @@ impl AgentSessionLive {
     pub fn new(runtime: Arc<WriteRuntime>, data_dir: &std::path::Path) -> Self {
         let host = discovery_host(data_dir);
         let settings = Arc::new(RuntimeDiscoverySettings {
-            handle: runtime.providers.settings.clone(),
+            service: Arc::clone(&runtime.server_settings),
         });
         let projects = Arc::new(StoreReads(Arc::clone(&runtime.stores.projects)));
         let discovery = Arc::new(AgentSessionDiscovery::with_local_filesystem(
             host, settings, projects,
         ));
-        let importer = Arc::new(build_importer(
-            Arc::clone(&discovery),
-            Arc::clone(&runtime),
-        ));
+        let scanner: Arc<dyn AgentSessionScanner> = Arc::clone(&discovery);
+        let importer = Arc::new(build_importer(scanner, Arc::clone(&runtime)));
         Self {
             discovery,
             importer,
@@ -76,7 +75,7 @@ impl AgentSessionLive {
             .importer
             .import_recent_agent_threads(&AgentSessionImportInput {
                 project_id,
-                expected_workspace_root: Some(expected_workspace_root),
+                expected_workspace_root: TrimmedNonEmptyString::new(&expected_workspace_root).ok(),
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -104,14 +103,14 @@ fn build_importer(
         discovery,
         Arc::new(ImportProjects(Arc::clone(&runtime.stores.projects))),
         Arc::new(OrchestratorThreads(Arc::clone(&runtime.orchestrator))),
-        Arc::new(SinkWriter(Arc::clone(&runtime.stores.sink))),
+        Arc::new(SinkWriter(runtime.stores.sink.clone())),
         Arc::new(ProviderThreadIdsLive),
-        Arc::new(RuntimeRows(Arc::clone(&runtime.stores.db))),
+        Arc::new(RuntimeRows(runtime.stores.db.clone())),
     )
 }
 
 struct RuntimeDiscoverySettings {
-    handle: turin_provider_core::provider_host_live::DesktopSettingsHandle,
+    service: Arc<turin_runtime::server_settings::ServerSettingsService>,
 }
 
 #[async_trait]
@@ -119,7 +118,7 @@ impl AgentSessionDiscoverySettings for RuntimeDiscoverySettings {
     async fn provider_instances(
         &self,
     ) -> Result<turin_contracts::provider_instance::ProviderInstanceConfigMap, PortError> {
-        Ok(self.handle.settings().await.provider_instances)
+        Ok(self.service.get_settings().await?.provider_instances)
     }
 }
 
@@ -153,7 +152,7 @@ impl ProjectStoreReads for StoreReads {
     async fn list(&self, include_deleted: bool) -> Result<Vec<ProjectRow>, PortError> {
         Ok(self
             .0
-            .list(include_deleted)
+            .list(None, include_deleted)
             .await?
             .into_iter()
             .map(project_row)
@@ -180,16 +179,22 @@ impl ProjectStoreReads for StoreReads {
     }
 }
 
+fn trimmed(value: &str) -> TrimmedNonEmptyString {
+    TrimmedNonEmptyString::new(value).expect("project store row fields are non-empty")
+}
+
 fn project_row(row: turin_orchestration::projection::project_store::ProjectRow) -> ProjectRow {
     ProjectRow {
         project_id: row.project_id,
-        title: row.title,
-        workspace_root: row.workspace_root,
-        favicon_path: row.favicon_path,
+        title: trimmed(&row.title),
+        workspace_root: trimmed(&row.workspace_root),
+        favicon_path: row
+            .favicon_path
+            .and_then(|path| TrimmedNonEmptyString::new(&path).ok()),
         default_model_selection: row.default_model_selection,
         default_thread_env_mode: row.default_thread_env_mode,
         auto_pull: row.auto_pull,
-        project_icon: row.project_icon,
+        project_icon: row.project_icon.map(|icon| icon.0),
         scripts: row.scripts,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -265,13 +270,18 @@ impl ProjectServiceApi for ImportProjects {
             })?;
         Ok(row.map(|row| turin_contracts::project::Project {
             id: row.project_id,
-            title: row.title,
-            workspace_root: row.workspace_root,
+            title: trimmed(&row.title),
+            workspace_root: trimmed(&row.workspace_root),
             repository_identity: None,
-            favicon_path: row.favicon_path.map(Some),
-            project_icon: row.project_icon.map(ReceivedProjectIcon),
+            favicon_path: Some(
+                row.favicon_path
+                    .and_then(|path| TrimmedNonEmptyString::new(&path).ok()),
+            ),
+            project_icon: Some(row.project_icon.map(|icon| {
+                ReceivedProjectIcon(Some(icon.0))
+            })),
             default_model_selection: row.default_model_selection,
-            default_thread_env_mode: row.default_thread_env_mode.map(Some),
+            default_thread_env_mode: Some(row.default_thread_env_mode),
             auto_pull: Some(row.auto_pull),
             scripts: row.scripts,
             created_at: row.created_at,
@@ -341,7 +351,7 @@ impl ThreadRecordReader for OrchestratorThreads {
     }
 }
 
-struct SinkWriter(Arc<EventSink>);
+struct SinkWriter(EventSink);
 
 #[async_trait]
 impl OrchestrationEventWriter for SinkWriter {
@@ -362,7 +372,7 @@ impl ProviderThreadIds for ProviderThreadIdsLive {
         driver: &ProviderDriverKind,
         native_thread_id: &str,
     ) -> turin_contracts::ProviderThreadId {
-        IdAllocator.provider_thread(driver, None, native_thread_id)
+        IdAllocator::provider_thread(driver, None, native_thread_id)
     }
 }
 
@@ -408,8 +418,9 @@ impl ProviderRuntimeRows for RuntimeRows {
         source: &AgentSessionImportSource,
     ) -> Result<(), PortError> {
         let db = self.0.clone();
+        let thread_id = thread_id.clone();
         let source = serde_json::to_value(source)?;
-        db.write(move |conn| record_imported_transcript(conn, thread_id, &source))
+        db.write(move |conn| record_imported_transcript(conn, &thread_id, &source))
             .await?;
         Ok(())
     }

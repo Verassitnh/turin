@@ -74,6 +74,10 @@ Suggested wiring (mirrors `pull_request/demo.rs`, without mock data):
 - `AppSidebarLayout` / shell route table (WIRE-shell).
 - `cargo check` in this worktree (parent integration build).
 
+### Pierre file icons (C2)
+
+`ui/pierre_file_icon.rs` resolves paths via `ui/pierre_icons` and renders `Icon::path`. Wired in `diff/file_tree.rs` and `pull_request/code_tab/view.rs` (file tree). Chat changed-files tree is WIRE-shell/chat scope.
+
 ### Demos
 
 `TURIN_PULL_REQUESTS_DEMO` still uses `pull_request/demo.rs` + `MockPullRequestSource`. Production route must use `live_navigation` only.

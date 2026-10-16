@@ -20,6 +20,7 @@ use super::panel::DiffPanel;
 use crate::theme::color::{hex, with_alpha};
 use crate::theme::tokens::{RADIUS_MD, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
+use crate::ui::pierre_file_icon::{file_tree_file_icon, file_tree_folder_icon};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
 /// Tree-local state: directories the reader closed (`initialExpansion: "open"`).
@@ -67,27 +68,6 @@ fn status_letter(status: GitStatus) -> &'static str {
         GitStatus::Renamed => "R",
         GitStatus::Deleted => "D",
     }
-}
-
-/// `--trees-file-icon-color-*`: the icon tint by language.
-fn file_icon_color(path: &str, dark: bool) -> Hsla {
-    let pick = |light: u32, dark_value: u32| hex(if dark { dark_value } else { light });
-    let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
-    let extension = name.rsplit_once('.').map_or("", |(_, ext)| ext);
-    match extension {
-        "ts" | "tsx" | "mts" | "cts" => pick(0x1a85d4, 0x69b1ff),
-        "js" | "jsx" | "mjs" | "cjs" => pick(0xd5a910, 0xffd452),
-        "rs" | "swift" | "svg" => pick(0xd47628, 0xffa359),
-        "py" | "c" | "cpp" | "h" => pick(0x1a85d4, 0x69b1ff),
-        "md" | "mdx" | "sh" => pick(0x199f43, 0x5ecc71),
-        "json" | "html" => pick(0xd47628, 0xffa359),
-        "css" | "scss" => pick(0x693acf, 0x9d6afb),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" => pick(0xd32a61, 0xff678d),
-        "yml" | "yaml" | "rb" => pick(0xd52c36, 0xff6762),
-        "go" => pick(0x1ca1c7, 0x68cdf2),
-        _ => pick(0x84848a, 0xadadb1),
-    }
-    .into()
 }
 
 impl DiffPanel {
@@ -326,10 +306,16 @@ impl DiffPanel {
             Some(status) => status_color(status, dark),
             None => foreground,
         };
-        let icon_color: Hsla = match (row.is_directory, status) {
-            (true, _) => with_alpha(theme.muted_foreground, 0.9).into(),
-            (false, Some(status)) => status_color(status, dark),
-            (false, None) => file_icon_color(&row.path, dark),
+        let icon_size = rems(0.875);
+        let folder_muted: Hsla = with_alpha(theme.muted_foreground, 0.9).into();
+        let file_icon = if is_directory {
+            file_tree_folder_icon(closed, folder_muted, icon_size)
+        } else {
+            let mut icon = file_tree_file_icon(&row.path, dark, icon_size);
+            if let Some(status) = status {
+                icon = icon.color(status_color(status, dark));
+            }
+            icon
         };
         let path = row.path.clone();
         let click_panel = panel.clone();
@@ -370,19 +356,7 @@ impl DiffPanel {
                         )
                     }),
             )
-            .child(
-                Icon::new(if is_directory {
-                    if closed {
-                        IconName::Folder
-                    } else {
-                        IconName::FolderOpen
-                    }
-                } else {
-                    IconName::FileText
-                })
-                .size(rems(0.875))
-                .color(icon_color),
-            )
+            .child(file_icon)
             .child(
                 div()
                     .min_w_0()

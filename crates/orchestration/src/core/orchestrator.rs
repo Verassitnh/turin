@@ -30,6 +30,8 @@ mod queue_start;
 #[cfg(test)]
 mod queue_start_tests;
 mod queued_run;
+#[cfg(test)]
+mod queued_run_tests;
 mod run_stop;
 #[cfg(test)]
 mod run_stop_tests;

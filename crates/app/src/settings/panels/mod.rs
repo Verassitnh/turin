@@ -10,7 +10,7 @@ mod general;
 mod keybindings;
 mod licenses;
 mod projects;
-mod providers;
+pub(crate) mod providers;
 mod source_control;
 mod storage;
 

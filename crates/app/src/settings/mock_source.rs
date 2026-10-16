@@ -7,8 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui_kit::{App, AppContext as _, Entity};
+use indexmap::IndexMap;
 use serde_json::{Value, json};
+use turin_contracts::TrimmedNonEmptyString;
 use turin_contracts::keybindings::KeybindingRule;
+use turin_contracts::provider_setup::{ProviderAuthPhase, ProviderAuthState};
 use turin_contracts::settings::{
     ClientSettings, ServerSettings, ServerSettingsPatch, default_client_settings,
     default_server_settings,
@@ -28,6 +31,20 @@ use super::view_model::{
 
 fn provider(value: Value) -> turin_provider_core::server_provider::ServerProvider {
     serde_json::from_value(value).expect("mock provider decodes")
+}
+
+fn mock_provider_auth() -> IndexMap<String, ProviderAuthState> {
+    let state: ProviderAuthState = serde_json::from_value(json!({
+        "instanceId": "cursor",
+        "phase": "idle",
+        "methods": [{
+            "id": "browser",
+            "name": "Browser",
+            "type": "agent"
+        }]
+    }))
+    .expect("mock provider auth");
+    IndexMap::from([("cursor".into(), state)])
 }
 
 fn mock_providers() -> Vec<turin_provider_core::server_provider::ServerProvider> {
@@ -192,6 +209,7 @@ fn mock_view_model() -> SettingsViewModel {
             config_path: "/Users/dev/.turin/keybindings.json".into(),
         },
         providers: mock_providers(),
+        provider_auth: mock_provider_auth(),
         source_control: mock_source_control(),
         projects: mock_projects(),
         archived_threads: mock_archived_threads(),
@@ -455,8 +473,76 @@ impl SettingsSource for MockSettingsSource {
         tracing::info!(instance_id, "mock settings: update provider");
     }
 
-    fn start_provider_auth(&self, instance_id: &str, _cx: &mut App) {
-        tracing::info!(instance_id, "mock settings: start provider auth");
+    fn start_provider_auth(&self, instance_id: &str, cx: &mut App) {
+        {
+            let mut state = self.state.borrow_mut();
+            let methods = state
+                .vm
+                .provider_auth
+                .get(instance_id)
+                .and_then(|s| s.methods.clone());
+            state.vm.provider_auth.insert(
+                instance_id.to_owned(),
+                serde_json::from_value(json!({
+                    "instanceId": instance_id,
+                    "phase": "waiting",
+                    "flowId": "mock-flow",
+                    "authorizationUrl": "https://example.com/oauth",
+                    "message": "Complete sign-in in your browser.",
+                    "methods": methods,
+                    "interaction": {
+                        "type": "browser",
+                        "id": "mock-interaction",
+                        "url": "https://example.com/oauth",
+                        "requiresConsent": false,
+                        "acceptsCallback": true
+                    }
+                }))
+                .expect("mock waiting auth"),
+            );
+        }
+        self.publish(cx);
+    }
+
+    fn cancel_provider_auth(&self, instance_id: &str, _flow_id: &str, cx: &mut App) {
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(entry) = state.vm.provider_auth.get_mut(instance_id) {
+                entry.phase = ProviderAuthPhase::Cancelled;
+                entry.flow_id = None;
+                entry.interaction = None;
+            }
+        }
+        self.publish(cx);
+    }
+
+    fn complete_provider_auth(
+        &self,
+        instance_id: &str,
+        _flow_id: &str,
+        _callback_url: &str,
+        cx: &mut App,
+    ) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.vm.provider_auth.shift_remove(instance_id);
+            if let Some(provider) = state
+                .vm
+                .providers
+                .iter_mut()
+                .find(|p| p.instance_id.as_str() == instance_id)
+            {
+                provider.auth.status =
+                    turin_provider_core::server_provider::ServerProviderAuthStatus::Authenticated;
+                provider.auth.label =
+                    Some(TrimmedNonEmptyString::new("Signed in (mock)").expect("label"));
+            }
+        }
+        self.publish(cx);
+    }
+
+    fn open_external_url(&self, url: &str, _cx: &mut App) {
+        tracing::info!(url, "mock settings: open external url");
     }
 
     fn logout_provider(&self, instance_id: &str, _cx: &mut App) {

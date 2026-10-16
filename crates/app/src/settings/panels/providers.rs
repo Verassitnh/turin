@@ -73,6 +73,10 @@ pub struct ProvidersState {
     pub editing_model: Option<String>,
     pub custom_model_draft: Option<super::super::custom_model_editor_logic::CustomModelDraft>,
     pub custom_model_editor_error: Option<String>,
+    pub auth_method_id: std::collections::HashMap<String, String>,
+    pub auth_callback_draft: std::collections::HashMap<String, String>,
+    pub auth_field_draft:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     pub wizard: super::add_provider::AddProviderState,
     pub env_drafts:
         std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
@@ -916,7 +920,12 @@ impl SettingsView {
         if can_authenticate || !env_fields.is_empty() {
             let mut setup = SettingsSection::new("Setup");
             if can_authenticate {
-                setup = setup.child(self.account_row(row, live.as_ref(), cx));
+                if row.driver == "codex" {
+                    setup = setup.child(self.codex_setup_section(row, live.as_ref(), window, cx));
+                } else if let Some(provider) = live.as_ref() {
+                    setup = setup
+                        .child(self.provider_authentication_section(&row.id, provider, window, cx));
+                }
             }
             for field in env_fields {
                 let variable =
@@ -1218,44 +1227,6 @@ impl SettingsView {
             rems(1.75).to_pixels(px(16.)),
         )
         .into_any_element()
-    }
-
-    fn account_row(
-        &mut self,
-        row: &InstanceRow,
-        live: Option<&ServerProvider>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let signed_in =
-            live.is_some_and(|p| p.auth.status == ServerProviderAuthStatus::Authenticated);
-        let id = row.id.clone();
-        let button = if signed_in {
-            Button::new(SharedString::from(format!("provider-signout-{id}")))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Sm)
-                .label("Sign out")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let source = this.store.read(cx).source();
-                    source.logout_provider(&id, cx);
-                }))
-        } else {
-            Button::new(SharedString::from(format!("provider-signin-{id}")))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Sm)
-                .label("Sign in")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let source = this.store.read(cx).source();
-                    source.start_provider_auth(&id, cx);
-                }))
-        };
-        SettingsRow::new("Account")
-            .description(if signed_in {
-                "Signed in.".to_owned()
-            } else {
-                "Sign in on this device.".to_owned()
-            })
-            .control(button)
-            .into_any_element()
     }
 
     fn environment_field_row(

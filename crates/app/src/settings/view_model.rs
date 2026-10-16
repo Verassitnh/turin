@@ -11,7 +11,9 @@
 use std::rc::Rc;
 
 use gpui_kit::{App, Context};
+use indexmap::IndexMap;
 use serde_json::Value;
+use turin_contracts::provider_setup::ProviderAuthState;
 use turin_contracts::settings::{ClientSettings, ServerSettings};
 use turin_provider_core::server_provider::ServerProvider;
 use turin_shared::keybindings::ResolvedKeybindingRule;
@@ -131,6 +133,8 @@ pub struct SettingsViewModel {
     pub environment: EnvironmentInfo,
     pub keybindings: KeybindingsViewModel,
     pub providers: Vec<ServerProvider>,
+    /// Live auth flows keyed by provider instance id (`providerAuthState` query).
+    pub provider_auth: IndexMap<String, ProviderAuthState>,
     /// `sourceControlEnvironment.discovery` of the local environment.
     pub source_control: turin_contracts::source_control::SourceControlDiscoveryResult,
     pub projects: Vec<SettingsProject>,
@@ -184,6 +188,15 @@ pub trait SettingsSource {
     /// Starts / ends the provider account sign-in (the in-app auth flow of
     /// ProviderAuthenticationSection).
     fn start_provider_auth(&self, instance_id: &str, cx: &mut App);
+    fn cancel_provider_auth(&self, instance_id: &str, flow_id: &str, cx: &mut App);
+    fn complete_provider_auth(
+        &self,
+        instance_id: &str,
+        flow_id: &str,
+        callback_url: &str,
+        cx: &mut App,
+    );
+    fn open_external_url(&self, url: &str, cx: &mut App);
     fn logout_provider(&self, instance_id: &str, cx: &mut App);
     /// `useTheme().setTheme` / `setAppearanceMode`.
     fn set_theme(&self, theme: String, cx: &mut App);

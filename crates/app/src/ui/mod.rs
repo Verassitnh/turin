@@ -25,6 +25,7 @@ pub mod separator;
 pub mod sidebar;
 pub mod skeleton;
 pub mod standalone_page;
+pub mod start_truncated_path;
 pub mod switch;
 pub mod table;
 pub mod text_input;

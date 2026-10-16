@@ -29,7 +29,8 @@ use super::markdown_links::{
     parse_markdown_file_link,
 };
 use super::markdown_pipeline::{
-    AlertKind, Align, Block, Inlines, ListItem, MarkdownDocument, Marks, parse_chat_markdown,
+    AlertKind, Align, Block, Inlines, LinkAutolink, ListItem, MarkdownDocument, Marks,
+    parse_chat_markdown,
 };
 use crate::components::chat::chat_media;
 use crate::components::chat::mermaid_diagram::{MERMAID_UNAVAILABLE, mermaid_diagram};
@@ -46,8 +47,18 @@ const MAX_DOCUMENT_CACHE_ENTRIES: usize = 2000;
 
 #[derive(Default)]
 struct DocumentCache {
-    entries: HashMap<(u64, usize, bool), Arc<MarkdownDocument>>,
-    order: VecDeque<(u64, usize, bool)>,
+    entries: HashMap<DocumentKey, Arc<MarkdownDocument>>,
+    order: VecDeque<DocumentKey>,
+}
+
+/// (text hash, text length, line breaks, extra plugin hash).
+type DocumentKey = (u64, usize, bool, u64);
+
+/// `extraRemarkPlugins`: a pass over the parsed document, keyed so the cache tells two apart.
+#[derive(Clone)]
+pub struct ExtraRemarkPlugin {
+    pub key: SharedString,
+    pub apply: Arc<dyn Fn(&MarkdownDocument) -> MarkdownDocument>,
 }
 
 thread_local! {
@@ -55,14 +66,34 @@ thread_local! {
 }
 
 /// The parsed document for `text`, cached across frames and rows.
+// Every renderer here goes through `cached_document_with`; kept for callers without a plugin.
+#[allow(dead_code)]
 pub fn cached_document(text: &str, line_breaks: bool) -> Arc<MarkdownDocument> {
+    cached_document_with(text, line_breaks, None)
+}
+
+/// [`cached_document`] with an extra remark plugin applied after parsing.
+pub fn cached_document_with(
+    text: &str,
+    line_breaks: bool,
+    plugin: Option<&ExtraRemarkPlugin>,
+) -> Arc<MarkdownDocument> {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
-    let key = (hasher.finish(), text.len(), line_breaks);
+    let plugin_hash = plugin.map_or(0, |plugin| {
+        let mut hasher = DefaultHasher::new();
+        plugin.key.hash(&mut hasher);
+        hasher.finish()
+    });
+    let key = (hasher.finish(), text.len(), line_breaks, plugin_hash);
     if let Some(doc) = DOCUMENTS.with(|cache| cache.borrow().entries.get(&key).cloned()) {
         return doc;
     }
-    let doc = Arc::new(parse_chat_markdown(text, line_breaks));
+    let parsed = parse_chat_markdown(text, line_breaks);
+    let doc = Arc::new(match plugin {
+        Some(plugin) => (plugin.apply)(&parsed),
+        None => parsed,
+    });
     DOCUMENTS.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.entries.len() >= MAX_DOCUMENT_CACHE_ENTRIES
@@ -87,6 +118,7 @@ pub struct ChatMarkdown {
     /// default `text-foreground/80%`.
     full_foreground: bool,
     document_order: u64,
+    extra_remark_plugin: Option<ExtraRemarkPlugin>,
 }
 
 impl ChatMarkdown {
@@ -98,7 +130,14 @@ impl ChatMarkdown {
             is_streaming: false,
             full_foreground: false,
             document_order: 0,
+            extra_remark_plugin: None,
         }
+    }
+
+    /// `extraRemarkPlugins`.
+    pub fn extra_remark_plugin(mut self, plugin: ExtraRemarkPlugin) -> Self {
+        self.extra_remark_plugin = Some(plugin);
+        self
     }
 
     pub fn line_breaks(mut self, line_breaks: bool) -> Self {
@@ -263,9 +302,22 @@ impl Md<'_> {
             }
             text.push_str(run_text);
             let mut style = self.span_style(marks, inherit, theme);
+            let autolink = marks.link.and_then(|link| {
+                inlines
+                    .autolinks
+                    .iter()
+                    .find(|(index, _)| *index == link)
+                    .map(|(_, kind)| *kind)
+            });
+            // `pullRequestAutolink === "commit" && "font-mono"`.
+            if autolink == Some(LinkAutolink::PullRequestCommit) {
+                style.family = self.fonts.mono.clone();
+            }
             // `MarkdownLinkFavicon` leads an external link (first run only):
             // `ms-[0.25em] me-[0.2em] size-[14px]`, GitHub's mark or a globe.
+            // `faviconHost && hasText && !isPullRequestAutolink`.
             if let Some(link) = marks.link
+                && autolink.is_none()
                 && (ix == 0 || runs[ix - 1].1.link != Some(link))
                 && let Some(host) = inlines
                     .links
@@ -1444,7 +1496,11 @@ fn lower_roman(mut n: u64) -> String {
 impl RenderOnce for ChatMarkdown {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme().clone();
-        let document = cached_document(&self.text, self.line_breaks);
+        let document = cached_document_with(
+            &self.text,
+            self.line_breaks,
+            self.extra_remark_plugin.as_ref(),
+        );
         let rem = window.rem_size();
         let fonts = Fonts {
             sans: theme.fonts.sans.clone().into(),

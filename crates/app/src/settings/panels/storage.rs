@@ -1,5 +1,6 @@
 //! Port of StorageSettings.tsx (`StorageSettingsPanel`) for the single local
 //! environment.
+//! Also ports upstream/apps/web/src/lib/formatBytes.ts.
 //!
 //! Not ported (PORTING.md Deviations): the browser-artifact retention row
 //! (the browser integration is cut), the project-scope worktree cleanup

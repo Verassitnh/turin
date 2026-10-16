@@ -37,12 +37,18 @@ pub mod expanded_image;
 #[allow(dead_code)]
 pub mod highlighted_tokens;
 // Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
+#[allow(dead_code)]
 pub mod composer_context_undo;
+#[allow(dead_code)]
 pub mod composer_event_scope;
+#[allow(dead_code)]
 pub mod composer_focus_state;
+#[allow(dead_code)]
 pub mod composer_menu_state;
 // Route handoff around the mobile composer morph. No view calls it yet.
+#[allow(dead_code)]
 pub mod draft_hero_transition;
+#[allow(dead_code)]
 pub mod folder_drop;
 pub mod markdown;
 #[allow(dead_code)]

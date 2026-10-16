@@ -45,6 +45,7 @@ pub mod placeholder;
 pub mod primary_actions;
 pub mod prompt_history;
 pub mod prompt_stash_store;
+pub mod proposed_plan;
 pub mod provider_options;
 pub mod provider_state;
 pub mod queued_edit;

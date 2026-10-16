@@ -176,12 +176,7 @@ pub struct ThreadRightPanelState {
     pub maximized: bool,
 }
 
-/// `ThreadPanelPresentation`: the inline column or the popover.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThreadPanelPresentation {
-    Inline,
-    Popover,
-}
+pub use crate::state::right_panel_layout::ThreadPanelPresentation;
 
 /// `ThreadPanelVisibility`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

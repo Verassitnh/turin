@@ -217,6 +217,16 @@ pub fn provider_icon_path(driver_kind: &str) -> Option<&'static str> {
     }
 }
 
+/// `UltrafastIcon` (`currentColor`; the back bolt is 40% opaque), shown by the composer's
+/// speed trait for the Ultrafast service tier.
+pub const ULTRAFAST: &str = "brand/ultrafast.svg";
+/// `LinuxIcon` (`currentColor`), the Linux/WSL machine kind in `EnvironmentMachineIcon`.
+pub const LINUX: &str = "brand/linux.svg";
+/// `GitIcon`, a fixed-colour mark: draw it with `img`, not the tinted `Icon`.
+pub const GIT: &str = "brand/git.svg";
+/// `JujutsuIcon`, a multi-colour mark: draw it with `img`, not the tinted `Icon`.
+pub const JUJUTSU: &str = "brand/jujutsu.svg";
+
 /// The pull request list's empty-state drawing: a branch stopped short of the base line
 /// (PullRequestListEmptyState.tsx `BranchMark`, unjoined).
 pub const BRANCH_MARK: &str = "brand/branch-mark.svg";
@@ -308,6 +318,10 @@ const BRAND: &[(&str, &[u8])] = &[
         include_bytes!("../assets/brand/branch-mark.svg"),
     ),
     (SMILE_PLUS, include_bytes!("../assets/brand/smile-plus.svg")),
+    (ULTRAFAST, include_bytes!("../assets/brand/ultrafast.svg")),
+    (LINUX, include_bytes!("../assets/brand/linux.svg")),
+    (GIT, include_bytes!("../assets/brand/git.svg")),
+    (JUJUTSU, include_bytes!("../assets/brand/jujutsu.svg")),
     (
         editor_icons::ANTIGRAVITY,
         include_bytes!("../assets/editors/antigravity.svg"),
@@ -438,6 +452,9 @@ impl AssetSource for AppAssets {
         if let Some((_, bytes)) = BRAND.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
+        if let Some(bytes) = crate::ui::pierre_icons::load_pierre_icon(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -460,6 +477,12 @@ impl AssetSource for AppAssets {
             .filter(|name| name.starts_with(path))
             .map(SharedString::from)
             .collect();
+        names.extend(
+            crate::ui::pierre_icons::pierre_icon_asset_paths()
+                .into_iter()
+                .filter(|name| name.starts_with(path))
+                .map(SharedString::from),
+        );
         names.extend(AppIcons.list(path)?);
         names.extend(UsageIcons.list(path)?);
         names.extend(crate::settings::icons::SettingsIcons.list(path)?);
@@ -467,5 +490,21 @@ impl AssetSource for AppAssets {
         names.sort();
         names.dedup();
         Ok(names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn components_icons_marks_load_by_path() {
+        for path in [ULTRAFAST, LINUX, GIT, JUJUTSU] {
+            let bytes = AppAssets
+                .load(path)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{path} is not embedded"));
+            assert!(bytes.starts_with(b"<svg"), "{path}");
+        }
     }
 }

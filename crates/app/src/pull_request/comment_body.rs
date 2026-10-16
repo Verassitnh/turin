@@ -2,30 +2,35 @@
 //! PullRequestMarkdown.tsx, PullRequestReactions.tsx and PullRequestEditButton.tsx: the shared
 //! pieces every remark on the Timeline, Code and Summary tabs is built from.
 //!
+//! `PullRequestMarkdown` runs `remarkPullRequestAutolinks` through ChatMarkdown's extra remark
+//! plugin seam (`pull_request_markdown_logic::apply_pull_request_autolinks`), with the
+//! repository the open pull request belongs to read from [`PullRequestMarkdownContext`].
+//!
 //! Not ported: the video/attachment segments of `PullRequestMarkdown` (`splitPullRequestBody`,
 //! GitHub media signing: no asset service in the view layer, so a media link renders as a link),
-//! `remarkPullRequestAutolinks` (ChatMarkdown has no remark plugin seam; the pure matcher is
-//! `pull_request_markdown_logic`), `onFocusCapture` expanding a clamped body (no focus inside a
-//! read-only body), and the reaction's optimistic rollback toast (commands return immediately).
+//! `onFocusCapture` expanding a clamped body (no focus inside a read-only body), and the
+//! reaction's optimistic rollback toast (commands return immediately).
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, App, ElementId, InteractiveElement as _, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop,
-    linear_gradient, px, rems,
+    Anchor, App, ElementId, Global, InteractiveElement as _, IntoElement, ParentElement,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    linear_color_stop, linear_gradient, px, rems,
 };
 use turin_contracts::pull_request::{PullRequestReaction, PullRequestReactionContent};
 
 use super::detail_context::DetailContext;
+use super::pull_request_markdown_logic::apply_pull_request_autolinks;
 use super::pull_request_reactions_logic::{
     PULL_REQUEST_REACTION_ORDER, apply_pending_pull_request_reactions, pull_request_reaction_emoji,
     pull_request_reaction_name, pull_request_reaction_tooltip,
 };
 use crate::assets::SMILE_PLUS;
-use crate::components::chat::markdown::ChatMarkdown;
+use crate::components::chat::markdown::{ChatMarkdown, ExtraRemarkPlugin};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_BASE, TEXT_XS};
@@ -41,12 +46,58 @@ type ToggleReaction = Rc<dyn Fn(PullRequestReactionContent, bool, &mut App)>;
 /// `subjectId`; the source resolves the host's id for the description).
 pub const PULL_REQUEST_SUBJECT: &str = "";
 
-/// `PullRequestMarkdown`: the body through ChatMarkdown.
+/// `PullRequestMarkdownContext`: the repository url the detail panel provides to the markdown
+/// beneath it, so `#123` and commit hashes link into that repository.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PullRequestMarkdownContext {
+    pub repository_url: Option<String>,
+}
+
+impl Global for PullRequestMarkdownContext {}
+
+/// The detail panel's `PullRequestMarkdownContext.Provider`. Sets the global only when it
+/// changes, so rendering does not notify observers every frame.
+pub fn provide_pull_request_markdown_context(cx: &mut App, repository_url: Option<String>) {
+    let next = PullRequestMarkdownContext { repository_url };
+    if cx.try_global::<PullRequestMarkdownContext>() != Some(&next) {
+        cx.set_global(next);
+    }
+}
+
+/// `PullRequestMarkdown`: the body through ChatMarkdown, with the same-repository autolinks when
+/// the context names a repository.
+#[derive(IntoElement)]
+pub struct PullRequestMarkdown {
+    id: ElementId,
+    text: SharedString,
+}
+
+impl RenderOnce for PullRequestMarkdown {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let repository_url = cx
+            .try_global::<PullRequestMarkdownContext>()
+            .and_then(|context| context.repository_url.clone());
+        let markdown = ChatMarkdown::new(self.id, self.text);
+        match repository_url {
+            Some(repository_url) => markdown.extra_remark_plugin(ExtraRemarkPlugin {
+                key: SharedString::from(format!("pull-request-autolinks:{repository_url}")),
+                apply: Arc::new(move |document| {
+                    apply_pull_request_autolinks(document, &repository_url)
+                }),
+            }),
+            None => markdown,
+        }
+    }
+}
+
 pub fn pull_request_markdown(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
-) -> ChatMarkdown {
-    ChatMarkdown::new(id, text)
+) -> PullRequestMarkdown {
+    PullRequestMarkdown {
+        id: id.into(),
+        text: text.into(),
+    }
 }
 
 /// A remark's keyed state: whether it is showing in full and whether it is taller than the clamp.

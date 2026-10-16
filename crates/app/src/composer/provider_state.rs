@@ -1,11 +1,16 @@
 //! Ports of upstream/apps/web/src/components/chat/composerProviderState.tsx,
 //! the logic half of TraitsPicker.tsx and `providerModels.ts`
-//! (`getProviderModelCapabilities`, `resolveSelectableModel`).
+//! (`getProviderModelCapabilities`, `resolveSelectableModel`,
+//! `getProviderModels`, `resolveSelectableProvider`, `getDefaultServerModel`).
+//! Also ports upstream/apps/web/src/providerModels.ts.
 //!
 //! Everything is data-driven by the model's option descriptors; the views in
 //! `views/` render what [`traits_section`] and [`build_traits_trigger_display`]
 //! decide.
 
+use turin_contracts::model::{DEFAULT_MODEL, default_model_by_provider};
+
+use crate::composer::catalog::ProviderInstanceEntry;
 use crate::composer::provider_options::{
     ModelCapabilities, OptionDescriptor, OptionSelection, OptionValue, SelectionContext,
     build_explicit_provider_option_selections_from_descriptors,
@@ -142,6 +147,64 @@ pub fn get_provider_model_capabilities(
     } else {
         without_plan_agent_option(caps)
     }
+}
+
+/// `DEFAULT_DRIVER_KIND`: the driver `resolveSelectableProvider` falls back to
+/// when no provider is enabled.
+const DEFAULT_DRIVER_KIND: &str = "codex";
+
+/// `getProviderSnapshot`: the snapshot of a driver's default instance
+/// (`defaultInstanceIdForDriver`, whose id is the driver kind itself).
+fn get_provider_snapshot<'a>(
+    providers: &'a [ProviderInstanceEntry],
+    provider: &str,
+) -> Option<&'a ProviderInstanceEntry> {
+    providers
+        .iter()
+        .find(|candidate| candidate.instance_id == provider)
+}
+
+/// `getProviderModels`.
+pub fn get_provider_models<'a>(
+    providers: &'a [ProviderInstanceEntry],
+    provider: &str,
+) -> &'a [ProviderModel] {
+    get_provider_snapshot(providers, provider).map_or(&[], |entry| entry.models.as_slice())
+}
+
+/// Resolve an instance selection to the correlated live driver. If the
+/// instance is absent, fall back to a live enabled provider instead of
+/// inferring a driver from the missing instance id.
+pub fn resolve_selectable_provider(
+    providers: &[ProviderInstanceEntry],
+    provider: Option<&str>,
+) -> String {
+    let requested_entry = providers
+        .iter()
+        .find(|candidate| Some(candidate.instance_id.as_str()) == provider);
+    if let Some(entry) = requested_entry.filter(|entry| entry.enabled) {
+        return entry.driver_kind.clone();
+    }
+    providers
+        .iter()
+        .find(|candidate| candidate.enabled)
+        .map_or_else(
+            || DEFAULT_DRIVER_KIND.to_owned(),
+            |entry| entry.driver_kind.clone(),
+        )
+}
+
+/// `getDefaultServerModel`.
+pub fn get_default_server_model(providers: &[ProviderInstanceEntry], provider: &str) -> String {
+    let models = get_provider_models(providers, provider);
+    models
+        .iter()
+        .find(|model| model.is_default && !model.is_custom)
+        .or_else(|| models.iter().find(|model| !model.is_custom))
+        .or_else(|| models.first())
+        .map(|model| model.slug.clone())
+        .or_else(|| default_model_by_provider(provider).map(str::to_owned))
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -13,6 +13,7 @@ mod diff;
 #[cfg(target_os = "macos")]
 mod dock_icon;
 mod hooks;
+mod lru_cache;
 mod onboarding;
 mod project_icon_colors;
 mod project_identity;

@@ -1043,6 +1043,8 @@ impl PullRequestDetailPanel {
             .label;
         let open_label = open_on_host_label(Some(host_label));
         let repository_url = repository_url(detail.url.as_str());
+        // `PullRequestMarkdownContext.Provider`: the bodies beneath link into this repository.
+        super::comment_body::provide_pull_request_markdown_context(cx, repository_url.clone());
         let narrow = self.width < HEADER_LABELS_MIN_WIDTH;
         let reference = self.ctx.reference.clone();
 

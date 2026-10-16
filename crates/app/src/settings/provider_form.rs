@@ -1,6 +1,7 @@
 //! Logic of ProviderSettingsForm.tsx, ProviderInstanceCard.tsx and
 //! ProviderModelsSection.tsx (their exported pure helpers), with the upstream
 //! tests that apply to the kept drivers.
+//! Also ports upstream/apps/web/src/modelOrdering.ts.
 //!
 //! The per-driver settings schemas come from `turin_contracts::settings`
 //! (Codex, Claude); Cursor and OpenCode forms are defined here from their

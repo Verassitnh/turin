@@ -2,14 +2,16 @@
 //!
 //! Upstream highlights with Shiki using the `pierre-light` / `pierre-dark`
 //! themes (`resolveDiffThemeName`, upstream/apps/web/src/lib/diffRendering.ts)
-//! and caches highlighted HTML in an LRU (`MAX_HIGHLIGHT_CACHE_ENTRIES`).
+//! and caches highlighted HTML in an LRU bounded by entries and bytes
+//! (`MAX_HIGHLIGHT_CACHE_ENTRIES`, `MAX_HIGHLIGHT_CACHE_MEMORY_BYTES`;
+//! `crate::lru_cache`).
 //! Turin parses with tree-sitter (gpui-component's grammars) and maps capture
 //! names onto the same theme colors (values from `@pierre/theme`'s
 //! `tokenColors` / `semanticTokenColors`). Results are cached by
 //! (code hash, language, appearance) so a frame never re-highlights.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -18,10 +20,13 @@ use gpui_kit::component::Rope;
 use gpui_kit::component::highlighter::{LanguageRegistry, SyntaxHighlighter};
 use gpui_kit::{HighlightStyle, Hsla, Rgba};
 
+use crate::lru_cache::LruCache;
 use crate::theme::color::hex;
 
 /// `MAX_HIGHLIGHT_CACHE_ENTRIES`.
 const MAX_HIGHLIGHT_CACHE_ENTRIES: usize = 500;
+/// `MAX_HIGHLIGHT_CACHE_MEMORY_BYTES`.
+const MAX_HIGHLIGHT_CACHE_MEMORY_BYTES: usize = 50 * 1024 * 1024;
 
 /// Token colors of one pierre theme.
 struct PierreTheme {
@@ -162,22 +167,20 @@ struct CacheKey {
     dark: bool,
 }
 
-#[derive(Default)]
-struct Cache {
-    entries: HashMap<CacheKey, Arc<HighlightedCode>>,
-    order: VecDeque<CacheKey>,
-}
-
 thread_local! {
     static HIGHLIGHTERS: RefCell<HashMap<String, SyntaxHighlighter>> = RefCell::default();
 }
 
-fn shared_cache() -> &'static Mutex<Cache> {
-    static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
-        Mutex::new(Cache {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-        })
+/// The highlight LRU (`crate::lru_cache`), bounded by entries and bytes like
+/// upstream. Shared across threads so a background highlight can fill it.
+type HighlightCache = LruCache<CacheKey, Arc<HighlightedCode>>;
+
+fn shared_cache() -> &'static Mutex<HighlightCache> {
+    static CACHE: LazyLock<Mutex<HighlightCache>> = LazyLock::new(|| {
+        Mutex::new(LruCache::new(
+            MAX_HIGHLIGHT_CACHE_ENTRIES,
+            MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
+        ))
     });
     &CACHE
 }
@@ -228,6 +231,14 @@ fn registry_language(language: &str) -> String {
     }
 }
 
+/// `estimateHighlightedSize`: upstream sizes the HTML (`html.length * 2`) or the
+/// source (`code.length * 3`), whichever is larger; here the token list stands
+/// in for the HTML.
+fn estimate_highlighted_size(highlighted: &HighlightedCode, code: &str) -> usize {
+    let tokens_bytes = highlighted.tokens.len() * std::mem::size_of::<(Range<usize>, Hsla)>();
+    tokens_bytes.max(code.len() * 3)
+}
+
 fn cache_key(code: &str, language: &str, dark: bool) -> CacheKey {
     let mut hasher = DefaultHasher::new();
     code.hash(&mut hasher);
@@ -245,7 +256,7 @@ pub fn cached_highlight(code: &str, language: &str, dark: bool) -> Option<Arc<Hi
     shared_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.entries.get(&key).cloned())
+        .and_then(|mut cache| cache.get(&key).cloned())
 }
 
 /// One foreground run, used until a background highlight finishes.
@@ -270,7 +281,7 @@ pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<Highlighted
     if let Some(hit) = shared_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.entries.get(&key).cloned())
+        .and_then(|mut cache| cache.get(&key).cloned())
     {
         return hit;
     }
@@ -301,13 +312,11 @@ pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<Highlighted
         tokens: fill_highlight_gaps(code.len(), foreground, tokens),
     });
     if let Ok(mut cache) = shared_cache().lock() {
-        if cache.entries.len() >= MAX_HIGHLIGHT_CACHE_ENTRIES
-            && let Some(oldest) = cache.order.pop_front()
-        {
-            cache.entries.remove(&oldest);
-        }
-        cache.order.push_back(key.clone());
-        cache.entries.insert(key, result.clone());
+        cache.set(
+            key,
+            result.clone(),
+            estimate_highlighted_size(&result, code),
+        );
     }
     result
 }

@@ -15,8 +15,7 @@ use regex::Regex;
 /// `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT` (packages/shared composerContextReferences).
 pub const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT: &str = "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
 
-/// `PLAN_IMPLEMENTATION_PROMPT_PREFIX` (proposedPlan.ts).
-pub const PLAN_IMPLEMENTATION_PROMPT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
+pub use crate::composer::proposed_plan::PLAN_IMPLEMENTATION_PROMPT_PREFIX;
 
 const CLAUDE_ULTRATHINK_PREFIX: &str = "Ultrathink:\n";
 

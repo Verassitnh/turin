@@ -3,6 +3,7 @@
 //! selection or search, the legacy-models section, provider navigation and the
 //! setup affordances. The view in `views/model_picker.rs` renders
 //! [`ModelPickerList`].
+//! Also ports upstream/apps/web/src/modelOrdering.ts.
 
 use std::collections::HashSet;
 

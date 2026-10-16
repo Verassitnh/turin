@@ -25,12 +25,17 @@ pub mod item_support;
 pub mod live_refresh;
 pub mod models;
 pub mod orchestration_v2_projection;
+pub mod panel_animations;
 pub mod project_commands;
 pub mod project_grouping;
 pub mod projects;
+pub mod question_attachments;
+pub mod right_panel_layout;
 pub mod right_panel_store;
+pub mod running_thread_keep_alive;
 pub mod shell_reducer;
 pub mod shell_state;
+pub mod shortcut_modifier_state;
 pub mod sidebar_project_grouping;
 pub mod store;
 pub mod subagent_display;
@@ -55,6 +60,7 @@ pub mod thread_workflows;
 pub mod time;
 pub mod turn_item_presentation;
 pub mod ui_state_store;
+pub mod workspace_basename_lookup;
 pub mod worktree_cleanup;
 
 /// The one environment a single-process Turin has: this machine.

@@ -1,6 +1,8 @@
 //! Port of upstream/apps/web/src/hooks/usePreviewPanelInlineSize.ts
 //!
-//! Only the sizing rules; the owning view re-measures on every layout, which
+//! Also home of `getPreviewPanelMaxWidth`, which upstream re-exports from
+//! `PreviewPanelShell.tsx`; its seven `PreviewPanelShell.test.ts` cases are
+//! ported below. Only the sizing rules; the owning view re-measures on every layout, which
 //! replaces the resize observer.
 
 use super::use_resizable_width::clamp_resizable_width;
@@ -47,6 +49,42 @@ mod tests {
     fn max_width_takes_the_tighter_cap() {
         assert_eq!(get_preview_panel_max_width(2000., None), 1400.);
         assert_eq!(get_preview_panel_max_width(2000., Some(1000.)), 640.);
+    }
+
+    #[test]
+    fn allows_seventy_percent_of_an_ultra_wide_viewport_without_a_pixel_ceiling() {
+        assert_eq!(get_preview_panel_max_width(6_000., None), 4_200.);
+    }
+
+    #[test]
+    fn rounds_fractional_css_pixels_down() {
+        assert_eq!(get_preview_panel_max_width(2_001., None), 1_400.);
+    }
+
+    #[test]
+    fn reserves_the_sibling_column_minimum_when_the_flex_row_is_known() {
+        // Fullscreen 14" MacBook: viewport 1512, sidebar ~256, row of 1256.
+        assert_eq!(get_preview_panel_max_width(1_512., Some(1_256.)), 896.);
+    }
+
+    #[test]
+    fn keeps_the_fraction_cap_when_the_row_is_wide_enough_for_both_columns() {
+        assert_eq!(get_preview_panel_max_width(3_000., Some(2_900.)), 2_100.);
+    }
+
+    #[test]
+    fn rounds_fractional_row_widths_down() {
+        assert_eq!(get_preview_panel_max_width(1_512., Some(1_256.6)), 896.);
+    }
+
+    #[test]
+    fn never_drops_below_the_panel_minimum_when_the_row_cannot_fit_both_columns() {
+        assert_eq!(get_preview_panel_max_width(1_000., Some(700.)), 360.);
+    }
+
+    #[test]
+    fn stays_at_the_panel_minimum_even_when_the_row_is_narrower_than_the_reservation() {
+        assert_eq!(get_preview_panel_max_width(1_512., Some(300.)), 360.);
     }
 
     #[test]

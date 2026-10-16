@@ -16,8 +16,10 @@ turin-provider-core.workspace = true
 turin-runtime.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 futures.workspace = true
+image.workspace = true
 indexmap.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
@@ -66,7 +68,6 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
     "tree-sitter-zig",
 ] }
-base64.workspace = true
 percent-encoding.workspace = true
 markdown.workspace = true
 # Shell parsing for embedded scripts (components/chat/embedded_scripts.rs). Same

@@ -103,15 +103,20 @@ pub fn content_search_center_message(
     if results.is_checking_access {
         "Checking file access…".to_owned()
     } else if !results.can_read_files {
-        results
-            .error
-            .clone()
-            .unwrap_or_else(|| "You do not have access to search this project.".to_owned())
+        results.error.clone().unwrap_or_default()
     } else if has_query && !results.is_pending && results.error.is_none() {
         "No results found.".to_owned()
     } else {
         "Type to search across your project.".to_owned()
     }
+}
+
+pub fn content_search_file_count(matches: &[ProjectContentMatch]) -> usize {
+    matches
+        .iter()
+        .map(|match_| match_.path.as_str())
+        .collect::<indexmap::IndexSet<_>>()
+        .len()
 }
 
 pub fn content_search_status_label(
@@ -145,7 +150,7 @@ pub struct ProjectContentSearchDialog {
 impl RenderOnce for ProjectContentSearchDialog {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
-        let Some(cwd) = self.target_cwd else {
+        let Some(_cwd) = self.target_cwd else {
             return div()
                 .flex()
                 .flex_1()
@@ -161,11 +166,7 @@ impl RenderOnce for ProjectContentSearchDialog {
         let visible = visible_content_matches(&self.results.matches, self.visible_count);
         SearchLineHighlightCache::warm(&visible, &self.results.matches, self.dark);
         let groups = group_content_matches(&visible);
-        let file_count = visible
-            .iter()
-            .map(|match_| match_.path.as_str())
-            .collect::<indexmap::IndexSet<_>>()
-            .len();
+        let file_count = content_search_file_count(&self.results.matches);
         let show_status = show_content_search_status_bar(&self.results, has_query);
         div()
             .flex()
@@ -191,9 +192,9 @@ impl RenderOnce for ProjectContentSearchDialog {
                         Toggle::new("content-search-whole-word")
                             .variant(ToggleVariant::Segmented)
                             .size(ToggleSize::Sm)
-                            .label("W")
                             .pressed(self.query.whole_word)
-                            .disabled(!self.results.can_read_files),
+                            .disabled(!self.results.can_read_files)
+                            .child(div().underline().child("ab")),
                     )
                     .child(
                         Toggle::new("content-search-regex")
@@ -279,28 +280,32 @@ impl RenderOnce for ProjectContentSearchDialog {
                             )
                             .children(group.matches.into_iter().map(|indexed| {
                                 div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
                                     .px_3()
                                     .py(rems(0.125))
                                     .when(indexed.result_index == self.selected_index, |this| {
                                         this.bg(theme.accent)
                                     })
-                                    .child(HighlightedSearchLine {
+                                    .child(
+                                        div()
+                                            .w(rems(2.5))
+                                            .flex_shrink_0()
+                                            .text_right()
+                                            .text_size(TEXT_XS.size)
+                                            .text_color(theme.muted_foreground)
+                                            .child(indexed.match_.line_number.to_string()),
+                                    )
+                                    .child(div().flex_1().min_w_0().child(HighlightedSearchLine {
                                         match_: indexed.match_,
                                         path: group.path.clone(),
                                         dark: self.dark,
-                                    })
+                                    }))
                             }))
                     })))
                     .into_any_element()
             })
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_size(TEXT_XS.size)
-                    .text_color(theme.muted_foreground)
-                    .child(format!("Searching {cwd}")),
-            )
             .into_any_element()
     }
 }
@@ -331,6 +336,14 @@ mod tests {
     }
 
     #[test]
+    fn counts_files_across_the_full_result_set() {
+        assert_eq!(
+            content_search_file_count(&[match_at("a.rs"), match_at("b.rs"), match_at("a.rs"),]),
+            2
+        );
+    }
+
+    #[test]
     fn center_message_follows_search_state() {
         assert_eq!(
             content_search_center_message(
@@ -352,6 +365,16 @@ mod tests {
                 false,
             ),
             "denied"
+        );
+        assert!(
+            content_search_center_message(
+                &ProjectContentSearchResults {
+                    can_read_files: false,
+                    ..Default::default()
+                },
+                false,
+            )
+            .is_empty()
         );
         assert_eq!(
             content_search_center_message(

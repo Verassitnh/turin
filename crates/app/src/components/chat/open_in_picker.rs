@@ -29,11 +29,11 @@ pub struct OpenInOption {
 }
 
 fn is_mac_platform(platform: &str) -> bool {
-    platform.contains("Mac")
+    turin_launcher::editor_labels::is_mac_platform(platform)
 }
 
 fn is_windows_platform(platform: &str) -> bool {
-    platform.contains("Win")
+    turin_launcher::editor_labels::is_windows_platform(platform)
 }
 
 fn editor_icon_path(editor: EditorId, platform: &str) -> SharedString {

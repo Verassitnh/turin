@@ -12,6 +12,7 @@ use gpui_kit::{
 };
 use parking_lot::Mutex;
 use turin_contracts::project::ProjectContentMatch;
+use turin_shared::js_string::{slice_utf16, utf16_len};
 
 use crate::components::chat::markdown::code_highlight;
 use crate::diff::highlight::language_for_path;
@@ -24,14 +25,20 @@ pub struct SearchHighlightRange {
     pub end: usize,
 }
 
+fn utf16_unit_to_byte_offset(line: &str, unit: usize) -> usize {
+    slice_utf16(line, 0, unit).len()
+}
+
 pub fn normalize_search_ranges(match_: &ProjectContentMatch) -> Vec<SearchHighlightRange> {
-    let line_len = match_.line_content.len();
+    let line = &match_.line_content;
+    let utf16_len_line = utf16_len(line);
     let mut ranges: Vec<SearchHighlightRange> = match_
         .match_ranges
         .iter()
-        .map(|range| SearchHighlightRange {
-            start: (range.start as usize).min(line_len),
-            end: (range.end as usize).min(line_len),
+        .map(|range| {
+            let start = utf16_unit_to_byte_offset(line, (range.start as usize).min(utf16_len_line));
+            let end = utf16_unit_to_byte_offset(line, (range.end as usize).min(utf16_len_line));
+            SearchHighlightRange { start, end }
         })
         .filter(|range| range.end > range.start)
         .collect();
@@ -128,15 +135,37 @@ pub fn code_tokens_for_line(line: &str, path: &str, dark: bool) -> Vec<CodeToken
     }
     let mut spans = Vec::new();
     let bytes = line.as_bytes();
+    let mut cursor = 0usize;
     for (range, color) in &highlighted.tokens {
         if range.start >= range.end || range.start >= bytes.len() {
             continue;
         }
         let end = range.end.min(bytes.len());
+        if range.start > cursor {
+            spans.push(CodeTokenSpan {
+                content: line[cursor..range.start].to_owned(),
+                offset: cursor,
+                color: Some(highlighted.foreground),
+                italic: false,
+                bold: false,
+                underline: false,
+            });
+        }
         spans.push(CodeTokenSpan {
             content: line[range.start..end].to_owned(),
             offset: range.start,
             color: Some(*color),
+            italic: false,
+            bold: false,
+            underline: false,
+        });
+        cursor = cursor.max(end);
+    }
+    if cursor < line.len() {
+        spans.push(CodeTokenSpan {
+            content: line[cursor..].to_owned(),
+            offset: cursor,
+            color: Some(highlighted.foreground),
             italic: false,
             bold: false,
             underline: false,
@@ -178,11 +207,34 @@ fn fallback_highlight_segments(match_: &ProjectContentMatch) -> Vec<HighlightSeg
     )
 }
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct HighlightCacheKey {
     path: String,
     line: String,
     dark: bool,
+    ranges: Vec<(usize, usize)>,
+}
+
+struct InFlightGuard {
+    key: HighlightCacheKey,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        HIGHLIGHT_CACHE.lock().in_flight.remove(&self.key);
+    }
+}
+
+fn cache_key(match_: &ProjectContentMatch, path: &str, dark: bool) -> HighlightCacheKey {
+    HighlightCacheKey {
+        path: path.to_owned(),
+        line: match_.line_content.clone(),
+        dark,
+        ranges: normalize_search_ranges(match_)
+            .into_iter()
+            .map(|range| (range.start, range.end))
+            .collect(),
+    }
 }
 
 struct HighlightCacheState {
@@ -215,11 +267,7 @@ impl SearchLineHighlightCache {
     }
 
     fn schedule(match_: &ProjectContentMatch, path: &str, dark: bool) {
-        let key = HighlightCacheKey {
-            path: path.to_owned(),
-            line: match_.line_content.clone(),
-            dark,
-        };
+        let key = cache_key(match_, path, dark);
         let mut cache = HIGHLIGHT_CACHE.lock();
         if cache.entries.contains_key(&key) || cache.in_flight.contains(&key) {
             return;
@@ -229,9 +277,9 @@ impl SearchLineHighlightCache {
         let path = path.to_owned();
         drop(cache);
         thread::spawn(move || {
+            let _guard = InFlightGuard { key: key.clone() };
             let segments = Arc::new(highlight_segments_for_match(&match_, &path, dark));
             let mut cache = HIGHLIGHT_CACHE.lock();
-            cache.in_flight.remove(&key);
             if cache.entries.len() >= HighlightCacheState::MAX_ENTRIES
                 && let Some(oldest) = cache.order.pop_front()
             {
@@ -243,11 +291,7 @@ impl SearchLineHighlightCache {
     }
 
     fn cached(match_: &ProjectContentMatch, path: &str, dark: bool) -> Arc<Vec<HighlightSegment>> {
-        let key = HighlightCacheKey {
-            path: path.to_owned(),
-            line: match_.line_content.clone(),
-            dark,
-        };
+        let key = cache_key(match_, path, dark);
         if let Some(segments) = HIGHLIGHT_CACHE.lock().entries.get(&key).cloned() {
             return segments;
         }
@@ -321,6 +365,26 @@ mod tests {
         let normalized =
             normalize_search_ranges(&sample_match("hello", &[(1, 3), (2, 5), (10, 12)]));
         assert_eq!(normalized, vec![SearchHighlightRange { start: 1, end: 5 }]);
+    }
+
+    #[test]
+    fn maps_utf16_match_ranges_to_byte_slices_without_panicking() {
+        let normalized = normalize_search_ranges(&sample_match("café", &[(1, 2)]));
+        assert_eq!(normalized.len(), 1);
+        let range = &normalized[0];
+        assert_eq!(
+            &sample_match("café", &[(1, 2)]).line_content[range.start..range.end],
+            "a"
+        );
+    }
+
+    #[test]
+    fn cache_keys_differ_when_match_ranges_change() {
+        let path = "src/main.rs";
+        let line = "hello";
+        let left = cache_key(&sample_match(line, &[(1, 2)]), path, false);
+        let right = cache_key(&sample_match(line, &[(2, 3)]), path, false);
+        assert_ne!(left, right);
     }
 
     #[test]

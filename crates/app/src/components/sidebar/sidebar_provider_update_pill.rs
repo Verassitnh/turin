@@ -3,16 +3,18 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, ClickEvent, FontWeight, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window,
-    div, rems,
+    App, ClickEvent, CursorStyle, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    ParentElement as _, RenderOnce, StatefulInteractiveElement, Styled as _, Window, div, rems,
 };
 
 use super::super::provider_update_launch_notification_logic::{
     ProviderUpdateSidebarPillTone, ProviderUpdateSidebarPillView,
 };
+use crate::components::drag_region::no_drag;
 use crate::theme::ActiveAppTheme;
+use crate::theme::color::with_alpha;
 use crate::theme::tokens::TEXT_2XS;
-use crate::ui::{Button, ButtonSize, ButtonVariant, IconName, Tooltip};
+use crate::ui::{Icon, IconName, Tooltip};
 
 type PillClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
@@ -28,13 +30,22 @@ impl RenderOnce for SidebarProviderUpdatePill {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let scope = cx.app_theme().sidebar_scope();
         let theme = cx.app_theme();
-        let bg = scope.sidebar_control_surface;
-        let text = match self.view.tone {
-            ProviderUpdateSidebarPillTone::Warning => theme.warning,
-            ProviderUpdateSidebarPillTone::Error => theme.destructive,
-            ProviderUpdateSidebarPillTone::Loading | ProviderUpdateSidebarPillTone::Success => {
-                scope.sidebar_foreground
-            }
+        let (bg, text, hover_bg) = match self.view.tone {
+            ProviderUpdateSidebarPillTone::Warning => (
+                with_alpha(theme.warning, 0.12),
+                theme.warning,
+                with_alpha(theme.warning, 0.18),
+            ),
+            ProviderUpdateSidebarPillTone::Error => (
+                with_alpha(theme.destructive, 0.12),
+                theme.destructive,
+                with_alpha(theme.destructive, 0.18),
+            ),
+            ProviderUpdateSidebarPillTone::Loading | ProviderUpdateSidebarPillTone::Success => (
+                with_alpha(scope.sidebar_control_surface, 1.0),
+                scope.sidebar_foreground,
+                with_alpha(scope.sidebar_row_hover, 1.0),
+            ),
         };
         div()
             .flex()
@@ -47,28 +58,68 @@ impl RenderOnce for SidebarProviderUpdatePill {
             .text_size(TEXT_2XS.size)
             .font_weight(FontWeight::MEDIUM)
             .when(self.exiting, |this| this.opacity(0.0))
+            .hover(|style| style.bg(hover_bg))
             .child(
-                Button::new("provider-update-main")
-                    .size(ButtonSize::Sm)
-                    .variant(ButtonVariant::Ghost)
-                    .label(self.view.title.clone())
-                    .tooltip(Tooltip::new(self.view.description.clone()))
-                    .icon(match self.view.tone {
-                        ProviderUpdateSidebarPillTone::Loading => IconName::LoaderCircle,
-                        ProviderUpdateSidebarPillTone::Success => IconName::CircleCheck,
-                        ProviderUpdateSidebarPillTone::Error => IconName::TriangleAlert,
-                        _ => IconName::RefreshCw,
+                div()
+                    .id("provider-update-main")
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py(rems(0.375))
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(MouseButton::Left, no_drag)
+                    .on_click({
+                        let handler = self.on_open_settings;
+                        move |event, window, cx| handler(event, window, cx)
                     })
-                    .on_click(self.on_open_settings),
+                    .tooltip({
+                        let description = self.view.description.clone();
+                        move |window, cx| Tooltip::new(description.clone()).build(window, cx)
+                    })
+                    .child(match self.view.tone {
+                        ProviderUpdateSidebarPillTone::Loading => Icon::new(IconName::LoaderCircle)
+                            .size(rems(0.875))
+                            .color(text),
+                        ProviderUpdateSidebarPillTone::Success => Icon::new(IconName::CircleCheck)
+                            .size(rems(0.875))
+                            .color(text),
+                        ProviderUpdateSidebarPillTone::Error => Icon::new(IconName::TriangleAlert)
+                            .size(rems(0.875))
+                            .color(text),
+                        ProviderUpdateSidebarPillTone::Warning => {
+                            Icon::new(IconName::Download).size(rems(0.875)).color(text)
+                        }
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_color(text)
+                            .text_size(TEXT_2XS.size)
+                            .child(self.view.title.clone()),
+                    ),
             )
             .when(self.view.dismissible, |this| {
                 this.child(
-                    Button::new("provider-update-dismiss")
-                        .size(ButtonSize::IconXs)
-                        .variant(ButtonVariant::Ghost)
-                        .icon(IconName::X)
-                        .tooltip(Tooltip::new("Dismiss until provider status changes"))
-                        .on_click(self.on_dismiss),
+                    div()
+                        .id("provider-update-dismiss")
+                        .mr_1()
+                        .flex()
+                        .size(rems(1.25))
+                        .items_center()
+                        .justify_center()
+                        .rounded(rems(0.375))
+                        .cursor(CursorStyle::PointingHand)
+                        .on_mouse_down(MouseButton::Left, no_drag)
+                        .on_click({
+                            let handler = self.on_dismiss;
+                            move |event, window, cx| handler(event, window, cx)
+                        })
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Dismiss until provider status changes").build(window, cx)
+                        })
+                        .child(Icon::new(IconName::X).size(rems(0.875)).color(text)),
                 )
             })
     }

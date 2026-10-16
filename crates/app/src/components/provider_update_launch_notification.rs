@@ -46,7 +46,10 @@ pub fn environment_launch_toast_view(
         .flat_map(|group| group.candidates.iter().cloned())
         .collect();
     let candidates = collect_provider_update_candidates(&providers);
-    Some(get_provider_update_initial_toast_view(&candidates, &[]))
+    Some(get_provider_update_initial_toast_view(
+        &candidates,
+        &candidates,
+    ))
 }
 
 pub fn environment_launch_notification_key(

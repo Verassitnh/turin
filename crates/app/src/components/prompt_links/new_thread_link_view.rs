@@ -23,9 +23,7 @@ pub enum NewThreadLinkViewState {
     MissingRepository {
         repository: PromptLinkRepository,
     },
-    PullRequestCheckout {
-        project_name: String,
-    },
+    PullRequestCheckout,
 }
 
 type RetryHandler = Box<dyn Fn(&mut Window, &mut App)>;
@@ -44,15 +42,12 @@ impl RenderOnce for NewThreadLinkView {
             NewThreadLinkViewState::Opening => Empty::new()
                 .child(
                     empty_header()
-                        .child(empty_title("Opening link…", false))
+                        .child(empty_title("Opening the link...", false))
                         .child(empty_description("Preparing your draft.", cx)),
                 )
                 .into_any_element(),
             NewThreadLinkViewState::Opened => Empty::new()
-                .child(empty_header().child(empty_description(
-                    "Your draft is ready. Read the prompt and press Send.",
-                    cx,
-                )))
+                .child(empty_header().child(empty_title("This link is open", false)))
                 .into_any_element(),
             NewThreadLinkViewState::Failed { title, message } => div()
                 .flex()
@@ -65,7 +60,7 @@ impl RenderOnce for NewThreadLinkView {
                         .text_size(TEXT_XL.size)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.foreground)
-                        .child(title.unwrap_or_else(|| "Could not open link".to_owned())),
+                        .child(title.unwrap_or_else(|| "Could not open the link".to_owned())),
                 )
                 .child(
                     div()
@@ -83,26 +78,31 @@ impl RenderOnce for NewThreadLinkView {
                     )
                 })
                 .into_any_element(),
-            NewThreadLinkViewState::MissingRepository { repository } => Empty::new()
-                .child(
-                    empty_header()
-                        .child(empty_title("Repository not found", false))
-                        .child(empty_description(
-                            format!(
-                                "Clone {}/{} to use this link.",
-                                repository.owner, repository.name
-                            ),
-                            cx,
-                        )),
-                )
-                .into_any_element(),
-            NewThreadLinkViewState::PullRequestCheckout { project_name } => Empty::new()
-                .child(
-                    empty_header()
-                        .child(empty_title("Checking out pull request", false))
-                        .child(empty_description(format!("Setting up {project_name}…"), cx)),
-                )
-                .into_any_element(),
+            NewThreadLinkViewState::MissingRepository { repository } => {
+                let name = format!("{}/{}", repository.owner, repository.name);
+                Empty::new()
+                    .child(
+                        empty_header()
+                            .child(empty_title(format!("You don't have {name}"), false))
+                            .child(empty_description(
+                                "Clone it to work on it here, or start without a project.",
+                                cx,
+                            )),
+                    )
+                    .into_any_element()
+            }
+            NewThreadLinkViewState::PullRequestCheckout => {
+                let title = match &self.link {
+                    NewThreadLink::PullRequest { pull_request, .. } => format!(
+                        "Check out {}/{}#{}?",
+                        pull_request.owner, pull_request.name, pull_request.number
+                    ),
+                    _ => "Check out pull request?".to_owned(),
+                };
+                Empty::new()
+                    .child(empty_header().child(empty_title(title, false)))
+                    .into_any_element()
+            }
         })
     }
 }

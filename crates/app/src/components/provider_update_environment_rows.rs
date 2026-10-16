@@ -12,7 +12,7 @@ use super::provider_update_launch_notification_logic::{
     ProviderUpdateRowStatusKind,
 };
 use crate::theme::ActiveAppTheme;
-use crate::theme::tokens::TEXT_SM;
+use crate::theme::tokens::TEXT_XS;
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 use turin_provider_core::server_provider::ServerProvider;
 
@@ -100,14 +100,14 @@ impl RenderOnce for EnvironmentUpdateRow {
                     .child(
                         div()
                             .truncate()
-                            .text_size(TEXT_SM.size)
+                            .text_size(TEXT_XS.size)
                             .text_color(row_tone_color(self.status.kind, theme))
                             .child(self.status.text.clone()),
                     )
                     .when(!self.can_manage_providers, |this| {
                         this.child(
                             div()
-                                .text_size(TEXT_SM.size)
+                                .text_size(TEXT_XS.size)
                                 .text_color(theme.muted_foreground)
                                 .child("This connection cannot manage provider accounts."),
                         )
@@ -117,9 +117,11 @@ impl RenderOnce for EnvironmentUpdateRow {
                 ProviderUpdateRowStatusKind::Loading => {
                     div().child(Icon::new(IconName::LoaderCircle).size(rems(1.)))
                 }
-                ProviderUpdateRowStatusKind::Success => {
-                    div().child(Icon::new(IconName::Check).size(rems(1.)))
-                }
+                ProviderUpdateRowStatusKind::Success => div().child(
+                    Icon::new(IconName::Check)
+                        .size(rems(1.))
+                        .color(theme.success),
+                ),
                 ProviderUpdateRowStatusKind::Failed | ProviderUpdateRowStatusKind::Unchanged => {
                     div().child(
                         Button::new("environment-update-retry")

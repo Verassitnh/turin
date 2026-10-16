@@ -20,7 +20,7 @@ use turin_contracts::{
         OrchestrationV2UserInputQuestionOption,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    provider_policy::ProviderRequestKind,
+    provider_policy::{ProviderApprovalOption, ProviderRequestKind},
 };
 use turin_provider_core::id_allocator::derive;
 
@@ -282,6 +282,8 @@ pub enum RequestBody {
     Approval {
         request_kind: ProviderRequestKind,
         title: Option<String>,
+        prompt: Option<String>,
+        options: Option<Vec<ProviderApprovalOption>>,
     },
     UserInput {
         questions: Vec<OrchestrationV2UserInputQuestion>,
@@ -335,6 +337,8 @@ pub fn request_turn_item(
         RequestBody::Approval {
             request_kind,
             title,
+            prompt,
+            options,
         } => OrchestrationV2TurnItem::ApprovalRequest {
             tool_non_execution_kind: None,
             tool_surface: None,
@@ -356,9 +360,9 @@ pub fn request_turn_item(
             updated_at: now,
             request_id: request_id.clone(),
             request_kind,
-            prompt: None,
+            prompt,
             app_name: None,
-            options: None,
+            options,
         },
         RequestBody::UserInput { questions } => OrchestrationV2TurnItem::UserInputRequest {
             tool_non_execution_kind: None,

@@ -37,7 +37,8 @@ use turin_contracts::{
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
     provider_policy::{
-        ProviderApprovalDecision, ProviderInteractionMode, ProviderRequestKind, RuntimeMode,
+        ProviderApprovalDecision, ProviderApprovalOption, ProviderInteractionMode,
+        ProviderRequestKind, RuntimeMode,
     },
 };
 use turin_provider_core::id_allocator::{IdAllocator, derive};
@@ -1108,6 +1109,11 @@ impl OpenCodeV2Session {
                     .collect()
             })
             .unwrap_or_default();
+        // The tool the permission belongs to names its kind (upstream `turn.tools`).
+        let tool_name = data
+            .pointer("/source/id")
+            .and_then(Value::as_str)
+            .and_then(|call| self.inner.lock().tool_names.get(call).cloned());
         self.show_ask(
             &session_id,
             &native_id,
@@ -1118,7 +1124,7 @@ impl OpenCodeV2Session {
             },
             open_code_permission_request_kind(
                 data.get("action").and_then(Value::as_str).unwrap_or("bash"),
-                None,
+                tool_name.as_deref(),
             ),
         );
     }
@@ -1186,13 +1192,23 @@ impl OpenCodeV2Session {
                 now,
             );
             let body = match &ask {
-                Ask::Permission { action, .. } => RequestBody::Approval {
+                Ask::Permission {
+                    action,
+                    resources,
+                    save,
+                } => RequestBody::Approval {
                     request_kind: match kind {
                         "file-read" => ProviderRequestKind::FileRead,
                         "file-change" => ProviderRequestKind::FileChange,
                         _ => ProviderRequestKind::Command,
                     },
                     title: Some(action.clone()),
+                    prompt: Some(if resources.is_empty() {
+                        action.clone()
+                    } else {
+                        resources.join("\n")
+                    }),
+                    options: Some(permission_options(action, save)),
                 },
                 Ask::Form(form) => RequestBody::UserInput {
                     questions: form_questions(form).unwrap_or_default(),
@@ -3275,6 +3291,33 @@ where
     tokio::time::timeout(REQUEST_REPLY_TIMEOUT, attempts)
         .await
         .unwrap_or(false)
+}
+
+/// The choices an approval offers (upstream `showRequest`): cancel, decline, the session grant
+/// when OpenCode named patterns to save, and approve. OpenCode's "always" saves a grant for the
+/// whole project, so the session-wide choice is T3's own rule instead.
+fn permission_options(action: &str, save: &[String]) -> Vec<ProviderApprovalOption> {
+    let option = |decision: ProviderApprovalDecision, label: &str| {
+        TrimmedNonEmptyString::new(label)
+            .ok()
+            .map(|label| ProviderApprovalOption {
+                decision,
+                label,
+                warning: None,
+            })
+    };
+    let mut options = vec![
+        option(ProviderApprovalDecision::Cancel, "Cancel"),
+        option(ProviderApprovalDecision::Decline, "Decline"),
+    ];
+    if !save.is_empty() {
+        options.push(option(
+            ProviderApprovalDecision::AcceptForSession,
+            &session_grant_label(action, save),
+        ));
+    }
+    options.push(option(ProviderApprovalDecision::Accept, "Approve"));
+    options.into_iter().flatten().collect()
 }
 
 /// The gate upstream `offerWake` puts on a wake: a wake a Stop or a later continuation dropped

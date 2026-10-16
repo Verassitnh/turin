@@ -2381,14 +2381,17 @@ async fn v2_child_execution_is_a_turn_under_a_root_turn_with_the_task_prompt() {
 }
 
 /// A v2 session on a started turn with one permission request pending. `reply` answers the
-/// permission reply route. Returns the session, its events, and the request's id.
+/// permission reply route, and `before` and `asked` are the frames sent. Returns the session,
+/// its events, and every event up to and including the request's `runtime_request.updated`.
 async fn v2_session_with_a_permission_request(
     reply: impl Fn() -> FakeResponse + Send + Sync + 'static,
+    before: Vec<Value>,
+    asked: Value,
 ) -> (
     Script,
     Arc<OpenCodeV2Session>,
     ProviderEventStream,
-    turin_contracts::RuntimeRequestId,
+    Vec<Value>,
 ) {
     let script = script(move |request| {
         if request.method == "PUT" || request.method == "PATCH" {
@@ -2427,24 +2430,93 @@ async fn v2_session_with_a_permission_request(
         .await
         .unwrap();
     session.start_turn(turn(thread, "hi")).await.unwrap();
-    script
-        .frames
-        .send(Some(sse(
-            &json!({"id":"e1","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_6","permission":"bash","patterns":["ls"]}}).to_string(),
-        )))
-        .unwrap();
-    let request_id = next_request(&mut events).await;
-    (script, session, events, request_id)
+    for frame in before.iter().chain(std::iter::once(&asked)) {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let seen = events_until(&mut events, |value| {
+        value["type"] == "runtime_request.updated"
+    })
+    .await;
+    (script, session, events, seen)
+}
+
+/// The id of the request `runtime_request.updated` announces last in `seen`.
+fn request_id_of(seen: &[Value]) -> turin_contracts::RuntimeRequestId {
+    let request = of_type(seen, "runtime_request.updated")
+        .into_iter()
+        .last()
+        .expect("runtime request");
+    turin_contracts::RuntimeRequestId::new(request["runtime_request"]["id"].as_str().unwrap())
+        .unwrap()
+}
+
+/// A permission approval item carries its prompt, the kind its tool implies, and its options.
+/// Only a save pattern offers the session grant (the opencode2_permission fixture's shape).
+#[tokio::test]
+async fn v2_permission_approval_carries_prompt_kind_and_options() {
+    let edit_call = json!({"id":"e1","type":"session.tool.input.started","data":{"sessionID":"ses_1","id":"call_1","name":"edit"}});
+    let asked = json!({"id":"e2","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_7","action":"shell","resources":["echo FIRST"],"save":["echo *"],"source":{"type":"tool","messageID":"msg_1","id":"call_1"}}});
+    let (_script, session, _events, seen) =
+        v2_session_with_a_permission_request(|| FakeResponse::empty(204), vec![edit_call], asked)
+            .await;
+    let item = of_type(&seen, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "approval_request")
+        .unwrap_or_else(|| panic!("no approval item in {seen:#?}"));
+    assert_eq!(item["turn_item"]["prompt"], "echo FIRST");
+    // The tool is an edit, so the request is a file change, not the shell command it names.
+    assert_eq!(item["turn_item"]["requestKind"], "file-change");
+    let options: Vec<(&Value, &Value)> = item["turn_item"]["options"]
+        .as_array()
+        .expect("options")
+        .iter()
+        .map(|option| (&option["decision"], &option["label"]))
+        .collect();
+    assert!(
+        options.iter().any(|(decision, label)| {
+            *decision == "acceptForSession" && *label == "Allow echo * this session"
+        }),
+        "{options:#?}"
+    );
+    assert!(options.iter().any(|(decision, _)| *decision == "accept"));
+    session.close().await;
+}
+
+/// An approval with no save patterns offers no session grant.
+#[tokio::test]
+async fn v2_approval_without_save_patterns_offers_no_session_grant() {
+    let asked = json!({"id":"e1","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_8","action":"shell","resources":["ls"],"save":[],"source":{"type":"tool","messageID":"msg_1","id":"call_9"}}});
+    let (_script, session, _events, seen) =
+        v2_session_with_a_permission_request(|| FakeResponse::empty(204), Vec::new(), asked).await;
+    let item = of_type(&seen, "turn_item.updated")
+        .into_iter()
+        .find(|event| event["turn_item"]["type"] == "approval_request")
+        .unwrap_or_else(|| panic!("no approval item in {seen:#?}"));
+    let decisions: Vec<&Value> = item["turn_item"]["options"]
+        .as_array()
+        .expect("options")
+        .iter()
+        .map(|option| &option["decision"])
+        .collect();
+    assert!(
+        !decisions.contains(&&json!("acceptForSession")),
+        "{decisions:?}"
+    );
+    assert_eq!(item["turn_item"]["prompt"], "ls");
+    session.close().await;
 }
 
 /// A reply OpenCode answers as gone (the permission already ended) counts as delivered: the
 /// request settles and its turn is not failed.
 #[tokio::test]
 async fn v2_a_gone_reply_counts_as_delivered() {
-    let (_script, session, mut events, request_id) = v2_session_with_a_permission_request(|| {
-        FakeResponse::json(404, r#"{"name":"PermissionNotFoundError","data":{}}"#)
-    })
+    let (_script, session, mut events, seen) = v2_session_with_a_permission_request(
+        || FakeResponse::json(404, r#"{"name":"PermissionNotFoundError","data":{}}"#),
+        Vec::new(),
+        json!({"id":"e1","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_6","permission":"bash","patterns":["ls"]}}),
+    )
     .await;
+    let request_id = request_id_of(&seen);
     let answer = || ProviderAdapterV2RuntimeRequestResponseInput {
         request_id: request_id.clone(),
         decision: Some(ProviderApprovalDecision::Accept),
@@ -2472,9 +2544,13 @@ async fn v2_a_gone_reply_counts_as_delivered() {
 /// so the turn fails rather than hanging.
 #[tokio::test]
 async fn v2_an_undelivered_reply_abandons_its_turn() {
-    let (_script, session, mut events, request_id) =
-        v2_session_with_a_permission_request(|| FakeResponse::json(500, r#"{"error":"boom"}"#))
-            .await;
+    let (_script, session, mut events, seen) = v2_session_with_a_permission_request(
+        || FakeResponse::json(500, r#"{"error":"boom"}"#),
+        Vec::new(),
+        json!({"id":"e1","type":"permission.asked","data":{"sessionID":"ses_1","id":"perm_6","permission":"bash","patterns":["ls"]}}),
+    )
+    .await;
+    let request_id = request_id_of(&seen);
     session
         .respond_to_runtime_request(ProviderAdapterV2RuntimeRequestResponseInput {
             request_id,

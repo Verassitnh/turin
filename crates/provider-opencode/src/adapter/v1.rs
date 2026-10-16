@@ -1464,6 +1464,8 @@ impl OpenCodeV1Session {
                     .get("permission")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                prompt: None,
+                options: None,
             }
         };
         let item = request_turn_item(&of, &request_id, ordinal, now, body);

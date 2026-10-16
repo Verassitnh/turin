@@ -106,6 +106,70 @@ impl RestartThreads for ThreadManagementService {
     }
 }
 
+/// A [`RestartThreads`] bound after construction. The orchestrator takes its
+/// `RestartRecovery` at construction, and this service's `RestartThreads` is the
+/// `ThreadManagementService`, which holds the orchestrator. Build the service
+/// over a `LateRestartThreads`, build the orchestrator and the thread
+/// management service, then [`bind`](Self::bind) the latter. Until then reads
+/// and dispatches fail, which fails the effect (the worker retries it).
+#[derive(Default)]
+pub struct LateRestartThreads {
+    inner: std::sync::OnceLock<Arc<dyn RestartThreads>>,
+}
+
+impl LateRestartThreads {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Binds the real threads. Returns false if already bound.
+    pub fn bind(&self, threads: Arc<dyn RestartThreads>) -> bool {
+        self.inner.set(threads).is_ok()
+    }
+
+    fn bound(&self) -> Option<&Arc<dyn RestartThreads>> {
+        self.inner.get()
+    }
+}
+
+#[async_trait]
+impl RestartThreads for LateRestartThreads {
+    async fn get_thread_records(
+        &self,
+        thread_id: &ThreadId,
+        fields: &[RecordField],
+        filter: &RecordFilter,
+    ) -> Result<ThreadRecords, BoxError> {
+        match self.bound() {
+            Some(threads) => threads.get_thread_records(thread_id, fields, filter).await,
+            None => Err("restart threads are not bound yet".into()),
+        }
+    }
+
+    async fn dispatch(
+        &self,
+        command: OrchestrationV2ServerCommand,
+    ) -> Result<DispatchResult, ThreadManagementError> {
+        match self.bound() {
+            Some(threads) => threads.dispatch(command).await,
+            None => Err(ThreadManagementError::ProjectionLoad {
+                project_id: turin_contracts::ProjectId::new("restart-threads")
+                    .expect("literal id is non-empty"),
+                thread_id: ThreadId::new("restart-threads").expect("literal id is non-empty"),
+                cause: "restart threads are not bound yet".into(),
+            }),
+        }
+    }
+
+    async fn recover_delegated_task(&self, thread_id: &ThreadId, source_run_id: &RunId) {
+        if let Some(threads) = self.bound() {
+            threads
+                .recover_delegated_task(thread_id, source_run_id)
+                .await;
+        }
+    }
+}
+
 /// The delegated-task settling the orchestrator owns (`finalizeAppOwnedSubagent`
 /// and the completion deliveries, T13c): the startup sweep, and the settle of a
 /// child whose continuation declined.
@@ -189,6 +253,26 @@ impl RestartContinuationService {
             .recover_delegated_task(thread_id, source_run_id)
             .await;
         Ok(())
+    }
+
+    /// The `provider-runtime.continue` arm of the effect executor
+    /// (`EffectWorker.ts` `layerExecutor`): continues the run, and when that
+    /// fails for the last time (`will_retry` false) settles the delegated task
+    /// the continuation would have settled. The error is returned either way,
+    /// for the worker to retry or fail the effect.
+    pub async fn execute_continue_effect(
+        &self,
+        thread_id: &ThreadId,
+        source_run_id: &RunId,
+        will_retry: bool,
+    ) -> Result<(), BoxError> {
+        let result = self.continue_restarted_run(thread_id, source_run_id).await;
+        if result.is_err() && !will_retry {
+            self.threads
+                .recover_delegated_task(thread_id, source_run_id)
+                .await;
+        }
+        result
     }
 
     async fn continue_run(

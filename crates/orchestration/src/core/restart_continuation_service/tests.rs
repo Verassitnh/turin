@@ -895,3 +895,63 @@ async fn the_delegated_task_sweep_and_settle_go_to_the_orchestrators_finalizer()
         vec![(THREAD.to_owned(), RUN.to_owned())]
     );
 }
+
+// --- Own cases: the seams the composition root uses ---
+
+#[tokio::test]
+async fn the_continue_effect_settles_the_delegated_task_only_after_its_last_failed_attempt() {
+    for (will_retry, settled) in [(true, 0), (false, 1)] {
+        let harness = harness(cut_mid_turn(json!({}))).await;
+        *harness.threads.failure.lock() = Some(DispatchFailure::Other);
+
+        let result = harness
+            .service
+            .execute_continue_effect(&thread_id(), &run_id(RUN), will_retry)
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            harness.threads.recovered.lock().len(),
+            settled,
+            "will_retry {will_retry}"
+        );
+    }
+    // A success settles once, inside `continue_restarted_run`.
+    let harness = harness(cut_mid_turn(json!({}))).await;
+    harness
+        .service
+        .execute_continue_effect(&thread_id(), &run_id(RUN), false)
+        .await
+        .expect("continues");
+    assert_eq!(harness.threads.recovered.lock().len(), 1);
+}
+
+#[tokio::test]
+async fn late_restart_threads_fail_until_bound_and_then_forward() {
+    let late = LateRestartThreads::new();
+    let db = Db::open_in_memory().await.expect("in-memory db");
+    let service = RestartContinuationService::new(
+        Arc::new(StaticSettings(default_server_settings())),
+        late.clone(),
+        Arc::new(ProjectionStore::new(db.clone())),
+        EffectOutbox::new(db),
+        Arc::new(NoDelegatedTaskRecovery),
+    );
+
+    // Not bound: the effect fails, so the worker retries it.
+    assert!(
+        service
+            .continue_restarted_run(&thread_id(), &run_id(RUN))
+            .await
+            .is_err()
+    );
+
+    let threads = FakeThreads::new(cut_mid_turn(json!({})));
+    assert!(late.bind(threads.clone()));
+    assert!(!late.bind(threads.clone()), "binds once");
+    service
+        .continue_restarted_run(&thread_id(), &run_id(RUN))
+        .await
+        .expect("continues");
+    assert_eq!(threads.dispatches().len(), 1);
+}

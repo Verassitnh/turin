@@ -39,6 +39,8 @@ pub mod t3_wordmark;
 pub mod table;
 pub mod text_input;
 pub mod textarea;
+pub mod toast;
+pub mod toast_logic;
 pub mod toggle;
 pub mod toggle_group;
 pub mod tooltip;

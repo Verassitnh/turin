@@ -12,6 +12,7 @@ mod diff;
 mod dock_icon;
 mod hooks;
 mod logical_project;
+mod project_favicon_cache;
 mod project_icon_colors;
 mod project_icon_options;
 mod project_identity;

@@ -43,16 +43,9 @@ fn fake_claude(dir: &Path, transcript: &str) -> PathBuf {
 }
 
 fn settings_with_claude(binary: &Path) -> ServerSettings {
-    serde_json::from_value(json!({
-        "providerInstances": {
-            "claudeAgent": {
-                "driver": "claudeAgent",
-                "enabled": true,
-                "config": { "binaryPath": binary.display().to_string() }
-            }
-        }
-    }))
-    .expect("settings")
+    // The app's own loader: the fake binary override plus the Claude text-generation default.
+    let empty = tempfile::tempdir().expect("settings dir");
+    super::settings::load_server_settings(empty.path(), binary.to_str())
 }
 
 struct Harness {
@@ -758,4 +751,42 @@ async fn staged_uploads_are_claimed_into_the_thread_with_the_message() {
     }
     let image_path = resolve_attachment_path(dir, &message.attachments[0]).expect("path");
     assert_eq!(std::fs::read(image_path).expect("read"), png);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_message_gets_a_generated_title() {
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: Some("Respond with exactly".into()),
+        })
+        .await
+        .expect("send");
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    let title = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let records = orchestrator
+                .get_thread_records(&thread, &[RecordField::Messages], &RecordFilter::default())
+                .await
+                .expect("records");
+            if records.thread.title.as_str() == "Fixture title" {
+                return records.thread.title.to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the generated title arrives");
+    assert_eq!(title, "Fixture title");
 }

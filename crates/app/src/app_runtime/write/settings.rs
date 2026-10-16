@@ -13,6 +13,8 @@ use turin_contracts::settings::ServerSettings;
 
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const CLAUDE_BINARY_ENV: &str = "TURIN_CLAUDE_BINARY";
+/// The text-generation model until the setting is editable (Claude is the only wired driver).
+pub const DEFAULT_TEXT_GENERATION_MODEL: &str = "claude-haiku-5-5";
 
 pub fn load_server_settings(data_dir: &Path, claude_binary: Option<&str>) -> ServerSettings {
     let mut document = match std::fs::read_to_string(data_dir.join(SETTINGS_FILE)) {
@@ -36,6 +38,12 @@ pub fn load_server_settings(data_dir: &Path, claude_binary: Option<&str>) -> Ser
             "config": { "binaryPath": binary },
         });
     }
+    // The contract default is a Codex model; Codex is not wired in this build,
+    // so titles and commit messages would fail on an unregistered instance.
+    if document.get("textGenerationModelSelection").is_none() {
+        document["textGenerationModelSelection"] =
+            json!({"instanceId": "claudeAgent", "model": DEFAULT_TEXT_GENERATION_MODEL});
+    }
     serde_json::from_value(document).unwrap_or_else(|error| {
         tracing::warn!(%error, "invalid {SETTINGS_FILE}; using default settings");
         ServerSettings::default()
@@ -46,13 +54,18 @@ pub fn load_server_settings(data_dir: &Path, claude_binary: Option<&str>) -> Ser
 mod tests {
     use super::*;
 
+    fn text_generation_instance(settings: &ServerSettings) -> String {
+        settings
+            .text_generation_model_selection
+            .instance_id
+            .to_string()
+    }
+
     #[test]
-    fn missing_file_gives_defaults() {
+    fn missing_file_gives_defaults_with_claude_text_generation() {
         let dir = tempfile::tempdir().expect("dir");
-        assert_eq!(
-            load_server_settings(dir.path(), None),
-            ServerSettings::default()
-        );
+        let settings = load_server_settings(dir.path(), None);
+        assert_eq!(text_generation_instance(&settings), "claudeAgent");
     }
 
     #[test]
@@ -67,9 +80,19 @@ mod tests {
     fn an_invalid_file_falls_back_to_defaults() {
         let dir = tempfile::tempdir().expect("dir");
         std::fs::write(dir.path().join(SETTINGS_FILE), "{ not json").expect("write");
-        assert_eq!(
-            load_server_settings(dir.path(), None),
-            ServerSettings::default()
-        );
+        let settings = load_server_settings(dir.path(), None);
+        assert_eq!(text_generation_instance(&settings), "claudeAgent");
+    }
+
+    #[test]
+    fn an_explicit_text_generation_model_is_kept() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(
+            dir.path().join(SETTINGS_FILE),
+            r#"{"textGenerationModelSelection": {"instanceId": "codex", "model": "gpt-5.4-mini"}}"#,
+        )
+        .expect("write");
+        let settings = load_server_settings(dir.path(), None);
+        assert_eq!(text_generation_instance(&settings), "codex");
     }
 }

@@ -272,12 +272,15 @@ impl SidebarBackend for LiveSidebarBackend {
         )
     }
 
-    /// Title generation needs text generation wired into the app (N3); until
-    /// then a regeneration request would stay pending forever.
-    fn regenerate_title(&self, _thread: ThreadRef, _cx: &mut App) -> Task<CommandOutcome> {
-        Task::ready(CommandOutcome::Failure(
-            "Title regeneration needs text generation, which is not wired yet.".into(),
-        ))
+    /// `thread.metadata.update` with `regenerateTitle`: the title effect runs
+    /// N3's text generation and clears the marker when it finishes.
+    fn regenerate_title(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome> {
+        self.thread_command(
+            &thread,
+            "thread.metadata.update",
+            json!({"regenerateTitle": true}),
+            cx,
+        )
     }
 
     fn mark_unread(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome> {

@@ -219,7 +219,7 @@ impl WriteRuntime {
             Arc::new(ManagerSessions(sessions.clone())),
             host_settings.clone(),
             CommandReceiptStore::new(stores.db.clone()),
-            projects,
+            projects.clone(),
             Arc::new(NoHooks),
         ));
 
@@ -258,6 +258,12 @@ impl WriteRuntime {
             finalization,
             threads: threads.clone(),
             restart,
+            projects: projects.clone(),
+            settings: host_settings.clone(),
+            text_generation: Arc::new(super::text_generation::build(
+                &providers.settings.settings().await,
+                instances.clone(),
+            )),
         });
         let worker = EffectWorker::new(
             stores.outbox.clone(),

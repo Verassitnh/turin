@@ -308,6 +308,25 @@ impl LiveSource {
         self.refresh(&state, cx);
     }
 
+    /// The first message of a thread seeds its temporary title, and the title
+    /// effect replaces it with a generated one (`titleSeed`).
+    fn title_seed(&self, prompt: &str) -> Option<String> {
+        let state = self.handle.snapshot();
+        let data = state.thread(&self.thread_id)?.state.data.clone()?;
+        let has_user_message = data
+            .messages
+            .iter()
+            .any(|message| message.role == OrchestrationV2ConversationMessageRole::User);
+        if has_user_message {
+            return None;
+        }
+        let line = prompt
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())?;
+        Some(line.chars().take(60).collect())
+    }
+
     /// The thread's active run, which a steer or restart targets.
     fn active_run_id(&self) -> Option<String> {
         let state = self.handle.snapshot();
@@ -601,6 +620,7 @@ impl LiveSource {
                 ),
             )
         });
+        let title_seed = self.title_seed(&request.prompt);
         let restore = (
             request.prompt.clone(),
             request.images.clone(),
@@ -664,7 +684,7 @@ impl LiveSource {
                         attachments,
                         model_selection: Some(selection),
                         delivery,
-                        title_seed: None,
+                        title_seed,
                     })
                     .await
             };

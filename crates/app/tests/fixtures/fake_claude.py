@@ -6,6 +6,13 @@ over the stream-json protocol. Copied from crates/provider-claude/tests/session_
 only the paths differ: no environment variables are needed.
 """
 import json, os, sys
+
+# Text generation (`claude -p ... --json-schema`): one structured reply, no session.
+if "-p" in sys.argv or "--print" in sys.argv:
+    sys.stdin.read()
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "structured_output": {"title": os.environ.get("FAKE_TITLE", "Fixture title")}}))
+    sys.exit(0)
 # Each launch appends its argv, so tests can check flags such as resume-at.
 HERE = os.path.dirname(os.path.abspath(__file__))
 ARGV = os.environ.get("FAKE_ARGV", os.path.join(HERE, "argv.log"))

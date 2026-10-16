@@ -145,11 +145,18 @@ pub(super) async fn dispatch_message(
         unreachable!("decide routes only message.dispatch here");
     };
 
-    let mut projection = orchestrator
+    let mut projection = match orchestrator
         .projection
         .get_thread_projection(thread_id)
         .await
-        .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+    {
+        Ok(projection) => projection,
+        // A thread this command's own decision creates (a delegated child)
+        // exists only as a pending event.
+        Err(cause) if cause.is_thread_not_found() => pending_thread_projection(decision, thread_id)
+            .ok_or_else(|| OrchestratorError::projection(thread_id.clone(), cause))?,
+        Err(cause) => return Err(OrchestratorError::projection(thread_id.clone(), cause)),
+    };
 
     if let Some(source_id) = manual_continuation_of_run_id {
         let source = projection.runs.iter().find(|run| &run.id == source_id);
@@ -1527,6 +1534,45 @@ pub(super) fn is_wake(client: &C) -> bool {
     notification.is_some()
         || delegated_completion.is_some()
         || restart_continuation_of_run_id.is_some()
+}
+
+/// The projection of a thread that only this decision's `thread.created`
+/// event has made so far: an empty thread with the pending events laid over.
+fn pending_thread_projection(
+    decision: &Decision,
+    thread_id: &ThreadId,
+) -> Option<OrchestrationV2ThreadProjection> {
+    let thread = decision.events.iter().rev().find_map(|event| match event {
+        OrchestrationV2DomainEvent::ThreadCreated { payload, .. } if &payload.id == thread_id => {
+            Some(payload.clone())
+        }
+        _ => None,
+    })?;
+    let empty = OrchestrationV2ThreadProjection {
+        updated_at: thread.updated_at,
+        thread,
+        runs: Vec::new(),
+        attempts: Vec::new(),
+        nodes: Vec::new(),
+        subagents: Vec::new(),
+        provider_sessions: Vec::new(),
+        provider_threads: Vec::new(),
+        provider_turns: Vec::new(),
+        runtime_requests: Vec::new(),
+        messages: Vec::new(),
+        plans: Vec::new(),
+        turn_items: Vec::new(),
+        checkpoint_scopes: Vec::new(),
+        checkpoints: Vec::new(),
+        context_handoffs: Vec::new(),
+        context_transfers: Vec::new(),
+        visible_turn_items: Vec::new(),
+    };
+    Some(super::cohort::with_pending_events(
+        empty,
+        &decision.events,
+        thread_id,
+    ))
 }
 
 /// `nextTurnItemOrdinal` for a projection read from the store: the store's

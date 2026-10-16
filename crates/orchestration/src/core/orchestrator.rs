@@ -17,6 +17,9 @@ mod cohort_tests;
 mod delegated_commands;
 #[cfg(test)]
 mod delegated_commands_tests;
+mod delegated_request;
+#[cfg(test)]
+mod delegated_request_tests;
 pub mod delegated_task;
 #[cfg(test)]
 mod delegated_task_tests;

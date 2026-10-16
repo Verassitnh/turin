@@ -7357,6 +7357,7 @@ dependencies = [
  "turin-runtime",
  "turin-shared",
  "unicode-normalization",
+ "unicode-segmentation",
  "url",
 ]
 

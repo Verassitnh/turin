@@ -158,7 +158,7 @@ pub fn latest_root_provider_failure<'a>(
     latest.map(|(_, _, _, failure)| failure)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ThreadErrorSummary {
     pub usage_limit_reset_at: Option<IsoDateTime>,
     pub last_error: Option<String>,
@@ -224,6 +224,7 @@ pub fn usage_limit_run_presented_as_latest<'a, R: RunOrder>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// Stands in for a run: only the fields the ordering rules read.
     struct Stub {
@@ -342,5 +343,128 @@ mod tests {
                 last_error_class: None,
             }
         );
+    }
+
+    #[test]
+    fn root_failure_is_the_newest_failed_error_of_a_failed_run() {
+        let runs = [run("run-1", 1, "failed", Some("2026-01-01T00:00:03.000Z"))];
+        let items = [
+            failure_item("run-1", 1, "provider_error", "first"),
+            failure_item("run-1", 2, "usage_limit", "limit"),
+        ];
+        let failure = latest_root_provider_failure(runs.first(), &items).unwrap();
+        assert_eq!(failure.message.as_str(), "limit");
+        assert!(latest_root_provider_failure(None::<&OrchestrationV2Run>, &items).is_none());
+        let running = [run("run-1", 1, "running", None)];
+        assert!(latest_root_provider_failure(running.first(), &items).is_none());
+    }
+
+    #[test]
+    fn a_distinct_session_error_supersedes_the_turn_classification() {
+        let runs = [run("run-1", 1, "failed", Some("2026-01-01T00:00:03.000Z"))];
+        let items = [failure_item("run-1", 1, "usage_limit", "limit")];
+        let failure = latest_root_provider_failure(runs.first(), &items);
+        let same = thread_error_summary(failure, Some("limit"));
+        assert_eq!(
+            same.last_error_class,
+            Some(OrchestrationV2ProviderFailureClass::UsageLimit)
+        );
+        assert_eq!(
+            same.usage_limit_reset_at.as_deref(),
+            Some("2026-01-02T00:00:00.000Z")
+        );
+        let other = thread_error_summary(failure, Some("session died"));
+        assert_eq!(other.last_error.as_deref(), Some("session died"));
+        assert_eq!(other.last_error_class, None);
+        assert_eq!(other.usage_limit_reset_at, None);
+        let none = thread_error_summary(None, None);
+        assert_eq!(none, ThreadErrorSummary::default());
+    }
+
+    #[test]
+    fn run_order_uses_end_time_then_ordinal_and_unfinished_runs_are_latest() {
+        let ended_late_low_ordinal = run("a", 1, "completed", Some("2026-01-01T00:10:00.000Z"));
+        let ended_early_high_ordinal = run("b", 2, "completed", Some("2026-01-01T00:05:00.000Z"));
+        assert!(run_ran_after(
+            &ended_late_low_ordinal,
+            &ended_early_high_ordinal
+        ));
+        let unfinished = run("c", 3, "running", None);
+        assert!(run_ran_after(&unfinished, &ended_late_low_ordinal));
+        let same_end = run("d", 9, "completed", Some("2026-01-01T00:10:00.000Z"));
+        assert!(run_ran_after(&same_end, &ended_late_low_ordinal));
+        let runs = [ended_late_low_ordinal, ended_early_high_ordinal];
+        assert_eq!(latest_executed_run(&runs).unwrap().id.as_str(), "a");
+    }
+
+    #[test]
+    fn executed_run_skips_queued_and_never_started_cancelled_runs() {
+        let mut cancelled = run("x", 2, "cancelled", None);
+        cancelled.started_at = None;
+        let queued = run("y", 3, "queued", None);
+        let done = run("z", 1, "completed", Some("2026-01-01T00:00:03.000Z"));
+        let runs = [done, cancelled, queued];
+        assert_eq!(latest_executed_run(&runs).unwrap().id.as_str(), "z");
+    }
+
+    #[test]
+    fn a_usage_limited_run_is_presented_when_newer_runs_never_started() {
+        let limited = run("limited", 1, "failed", Some("2026-01-01T00:00:03.000Z"));
+        let mut queued = run("queued", 2, "queued", None);
+        queued.started_at = None;
+        let runs = [limited, queued];
+        let items = [failure_item("limited", 1, "usage_limit", "limit")];
+        assert_eq!(
+            usage_limit_run_presented_as_latest(&runs, &items, None).map(|run| run.id.as_str()),
+            Some("limited")
+        );
+        // No newer run: nothing to present.
+        assert!(usage_limit_run_presented_as_latest(&runs[..1], &items, None).is_none());
+        // A different failure class is not a usage limit.
+        let other = [failure_item("limited", 1, "provider_error", "boom")];
+        assert!(usage_limit_blocked_run(&runs, &other, None).is_none());
+    }
+
+    #[test]
+    fn unheld_run_skips_held_queue_entries() {
+        let done = run("done", 1, "completed", Some("2026-01-01T00:00:03.000Z"));
+        let mut held = run("held", 2, "queued", None);
+        held.queue_held = Some(true);
+        let runs = [done, held];
+        assert_eq!(latest_unheld_run(&runs).unwrap().id.as_str(), "done");
+        assert!(latest_unheld_run(&runs[1..]).is_none());
+    }
+
+    fn run(id: &str, ordinal: u64, status: &str, completed_at: Option<&str>) -> OrchestrationV2Run {
+        serde_json::from_value(json!({
+            "id": id, "threadId": "thread-1", "ordinal": ordinal,
+            "providerInstanceId": "codex",
+            "modelSelection": {"instanceId": "codex", "model": "gpt-5.4"},
+            "providerThreadId": null, "userMessageId": "message-1",
+            "rootNodeId": format!("root:{id}"), "activeAttemptId": null, "status": status,
+            "requestedAt": "2026-01-01T00:00:00.000Z",
+            "startedAt": "2026-01-01T00:00:01.000Z", "completedAt": completed_at,
+            "checkpointId": null, "contextHandoffId": null
+        }))
+        .unwrap()
+    }
+
+    fn failure_item(
+        run_id: &str,
+        ordinal: u64,
+        class: &str,
+        message: &str,
+    ) -> OrchestrationV2TurnItem {
+        serde_json::from_value(json!({
+            "id": format!("error:{run_id}:{ordinal}"), "threadId": "thread-1",
+            "runId": run_id, "nodeId": format!("root:{run_id}"),
+            "providerThreadId": null, "providerTurnId": null, "nativeItemRef": null,
+            "parentItemId": null, "ordinal": ordinal, "status": "failed", "title": null,
+            "startedAt": null, "completedAt": null, "updatedAt": "2026-01-01T00:00:02.000Z",
+            "type": "error",
+            "failure": {"class": class, "message": message, "code": null, "retryable": null,
+                "resetAt": "2026-01-02T00:00:00.000Z"}
+        }))
+        .unwrap()
     }
 }

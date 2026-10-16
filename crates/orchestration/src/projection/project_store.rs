@@ -114,18 +114,9 @@ impl ProjectStore {
         project_ids: Option<Vec<ProjectId>>,
         include_deleted: bool,
     ) -> Result<Vec<ProjectRow>, PersistenceError> {
-        self.db.read(move |conn| {
-            let mut statement = conn.prepare("SELECT project_id, title, workspace_root, default_model_selection_json, default_thread_env_mode, auto_pull, favicon_path, project_icon_json, scripts_json, created_at, updated_at, deleted_at FROM projection_projects ORDER BY created_at ASC, project_id ASC").map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?;
-            let rows = statement.query_map([], raw_row).map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?;
-            let mut result = Vec::new();
-            for raw in rows {
-                let row = decode_row(raw.map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?)?;
-                if !include_deleted && row.deleted_at.is_some() { continue; }
-                if project_ids.as_ref().is_some_and(|ids| !ids.contains(&row.project_id)) { continue; }
-                result.push(row);
-            }
-            Ok(result)
-        }).await
+        self.db
+            .read(move |conn| list_rows_in(conn, project_ids.as_deref(), include_deleted))
+            .await
     }
 
     pub async fn find_active_by_workspace_root(
@@ -155,6 +146,42 @@ impl ProjectStore {
             .map(to_shell)
             .collect()
     }
+}
+
+/// `list` on a connection the caller already holds, so a shell snapshot can
+/// read projects inside its own read transaction.
+pub fn list_rows_in(
+    conn: &Connection,
+    project_ids: Option<&[ProjectId]>,
+    include_deleted: bool,
+) -> Result<Vec<ProjectRow>, PersistenceError> {
+    let mut statement = conn.prepare("SELECT project_id, title, workspace_root, default_model_selection_json, default_thread_env_mode, auto_pull, favicon_path, project_icon_json, scripts_json, created_at, updated_at, deleted_at FROM projection_projects ORDER BY created_at ASC, project_id ASC").map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?;
+    let rows = statement
+        .query_map([], raw_row)
+        .map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?;
+    let mut result = Vec::new();
+    for raw in rows {
+        let row = decode_row(raw.map_err(|e| PersistenceError::sql("ProjectStore.list", &e))?)?;
+        if !include_deleted && row.deleted_at.is_some() {
+            continue;
+        }
+        if project_ids.is_some_and(|ids| !ids.contains(&row.project_id)) {
+            continue;
+        }
+        result.push(row);
+    }
+    Ok(result)
+}
+
+/// `listShells` on a connection the caller already holds.
+pub fn list_shells_in(
+    conn: &Connection,
+    project_ids: Option<&[ProjectId]>,
+) -> Result<Vec<OrchestrationProjectShell>, PersistenceError> {
+    list_rows_in(conn, project_ids, false)?
+        .into_iter()
+        .map(to_shell)
+        .collect()
 }
 
 fn invalid(message: impl Into<String>) -> PersistenceError {

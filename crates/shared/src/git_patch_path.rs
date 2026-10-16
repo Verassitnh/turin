@@ -286,4 +286,85 @@ mod tests {
         assert_eq!(unquote_git_patch_path("trailing\\"), "trailing\\");
         assert_eq!(unquote_git_patch_path("short\\12.txt"), "short12.txt");
     }
+
+    #[test]
+    fn leaves_an_unambiguous_name_alone() {
+        assert_eq!(quote_git_patch_path("src/app.ts"), "src/app.ts");
+        assert_eq!(quote_git_patch_path("with space.txt"), "with space.txt");
+        assert_eq!(quote_git_patch_path("café/résumé.ts"), "café/résumé.ts");
+        assert_eq!(quote_git_patch_path("🚀.ts"), "🚀.ts");
+    }
+
+    #[test]
+    fn quotes_characters_a_header_would_split_on() {
+        assert_eq!(quote_git_patch_path("tab\tfile.txt"), "\"tab\\tfile.txt\"");
+        assert_eq!(
+            quote_git_patch_path("line\nfile.txt"),
+            "\"line\\nfile.txt\""
+        );
+        assert_eq!(quote_git_patch_path("quo\"te.txt"), "\"quo\\\"te.txt\"");
+        assert_eq!(
+            quote_git_patch_path("back\\slash.txt"),
+            "\"back\\\\slash.txt\""
+        );
+        assert_eq!(quote_git_patch_path("ring\u{0007}.txt"), "\"ring\\a.txt\"");
+        assert_eq!(
+            quote_git_patch_path("unit\u{001f}.txt"),
+            "\"unit\\037.txt\""
+        );
+        assert_eq!(quote_git_patch_path("del\u{007f}.txt"), "\"del\\177.txt\"");
+    }
+
+    #[test]
+    fn round_trips_quoted_and_unwrapped_names() {
+        let names = [
+            "src/app.ts",
+            "with space.txt",
+            "café/résumé.ts",
+            "🚀.ts",
+            "tab\tfile.txt",
+            "line\nfile.txt",
+            "carriage\rfile.txt",
+            "quo\"te.txt",
+            "back\\slash.txt",
+            "ring\u{0007}.txt",
+            "unit\u{001f}.txt",
+            "del\u{007f}.txt",
+            "every\t\n\r\"\\\u{0007}.txt",
+        ];
+        for name in names {
+            let written = quote_git_patch_path(name);
+            assert_eq!(unquote_git_patch_path(&written), name);
+            let unwrapped = if written.starts_with('"') {
+                &written[1..written.len() - 1]
+            } else {
+                written.as_str()
+            };
+            assert_eq!(unquote_git_patch_path(unwrapped), name);
+        }
+        let written = quote_git_patch_path("tab\tfile.txt");
+        assert!(!written.contains('\t'));
+        assert!(!written.contains('\n'));
+        assert_ne!(unquote_git_patch_path(&written), "tab");
+    }
+
+    #[test]
+    fn reads_octal_and_partial_escapes() {
+        assert_eq!(unquote_git_patch_path("src/app.ts"), "src/app.ts");
+        assert_eq!(unquote_git_patch_path(""), "");
+        assert_eq!(unquote_git_patch_path("\""), "\"");
+        assert_eq!(
+            unquote_git_patch_path("\"caf\\303\\251/r\\303\\251sum\\303\\251.ts\""),
+            "café/résumé.ts"
+        );
+        assert_eq!(
+            unquote_git_patch_path("\"\\360\\237\\232\\200.ts\""),
+            "🚀.ts"
+        );
+        assert_eq!(unquote_git_patch_path("tab\\tfile.txt"), "tab\tfile.txt");
+        assert_eq!(unquote_git_patch_path("caf\\303\\251.ts"), "café.ts");
+        assert_eq!(unquote_git_patch_path("odd\\zname.txt"), "oddzname.txt");
+        assert_eq!(unquote_git_patch_path("trailing\\"), "trailing\\");
+        assert_eq!(unquote_git_patch_path("short\\12.txt"), "short12.txt");
+    }
 }

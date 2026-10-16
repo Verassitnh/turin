@@ -1,6 +1,7 @@
 //! Ports of upstream/apps/web/src/components/chat.
 
 pub mod changed_files_tree;
+pub mod chat_git_host;
 pub mod chat_header;
 // Chat-lane geometry for the canvas; the canvas does not call it yet.
 #[allow(dead_code)]
@@ -29,6 +30,7 @@ pub mod page_scroll_controller;
 // in element state, so nothing calls these yet.
 #[allow(dead_code)]
 pub mod pending_user_input;
+pub mod thread_details_control;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]

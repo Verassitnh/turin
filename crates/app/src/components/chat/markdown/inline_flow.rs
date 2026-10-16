@@ -773,6 +773,8 @@ pub struct InlineFlow {
     highlights: Vec<FlowHighlight>,
     caret: Option<FlowCaret>,
     probe: Option<FlowProbe>,
+    assistant_message_id: Option<String>,
+    assistant_message_text: Option<String>,
 }
 
 impl InlineFlow {
@@ -791,7 +793,15 @@ impl InlineFlow {
             highlights: Vec::new(),
             caret: None,
             probe: None,
+            assistant_message_id: None,
+            assistant_message_text: None,
         }
+    }
+
+    pub fn assistant_selection(mut self, message_id: String, message_text: String) -> Self {
+        self.assistant_message_id = Some(message_id);
+        self.assistant_message_text = Some(message_text);
+        self
     }
 
     /// Whether the flow takes part in the window text selection (default true).
@@ -1128,6 +1138,26 @@ impl Element for InlineFlow {
             .to_string();
         if *selected_text.borrow() != selected_string {
             *selected_text.borrow_mut() = selected_string;
+        }
+        if let (Some(message_id), Some(message_text)) = (
+            self.assistant_message_id.as_deref(),
+            self.assistant_message_text.as_deref(),
+        ) && let Some(range) = selected_range.clone().filter(|r| r.start < r.end)
+        {
+            let anchor = handle
+                .as_ref()
+                .and_then(|handle| handle.snapshot(cx))
+                .and_then(|snapshot| snapshot.window_points())
+                .map(|points| points.cursor())
+                .unwrap_or(bounds.origin);
+            super::super::assistant_selection_state::report_flow_selection(
+                cx,
+                message_id,
+                message_text,
+                text,
+                range,
+                anchor,
+            );
         }
 
         // Selection highlight.

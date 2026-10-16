@@ -96,6 +96,11 @@ pub enum PromptEditorEvent {
     PageScrollRelease,
     /// A file mention chip was clicked (`actions.openMention(path)`).
     OpenMention(String),
+    /// A context reference chip was clicked (`composerContextPresentation`).
+    OpenContextReference {
+        context_id: String,
+        anchor: Point<Pixels>,
+    },
     /// A citation comment was saved with Cmd/Ctrl+Enter
     /// (`onCitationSubmitAndSend`).
     CitationSubmitAndSend,
@@ -405,6 +410,45 @@ impl PromptEditor {
         self.state.request_citation_comment(request);
         self.sync_comment_editor(Some(window), cx);
         cx.notify();
+    }
+
+    /// Inserts a citation chip at the caret and opens its comment field.
+    pub fn insert_assistant_citation(
+        &mut self,
+        citation: turin_contracts::assistant_citations::AssistantCitation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::composer::editor_state::CitationCommentRequest;
+        use crate::composer::js_string::utf16_len;
+        use crate::composer::rich_doc::{Atom, random_node_key};
+        use turin_shared::assistant_citations::serialize_assistant_citation;
+
+        let source = serialize_assistant_citation(&citation);
+        let cite_key = random_node_key();
+        let atom = Atom::Citation {
+            citation: Box::new(citation),
+            source,
+            cite_key,
+        };
+        let prefix_len = utf16_len(&self.state.value());
+        self.state.insert_atom(atom);
+        self.after_change(cx);
+        let value = self.state.value();
+        let citation_start = value
+            .find("[Assistant quote]")
+            .map(|index| utf16_len(&value[..index]))
+            .unwrap_or(prefix_len);
+        self.request_citation_comment(
+            CitationCommentRequest {
+                previous_value: String::new(),
+                value,
+                citation_start,
+                inserted_spaces: Default::default(),
+            },
+            window,
+            cx,
+        );
     }
 
     /// Open a citation's comment editor (the chip's comment trigger).
@@ -1279,6 +1323,15 @@ impl PromptEditor {
                     self.state.set_caret(DocPos::new(pos.block, pos.offset + 1));
                     self.after_change(cx);
                     self.open_citation_comment(&cite_key, window, cx);
+                    return;
+                }
+                Atom::ContextReference { context_id, .. } => {
+                    self.state.set_caret(DocPos::new(pos.block, pos.offset + 1));
+                    cx.emit(PromptEditorEvent::OpenContextReference {
+                        context_id,
+                        anchor: event.position,
+                    });
+                    self.after_change(cx);
                     return;
                 }
                 _ => {}

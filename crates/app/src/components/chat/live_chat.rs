@@ -36,6 +36,10 @@ use crate::composer::view_model::{
     ComposerSource, ComposerStore, ComposerViewModel, DraftRestore, InteractionMode, PathEntry,
     QueueState, QueuedRun, RuntimeMode, SendRequest, SessionPhase,
 };
+use super::composer_pending_bridge::{
+    apply_composer_prompt_to_session, message_mode_pending_input, pending_answer_for_message_input,
+    sync_pending_input_session, PendingSubmitPlan,
+};
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
 use crate::state::models::scoped_thread_key;
@@ -66,6 +70,7 @@ struct Overrides {
     path_search_pending: bool,
     /// Bumped per search; an older search's result is dropped.
     path_search_generation: u64,
+    pending_input: super::composer_pending_bridge::ComposerPendingInputSession,
 }
 
 pub struct LiveChat {
@@ -237,7 +242,8 @@ impl LiveSource {
                 }
             })
             .ok();
-        let view_model = self.view_model(projection, entry.detail.as_ref());
+        self.sync_pending_session(entry.detail.as_ref());
+        let view_model = self.view_model(projection, entry.detail.as_ref(), cx);
         self.composer
             .update(cx, |store, cx| store.publish(view_model, cx))
             .ok();
@@ -247,6 +253,7 @@ impl LiveSource {
         &self,
         projection: &ThreadProjection,
         detail: Option<&crate::state::thread_detail::ThreadDetailView>,
+        cx: &App,
     ) -> ComposerViewModel {
         let overrides = self.overrides.borrow();
         let thread = &projection.thread;
@@ -321,8 +328,39 @@ impl LiveSource {
             restore_draft: overrides.restore.clone(),
             path_entries: overrides.path_entries.clone(),
             path_search_pending: overrides.path_search_pending,
+            has_pending_approval: detail
+                .map(|detail| {
+                    !super::timeline::live_projection::pending_approvals(&detail.pending_requests)
+                        .is_empty()
+                })
+                .unwrap_or(false),
+            banners: {
+                let state = self.handle.snapshot();
+                super::live_wiring::usage_limit_recovery_banner(&state, &self.thread_id)
+                    .into_iter()
+                    .collect()
+            },
+            environment_id: local_environment_id(),
+            pending_answer: detail.and_then(|detail| {
+                let pending = message_mode_pending_input(&detail.pending_requests)?;
+                let session = self.overrides.borrow().pending_input.clone();
+                Some(pending_answer_for_message_input(
+                    pending,
+                    &session,
+                    &local_environment_id(),
+                    self.thread_id.as_str(),
+                    "",
+                    cx,
+                ))
+            }),
             ..ComposerViewModel::default()
         }
+    }
+
+    fn sync_pending_session(&self, detail: Option<&crate::state::thread_detail::ThreadDetailView>) {
+        let input = detail.and_then(|detail| message_mode_pending_input(&detail.pending_requests));
+        let mut overrides = self.overrides.borrow_mut();
+        sync_pending_input_session(&mut overrides.pending_input, input);
     }
 
     fn update_overrides(&self, cx: &mut App, edit: impl FnOnce(&mut Overrides)) {
@@ -446,8 +484,7 @@ impl LiveSource {
 impl ComposerSource for LiveSource {
     fn send(&self, request: SendRequest, cx: &mut App) -> bool {
         if request.answering_pending_user_input {
-            self.not_wired("Answering questions from the composer", cx);
-            return false;
+            return self.submit_composer_pending_answer(&request.prompt, cx);
         }
         if let Some(run_id) = request.editing_queued_run.clone() {
             return self.edit_queued(run_id, request.prompt, cx);
@@ -544,9 +581,44 @@ impl ComposerSource for LiveSource {
         self.not_wired("Compact context", cx);
     }
 
-    fn dismiss_banner(&self, _id: &str, _cx: &mut App) {}
+    fn dismiss_banner(&self, id: &str, _cx: &mut App) {
+        if id.starts_with("usage-limit-recovery:") {
+            return;
+        }
+    }
 
-    fn banner_action(&self, _banner_id: &str, _action_id: &str, _cx: &mut App) {}
+    fn banner_action(&self, banner_id: &str, action_id: &str, cx: &mut App) {
+        if !banner_id.starts_with("usage-limit-recovery:") {
+            self.not_wired("Composer banner action", cx);
+            return;
+        }
+        use super::usage_limit_recovery_banner::{
+            RecoveryAction, RecoveryToggle, plan_recovery_toggle,
+        };
+        let Some(action) = RecoveryAction::from_id(action_id) else {
+            return;
+        };
+        let state = self.handle.snapshot();
+        let Some(props) = super::live_wiring::usage_limit_recovery_props(&state, &self.thread_id)
+        else {
+            return;
+        };
+        match plan_recovery_toggle(&props, action, chrono::Utc::now().timestamp_millis()) {
+            RecoveryToggle::Ignore => {}
+            RecoveryToggle::Error(message) => push_error(cx, "Usage limit recovery", &message),
+            RecoveryToggle::Update(input) => {
+                let Some(update) = input.into_update() else {
+                    return;
+                };
+                self.queue_command(
+                    "Failed to save usage limit recovery",
+                    cx,
+                    "thread.metadata.update",
+                    json!({ "limitRecovery": update }),
+                );
+            }
+        }
+    }
 
     fn edit_queued_run(&self, run_id: &str, cx: &mut App) {
         let run_id = run_id.to_owned();
@@ -603,11 +675,17 @@ impl ComposerSource for LiveSource {
         );
     }
 
-    fn respond_to_pending_input(&self, _request_id: &str, _answer: &str, cx: &mut App) {
-        self.not_wired("Answering questions", cx);
+    fn respond_to_pending_input(&self, _request_id: &str, answer: &str, cx: &mut App) {
+        let _ = self.submit_composer_pending_answer(answer, cx);
     }
 
-    fn previous_pending_question(&self, _cx: &mut App) {}
+    fn previous_pending_question(&self, cx: &mut App) {
+        self.update_overrides(cx, |overrides| {
+            if overrides.pending_input.question_index > 0 {
+                overrides.pending_input.question_index -= 1;
+            }
+        });
+    }
 
     /// `@` completion over the project's workspace.
     fn search_paths(&self, query: &str, cx: &mut App) {
@@ -668,6 +746,62 @@ impl ComposerSource for LiveSource {
 }
 
 impl LiveSource {
+    fn submit_composer_pending_answer(&self, composer_prompt: &str, cx: &mut App) -> bool {
+        let state = self.handle.snapshot();
+        let Some(detail) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.detail.as_ref())
+        else {
+            return false;
+        };
+        let Some(input) = message_mode_pending_input(&detail.pending_requests) else {
+            return false;
+        };
+        let plan = {
+            let mut overrides = self.overrides.borrow_mut();
+            apply_composer_prompt_to_session(
+                input,
+                &mut overrides.pending_input,
+                &local_environment_id(),
+                self.thread_id.as_str(),
+                composer_prompt,
+                cx,
+            )
+        };
+        match plan {
+            PendingSubmitPlan::Rejected => false,
+            PendingSubmitPlan::Advanced => true,
+            PendingSubmitPlan::Submit { request_id, answers } => {
+                self.update_overrides(cx, |overrides| overrides.pending_input.responding = true);
+                let source = self.me.clone();
+                let (thread_id, request_id) = (self.thread_id.clone(), request_id);
+                self.run_command("Failed to submit your answer", cx, move |commands| async move {
+                    let answers: serde_json::Map<String, Value> = answers
+                        .into_iter()
+                        .map(|(question, answer)| (question, Value::String(answer)))
+                        .collect();
+                    commands
+                        .respond_to_request(&thread_id, &request_id, None, Some(Value::Object(answers)))
+                        .await
+                });
+                cx.spawn(async move |cx| {
+                    cx.background_executor().timer(Duration::from_millis(400)).await;
+                    cx.update(|cx| {
+                        let Some(source) = source.upgrade() else {
+                            return;
+                        };
+                        source.update_overrides(cx, |overrides| {
+                            overrides.pending_input.responding = false;
+                        });
+                    })
+                    .ok();
+                })
+                .detach();
+                true
+            }
+        }
+    }
+
     /// Dispatches `message.dispatch` (after any thread-mode change) on the
     /// runtime, without blocking the UI thread. The composer clears its draft
     /// when this returns; a failure toasts and hands the draft back
@@ -862,5 +996,7 @@ impl TimelineSource for LiveSource {
         crate::diff::request_open_turn_diff(run_id, file_path, cx);
     }
 
-    fn open_thread(&self, _thread_id: &str, _cx: &mut App) {}
+    fn open_thread(&self, thread_id: &str, cx: &mut App) {
+        super::thread_navigation::request_open_thread(thread_id, cx);
+    }
 }

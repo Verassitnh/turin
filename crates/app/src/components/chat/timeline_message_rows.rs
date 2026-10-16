@@ -451,10 +451,11 @@ pub fn assistant_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
         .px(rems(0.25))
         .py(rems(0.125))
         .child(
-            ChatMarkdown::new(("assistant-md", cx.order), text)
+            ChatMarkdown::new(("assistant-md", cx.order), text.clone())
                 .line_breaks(line_breaks)
                 .streaming(message.streaming)
-                .document_order(cx.order + 1),
+                .document_order(cx.order + 1)
+                .assistant_selection_source(message.id.clone()),
         )
         .when_some(
             assistant_turn_diff_summary

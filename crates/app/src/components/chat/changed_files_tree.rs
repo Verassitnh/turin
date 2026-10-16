@@ -3,7 +3,7 @@
 //! upstream/apps/web/src/lib/turnDiffTree.ts: the per-turn changed files
 //! summary under an assistant reply.
 //!
-//! Pierre file icons are not ported yet; files show a neutral file glyph.
+//! File rows use [`crate::ui::pierre_file_icon::file_tree_file_icon`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -499,11 +499,11 @@ fn render_node(
                 .when(has_directory_nodes || depth > 0, |this| {
                     this.child(div().size(rems(0.875)).flex_shrink_0())
                 })
-                .child(
-                    Icon::new(IconName::FileText)
-                        .size(rems(0.875))
-                        .color(with_alpha(theme.muted_foreground, 0.7).into()),
-                )
+                .child(crate::ui::pierre_file_icon::file_tree_file_icon(
+                    path,
+                    theme.is_dark(),
+                    rems(0.875),
+                ))
                 .child(
                     div()
                         .min_w_0()

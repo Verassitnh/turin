@@ -17,7 +17,10 @@ pub mod assistant_citation_navigation;
 pub mod assistant_citation_source;
 #[allow(dead_code)]
 pub mod assistant_citation_target;
+pub mod assistant_selection_state;
 pub mod assistant_selection_toolbar;
+pub mod question_attachment_drafts;
+pub mod thread_navigation;
 pub mod changed_files_tree;
 pub mod chat_canvas;
 #[allow(dead_code)]
@@ -60,6 +63,7 @@ pub mod usage_limit_recovery_banner;
 #[allow(dead_code)]
 pub mod assistant_text_selection;
 pub mod chat_media;
+pub mod composer_pending_bridge;
 pub mod composer_pending_panels;
 // Embedded-script scan for command and tool views; no view calls it yet.
 #[allow(dead_code)]
@@ -86,6 +90,8 @@ pub mod draft_hero_transition;
 #[allow(dead_code)]
 pub mod folder_drop;
 pub mod live_chat;
+pub mod live_wiring;
+pub mod timeline_page_scroll;
 pub mod markdown;
 #[allow(dead_code)]
 pub mod markdown_clipboard;

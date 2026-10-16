@@ -19,6 +19,7 @@ turin-providers.workspace = true
 turin-text-generation.workspace = true
 turin-provider-claude.workspace = true
 turin-provider-codex.workspace = true
+turin-provider-cursor.workspace = true
 turin-provider-opencode.workspace = true
 turin-git.workspace = true
 turin-source-control.workspace = true

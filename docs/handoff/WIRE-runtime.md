@@ -8,11 +8,12 @@ All backend calls run on Tokio; never block GPUI renders.
 Public `WriteRuntime` services:
 - `provider_auth: Arc<ProviderAuthService>`; `start/respond/complete/cancel/logout/subscribe`
   use existing `turin_providers::provider_auth_service` signatures. Use one stable
-  owner session ID for each settings UI's auth flow; explicit Client callback mode
-  where supported. IMPORTANT: native desktop auth should use Server callback mode;
-  Codex's own auth controller spawns a loopback callback listener in Server mode.
-  WIRE-settings currently forces Client mode, which needs a desktop receiver for
-  callback URLs. Runtime supplies no such receiver. No phantom welcome URL remains.
+  owner session ID for each settings UI's auth flow. Native composition now enforces
+  **Server callback mode** via `ProviderAuthService::with_callback_mode(Server)`;
+  this overrides the settings adapter's old Client request. Codex owns a real
+  `127.0.0.1:0` listener bound before its browser interaction is published, validates
+  state/PKCE, exchanges and stores tokens, delivers the real completion page, and
+  drops the listener on completion/cancel. No app-wide server or T3Connect is used.
 - `provider_installation: Arc<ProviderInstallation>`; existing provider setup/install
   APIs. Shared Codex managed installation used by actual driver, not a second installer.
 - `server_settings: Arc<ServerSettingsService>`; use Commands facade for patches so
@@ -49,16 +50,29 @@ No cargo, tests, clippy run here: parent owns integrated build. Rustfmt and `git
 
 ## Available backend limitations
 
-- `usage_summary` returns an explicit unavailable error: every retained provider driver
-  inherits `usage() -> None`; production transcript formats/readers are absent. Only test
-  stand-ins exist. Runtime owns real UsageService and is ready for real driver readers;
-  do not call its raw `read_summary` to bypass the facade's unavailable check.
+- **Cursor history is now real**: `write/usage.rs` adapts existing
+  `CursorUsageAccounts` + `CursorAccountReader` + real `ReqwestDashboard` and
+  `CursorKeychain::layer` into `ProviderUsageReader::Scan`. It honors saved
+  `cursorKeychainUsageEnabled`, file credentials, source errors, account cache and
+  `awaitRefresh`. No synthetic parser or totals. Only Cursor history is available;
+  Claude/Codex/OpenCode have no concrete history reader. UI must label that scope.
+- `Commands::usage_readiness() -> UsageReadiness` supplies `history_driver_kinds`
+  (currently `["cursor"]`) and `unavailable_history_driver_kinds` for that label.
+- `Commands::provider_snapshots() -> Vec<ServerProvider>` is a synchronous real
+  snapshot for limits/readiness (also streamed by `CommandBus::providers`).
+- `Commands::refresh_usage_limits().await -> Vec<ServerProvider>` probes the actual
+  providers; consume each snapshot's `usage_limits`, auth/install/availability state.
+- `Commands::can_consume_reset_credit(&ProviderInstanceId) -> bool` controls whether
+  redemption is available. `consume_reset_credit(ProviderConsumeResetCreditInput)`
+  calls the actual instance hook and refreshes readiness; unsupported instances and
+  external sources return explicit errors. No cross-server source is introduced.
 - Settings persist with ServerSettingsService (secret store + file watcher), then publish
   through the DesktopSettingsHandle consumed by provider hydration. External edits feed
   the same bridge. Settings facade signatures match WIRE-settings/live_commands.rs.
 - New data directories seed supplied startup settings; existing settings use real service
   migration/normalization/materialization. `TURIN_CLAUDE_BINARY` remains process-local.
-- Managed Codex installer shares the driver's actual installer/lease state.
+- Managed Codex installer shares the driver's actual installer/lease state; a retained
+  subscription refreshes real provider snapshots when installation settles.
 - Review-guide generation uses actual TextGeneration provider adapter and reads current
   settings each request. GitHub auth uses real `gh`/environment/settings credentials.
 - `storage_cleanup: Arc<StorageCleanup>` supports real artifact/log cleanup on demand and
@@ -72,3 +86,31 @@ No cargo, tests, clippy run here: parent owns integrated build. Rustfmt and `git
   directly. Shell owns EnvironmentInfo/platform/client-settings initialization.
 - Settings facade waits for explicit instance reconciliation before returning (the
   DesktopSettingsHandle watcher still handles external settings changes).
+
+## Native settings invocation (follow-up)
+
+```rust
+let input = ProviderAuthStartInput {
+    instance_id,
+    method_id,
+    return_url: None,
+    callback_mode: Some(ProviderAuthCallbackMode::Server), // contracts/wire enum
+};
+let states = runtime.provider_auth.subscribe(&input.instance_id, SETTINGS_AUTH_OWNER_SESSION);
+let state = runtime.provider_auth.start(&input, SETTINGS_AUTH_OWNER_SESSION).await?;
+```
+
+Run the start and stream on the bus's Tokio runtime. Keep the same owner for all
+operations and open the published Browser interaction URL using the existing settings
+Open browser action. Server mode finishes via its local callback without a manual
+completion call. Existing `complete(instance, flow, callback_url, owner)` remains a
+validated manual fallback for a pasted redirect URL; do not fabricate success on open.
+The runtime host policy also makes the current settings Client invocation work unchanged.
+Cursor's existing explicit CLI/ACP login ignores callback mode and refreshes its snapshot.
+Claude/OpenCode have no runtime auth controller; respect real setup capabilities and
+report that sign-in must be configured through their CLI/environment.
+
+Parent/integrator: wire `LiveUsageBackend::limits_environments` to cached provider
+snapshots instead of its current empty Vec, `refresh_limits` to the facade, and render
+history scope from `usage_readiness`. Keychain opt-in already uses the persistent patch.
+UI remains outside this worker's ownership.

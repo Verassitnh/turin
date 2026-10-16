@@ -5,6 +5,7 @@
 
 pub mod alert_dialog;
 pub mod animated_size;
+pub mod autocomplete;
 pub mod badge;
 pub mod button;
 pub mod collapsible;

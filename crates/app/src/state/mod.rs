@@ -22,6 +22,7 @@ pub mod item_support;
 pub mod live_refresh;
 pub mod models;
 pub mod orchestration_v2_projection;
+pub mod panel_animations;
 pub mod project_grouping;
 pub mod projects;
 pub mod right_panel_store;

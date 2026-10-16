@@ -55,7 +55,7 @@ use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect};
 use crate::pipeline::event_sink::WriteInput;
 use crate::pipeline::orchestrator_port::OrchestratorError;
 use crate::projection::queued_run_order::queued_runs_in_delivery_order;
-use crate::projection::shared::thread_error::{
+use turin_shared::orchestration_v2_thread_error::{
     latest_executed_run, latest_root_provider_failure, usage_limit_blocked_run,
 };
 

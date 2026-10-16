@@ -28,7 +28,7 @@ use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect, ThreadTitleKi
 use crate::pipeline::orchestrator_port::{
     OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
 };
-use crate::projection::shared::thread_error::{
+use turin_shared::orchestration_v2_thread_error::{
     latest_root_provider_failure, usage_limit_blocked_run,
 };
 use crate::projection::shared::thread_pull_requests::thread_pull_requests_of;

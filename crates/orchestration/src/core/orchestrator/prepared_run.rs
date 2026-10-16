@@ -31,7 +31,7 @@ use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect};
 use crate::pipeline::orchestrator_port::{
     OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
 };
-use crate::projection::shared::thread_error::latest_executed_run;
+use turin_shared::orchestration_v2_thread_error::latest_executed_run;
 
 /// Decides the four prepared-run commands. `Ok(false)` leaves the command to another group.
 pub(super) async fn decide(

@@ -18,7 +18,7 @@ use turin_contracts::{
     },
 };
 
-use crate::projection::shared::thread_error::run_ran_after;
+use turin_shared::orchestration_v2_thread_error::run_ran_after;
 
 const MAX_LABEL_LENGTH: usize = 160;
 const MAX_NOTE_ENTRIES: usize = 10;

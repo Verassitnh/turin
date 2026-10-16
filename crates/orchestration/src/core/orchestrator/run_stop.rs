@@ -60,7 +60,7 @@ use crate::projection::shared::pending_background_work::{
     PendingBackgroundWorkProviderThread, PendingBackgroundWorkRun, derive_pending_background_work,
     pending_background_turn_items,
 };
-use crate::projection::shared::thread_error::latest_executed_run;
+use turin_shared::orchestration_v2_thread_error::latest_executed_run;
 
 /// The turn items Stop reads thread-wide, like the Waiting strip: a settled
 /// thread's background work can belong to an earlier run than the one Stop

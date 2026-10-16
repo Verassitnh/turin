@@ -21,8 +21,8 @@ use turin_contracts::orchestration_v2::{
 use super::restart_background_note::{
     cancelled_roster_task_work, cancelled_turn_item_work, is_awaited_work,
 };
-use turin_shared::orchestration_v2_thread_error::run_ran_after;
 use crate::projection::turn_item;
+use turin_shared::orchestration_v2_thread_error::run_ran_after;
 
 /// Whether a restart must leave this run for the user: the thread is put away,
 /// the provider turn already ended, or the user owes an answer. Checked when

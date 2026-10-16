@@ -17,7 +17,7 @@ const ATLAS_UPLOADS: &str = "thread-atlas-uploads";
 
 /// A store fed by the read path over `stores`. Seed before calling this: the
 /// shell snapshot is read once, at start.
-fn start(stores: Arc<Stores>) -> ClientStateHandle {
+pub(crate) fn start(stores: Arc<Stores>) -> ClientStateHandle {
     let runtime = spawn_client_state(&Handle::current(), crate::state::local_environment_id());
     tokio::spawn(serve(stores, runtime.sender, runtime.requests));
     runtime.handle
@@ -25,7 +25,7 @@ fn start(stores: Arc<Stores>) -> ClientStateHandle {
 
 /// Polls the published store until `ready` holds. Publishing is batched, so
 /// the state is read fresh on each poll.
-async fn wait_for(
+pub(crate) async fn wait_for(
     handle: &ClientStateHandle,
     what: &str,
     ready: impl Fn(&ClientState) -> bool,
@@ -43,7 +43,7 @@ async fn wait_for(
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
 }
 
-fn thread_id(id: &str) -> ThreadId {
+pub(crate) fn thread_id(id: &str) -> ThreadId {
     ThreadId::new(id).expect("static id")
 }
 

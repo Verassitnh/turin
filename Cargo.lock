@@ -7358,14 +7358,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "turin-contracts",
+ "turin-git",
+ "turin-hooks",
  "turin-orchestration",
  "turin-persistence",
+ "turin-provider-claude",
  "turin-provider-core",
+ "turin-providers",
  "turin-review",
  "turin-runtime",
  "turin-shared",
  "unicode-normalization",
  "url",
+ "uuid",
 ]
 
 [[package]]

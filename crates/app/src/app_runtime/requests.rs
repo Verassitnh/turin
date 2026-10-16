@@ -30,7 +30,7 @@ pub fn handle(
             if let Some(previous) = thread_feeds.remove(&thread_id) {
                 previous.abort();
             }
-            let handle = tasks.spawn(feeds::thread(
+            let handle = tasks.spawn(feeds::thread_supervised(
                 Arc::clone(stores),
                 sender.clone(),
                 thread_id.clone(),

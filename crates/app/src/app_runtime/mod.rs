@@ -15,6 +15,7 @@
 //! ```
 
 pub mod data_dir;
+mod feed_retry;
 mod feeds;
 mod requests;
 #[cfg(test)]
@@ -40,7 +41,7 @@ use turin_orchestration::projection::project_store::ProjectStore;
 use turin_orchestration::projection::store::ProjectionStore;
 use turin_persistence::{Db, OrchestrationEventStore};
 
-use crate::state::events::{ClientStateRequests, ClientStateSender};
+use crate::state::events::{ClientStateEvent, ClientStateRequests, ClientStateSender, FeedStatus};
 use crate::state::shell_reducer::ShellStreamItem;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ShellSnapshot, OrchestrationV2ShellStreamItem,
@@ -58,7 +59,8 @@ impl Stores {
     /// Creates the data dir if needed, opens its database (migrations and the
     /// V1 import run here), and builds the services.
     pub async fn open(data_dir: &Path) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(data_dir)
+        tokio::fs::create_dir_all(data_dir)
+            .await
             .with_context(|| format!("creating Turin data dir {}", data_dir.display()))?;
         let db = Db::open_configured(data_dir::database_path(data_dir))
             .await
@@ -89,12 +91,18 @@ pub async fn run(
 ) {
     let Some(data_dir) = data_dir else {
         tracing::error!("no Turin data dir: set TURIN_DATA_DIR or HOME; the sidebar stays empty");
+        sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
+            "no Turin data dir: set TURIN_DATA_DIR or HOME".into(),
+        )));
         return;
     };
     let stores = match Stores::open(&data_dir).await {
         Ok(stores) => Arc::new(stores),
         Err(error) => {
             tracing::error!(error = %format!("{error:#}"), "failed to open Turin database; the sidebar stays empty");
+            sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
+                error.to_string(),
+            )));
             return;
         }
     };
@@ -112,6 +120,9 @@ pub async fn serve(
         Ok(snapshot) => snapshot,
         Err(error) => {
             tracing::error!(error = %format!("{error:#}"), "failed to read the shell snapshot");
+            sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
+                error.to_string(),
+            )));
             return;
         }
     };
@@ -125,10 +136,27 @@ pub async fn serve(
 
     // Every task here is aborted when this function returns: JoinSet aborts on drop.
     let mut tasks = JoinSet::new();
-    tasks.spawn(feeds::shell(
+    let resync_stores = Arc::clone(&stores);
+    let resync_sender = sender.clone();
+    let resync: feeds::ShellResync = Arc::new(move || {
+        let stores = Arc::clone(&resync_stores);
+        let sender = resync_sender.clone();
+        Box::pin(async move {
+            let snapshot = load_shell(&stores).await?;
+            sender.shell(vec![ShellStreamItem::from(
+                OrchestrationV2ShellStreamItem::Snapshot {
+                    snapshot: snapshot.clone(),
+                    resolved_repository_identity_roots: None,
+                },
+            )]);
+            Ok(snapshot.snapshot_sequence)
+        })
+    });
+    tasks.spawn(feeds::shell_supervised(
         Arc::clone(&stores),
         sender.clone(),
         after_sequence,
+        resync,
     ));
     let mut thread_feeds: HashMap<ThreadId, AbortHandle> = HashMap::new();
     loop {

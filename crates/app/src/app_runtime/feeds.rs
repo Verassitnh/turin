@@ -9,39 +9,107 @@ use futures::StreamExt as _;
 use turin_contracts::ProjectId;
 use turin_contracts::ThreadId;
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2ShellStreamItem, OrchestrationV2ThreadShell,
+    OrchestrationV2ShellStreamItem, OrchestrationV2ThreadShell, OrchestrationV2ThreadStreamItem,
 };
 use turin_orchestration::pipeline::event_sink::StreamOptions;
 use turin_orchestration::projection::shell_stream::{
     ShellApplicationEvent, shell_stream_item_from_thread_shell, to_shell_application_event,
 };
+use turin_orchestration::projection::thread_live_event_coalescer::ThreadLiveEventCoalescer;
 use turin_persistence::ApplicationStoredEvent;
 
 use super::Stores;
+use super::feed_retry::{refetch_max_attempts, refetch_retry_delay_ms, stream_resubscribe_delay_ms};
+
+pub type ShellResync =
+    Arc<dyn Fn() -> futures::future::BoxFuture<'static, anyhow::Result<u64>> + Send + Sync>;
 use crate::state::events::{ClientStateEvent, ClientStateSender, FeedStatus};
 use crate::state::shell_reducer::ShellStreamItem;
 use crate::state::thread_state::ThreadStreamItem;
 
-/// Sidebar deltas: one shell item per committed project or thread event.
-pub async fn shell(stores: Arc<Stores>, sender: ClientStateSender, after_sequence: u64) {
+/// Sidebar deltas with resubscribe on stream failure (upstream `subscribeDynamic`).
+pub async fn shell(
+    stores: Arc<Stores>,
+    sender: ClientStateSender,
+    mut after_sequence: u64,
+    resync_shell: ShellResync,
+) {
+    let mut failure_count = 0u32;
+    loop {
+        match shell_stream(Arc::clone(&stores), sender.clone(), after_sequence).await {
+            Ok(()) => break,
+            Err(message) => {
+                failure_count += 1;
+                tracing::error!(
+                    error = %message,
+                    failure_count,
+                    "shell feed stopped; resubscribing"
+                );
+                sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message.clone())));
+                let delay = stream_resubscribe_delay_ms(failure_count);
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                match (resync_shell)().await {
+                    Ok(sequence) => {
+                        after_sequence = sequence;
+                        failure_count = 0;
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %format!("{error:#}"), "shell resync failed");
+                        sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
+                            error.to_string(),
+                        )));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn shell_stream(
+    stores: Arc<Stores>,
+    sender: ClientStateSender,
+    after_sequence: u64,
+) -> Result<(), String> {
     let mut subscription = stores
         .events
         .stream_application_events(i64::try_from(after_sequence).unwrap_or(i64::MAX));
     while let Some(next) = subscription.rx.recv().await {
         let stored = match next {
             Ok(stored) => stored,
-            Err(error) => {
-                let message = error.to_string();
-                tracing::error!(error = %message, "shell feed stopped");
-                sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message)));
-                return;
-            }
+            Err(error) => return Err(error.to_string()),
         };
-        match shell_item(&stores, &stored).await {
+        match shell_item_with_retry(&stores, &stored).await {
             Ok(item) => sender.shell(vec![ShellStreamItem::from(item)]),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+async fn shell_item_with_retry(
+    stores: &Stores,
+    stored: &ApplicationStoredEvent,
+) -> anyhow::Result<OrchestrationV2ShellStreamItem> {
+    let max = refetch_max_attempts();
+    let mut attempt = 0u32;
+    loop {
+        match shell_item(stores, stored).await {
+            Ok(item) => return Ok(item),
             Err(error) => {
-                // One aggregate failing to refetch must not stop the sidebar; the next event for it retries.
-                tracing::warn!(error = %format!("{error:#}"), "dropped a shell update");
+                attempt += 1;
+                if attempt >= max {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    attempt,
+                    "shell refetch failed; retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(refetch_retry_delay_ms(
+                    attempt,
+                )))
+                .await;
             }
         }
     }
@@ -83,26 +151,45 @@ async fn shell_item(
     }
 }
 
-/// One thread's timeline: a bounded snapshot, then every event after it.
-/// Always sends a snapshot, even when the store could resume: resuming is an
-/// optimisation, and `decide_thread_resume` falls back to a snapshot anyway.
-pub async fn thread(stores: Arc<Stores>, sender: ClientStateSender, thread_id: ThreadId) {
-    let snapshot = match stores
+/// One thread's timeline with resubscribe on live-stream failure.
+pub async fn thread(
+    stores: Arc<Stores>,
+    sender: ClientStateSender,
+    thread_id: ThreadId,
+) {
+    let mut failure_count = 0u32;
+    loop {
+        match thread_once(Arc::clone(&stores), sender.clone(), thread_id.clone()).await {
+            Ok(()) => break,
+            Err(message) => {
+                failure_count += 1;
+                tracing::error!(
+                    thread = %thread_id,
+                    error = %message,
+                    failure_count,
+                    "thread feed stopped; resubscribing"
+                );
+                sender.send(ClientStateEvent::ThreadFeed {
+                    thread_id: thread_id.clone(),
+                    status: FeedStatus::Failed(message.clone()),
+                });
+                let delay = stream_resubscribe_delay_ms(failure_count);
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+        }
+    }
+}
+
+async fn thread_once(
+    stores: Arc<Stores>,
+    sender: ClientStateSender,
+    thread_id: ThreadId,
+) -> Result<(), String> {
+    let snapshot = stores
         .projections
         .get_bounded_thread_snapshot(&thread_id)
         .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            let message = error.to_string();
-            tracing::error!(thread = %thread_id, error = %message, "thread snapshot failed");
-            sender.send(ClientStateEvent::ThreadFeed {
-                thread_id,
-                status: FeedStatus::Failed(message),
-            });
-            return;
-        }
-    };
+        .map_err(|error| error.to_string())?;
     let after_sequence = snapshot.snapshot_sequence;
     let history = crate::state::thread_history_merge::ThreadHistoryMeta {
         history_cursor: snapshot.history_cursor,
@@ -110,7 +197,7 @@ pub async fn thread(stores: Arc<Stores>, sender: ClientStateSender, thread_id: T
         loading: false,
         error: None,
         expanded: false,
-        latest_local_turn_ordinal: None,
+        latest_local_turn_ordinal: snapshot.latest_local_turn_ordinal,
     };
     sender.thread(
         thread_id.clone(),
@@ -121,7 +208,7 @@ pub async fn thread(stores: Arc<Stores>, sender: ClientStateSender, thread_id: T
         }],
     );
 
-    let mut events = match stores
+    let mut events = stores
         .sink
         .stream(StreamOptions {
             thread_id: Some(thread_id.clone()),
@@ -129,32 +216,77 @@ pub async fn thread(stores: Arc<Stores>, sender: ClientStateSender, thread_id: T
             event_type: None,
         })
         .await
-    {
-        Ok(events) => events,
-        Err(error) => {
-            sender.send(ClientStateEvent::ThreadFeed {
-                thread_id,
-                status: FeedStatus::Failed(error.to_string()),
-            });
-            return;
-        }
-    };
-    while let Some(next) = events.next().await {
-        match next {
-            Ok(stored) => sender.thread(
-                thread_id.clone(),
-                vec![ThreadStreamItem::Event {
-                    sequence: stored.sequence,
-                    event: Box::new(stored.event),
-                }],
-            ),
-            Err(error) => {
-                sender.send(ClientStateEvent::ThreadFeed {
-                    thread_id,
-                    status: FeedStatus::Failed(error.to_string()),
-                });
-                return;
+        .map_err(|error| error.to_string())?;
+
+    let mut coalescer = ThreadLiveEventCoalescer::new();
+    loop {
+        tokio::select! {
+            next = events.next() => {
+                match next {
+                    None => {
+                        coalescer.end().await;
+                        while let Some(item) = coalescer.next().await {
+                            sender.thread(thread_id.clone(), vec![ThreadStreamItem::from(item)]);
+                        }
+                        return Ok(());
+                    }
+                    Some(Ok(stored)) => {
+                        if coalescer.offer(OrchestrationV2ThreadStreamItem::Event {
+                            sequence: stored.sequence,
+                            event: stored.event,
+                        }).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Some(Err(error)) => return Err(error.to_string()),
+                }
+            }
+            item = coalescer.next() => {
+                if let Some(item) = item {
+                    sender.thread(thread_id.clone(), vec![ThreadStreamItem::from(item)]);
+                }
             }
         }
+    }
+}
+
+/// Runs a thread feed in an inner task so a panic surfaces as [`FeedStatus::Failed`].
+pub async fn thread_supervised(stores: Arc<Stores>, sender: ClientStateSender, thread_id: ThreadId) {
+    let thread_for_panic = thread_id.clone();
+    let sender_for_panic = sender.clone();
+    match tokio::spawn(async move { thread(stores, sender, thread_id).await }).await {
+        Ok(()) => {}
+        Err(error) if error.is_panic() => {
+            tracing::error!(thread = %thread_for_panic, "thread feed panicked");
+            sender_for_panic.send(ClientStateEvent::ThreadFeed {
+                thread_id: thread_for_panic,
+                status: FeedStatus::Failed("thread feed panicked".into()),
+            });
+        }
+        Err(_) => {}
+    }
+}
+
+/// Runs the shell feed in an inner task so a panic surfaces as [`FeedStatus::Failed`].
+pub async fn shell_supervised(
+    stores: Arc<Stores>,
+    sender: ClientStateSender,
+    after_sequence: u64,
+    resync_shell: ShellResync,
+) {
+    let sender_for_panic = sender.clone();
+    match tokio::spawn(async move {
+        shell(stores, sender, after_sequence, resync_shell).await
+    })
+    .await
+    {
+        Ok(()) => {}
+        Err(error) if error.is_panic() => {
+            tracing::error!("shell feed panicked");
+            sender_for_panic.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
+                "shell feed panicked".into(),
+            )));
+        }
+        Err(_) => {}
     }
 }

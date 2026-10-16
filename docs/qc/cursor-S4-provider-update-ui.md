@@ -17,3 +17,7 @@ Also noted (logged deviation): JetBrains SVGs are placeholders, not upstream art
 - [high] uncolored syntax gaps dropped; cache key ignores match ranges; primary toast passes &[] one-click + shows toast with None key; ?prompt not stripped on place/error.
 - [medium] sidebar pill tones/icon; env toast one-click arg; search dialog W/ab, file count, cwd footer, line numbers, invented access message; new-thread link copy.
 - [low] env rows TEXT_XS + success check; Mac/Windows regex in open_in_picker.
+
+## Re-QC (grok-4.7) — FAIL → fix round
+All previous findings verified fixed with tests (UTF-16 ranges, gaps, cache key, toasts, ?prompt strip + draft, utf16 length, per-editor icons, query key, IndexMap order, dialog states/controls/line numbers, pill tones, env toast, link copy, env rows, Mac/Win regex, real JetBrains artwork).
+New: [high] off-thread syntax highlight never repaints (no view notify after cache fill; upstream Suspense re-render). [low] extra "Preparing your draft." description on opening state.

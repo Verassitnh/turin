@@ -15,6 +15,8 @@ pub mod composer_surface;
 pub mod embedded_scripts;
 // Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
 pub mod markdown;
+#[allow(dead_code)]
+pub mod markdown_clipboard;
 pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod panel_layout_controls;

@@ -2,6 +2,7 @@ mod actions;
 mod banners;
 pub mod block_flow;
 pub mod chat_composer;
+mod context_references;
 pub mod chrome;
 pub mod composer_banner;
 pub mod context_chip;

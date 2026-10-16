@@ -44,6 +44,10 @@ use crate::composer::view_model::{
     ComposerSource, ComposerStore, ComposerViewModel, InteractionMode, SendRequest,
 };
 use crate::composer::views::chrome::BoundsCell;
+use crate::components::chat::messages_timeline::MessagesTimeline;
+use crate::components::chat::page_scroll_controller::PageScrollKey;
+use crate::components::chat::timeline_page_scroll::TimelinePageScrollSession;
+use crate::composer::views::composer_context_presentation::ComposerDraftContextRecords;
 use crate::composer::views::prompt_editor::{
     CommandKey, EditorConfig, PromptEditor, PromptEditorEvent,
 };
@@ -66,6 +70,7 @@ pub enum Layer {
     Stash,
     Queue,
     ContextMeter,
+    ContextDetails,
     CodeLanguage,
 }
 
@@ -93,8 +98,16 @@ pub struct ChatComposer {
     /// The last `DraftRestore` applied.
     pub(super) restored_nonce: u64,
     pub(super) pre_edit_prompt: Option<String>,
+    pub(super) context_records: ComposerDraftContextRecords,
+    pub(super) context_details: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
+    page_scroll: Option<PageScrollBinding>,
     citation_comment: Option<OpenCitationComment>,
     _subscriptions: Vec<Subscription>,
+}
+
+struct PageScrollBinding {
+    session: gpui_kit::Entity<TimelinePageScrollSession>,
+    timeline: gpui_kit::Entity<MessagesTimeline>,
 }
 
 struct OpenCitationComment {
@@ -159,6 +172,9 @@ impl ChatComposer {
             editing_run_id: None,
             restored_nonce: 0,
             pre_edit_prompt: None,
+            context_records: ComposerDraftContextRecords::new(),
+            context_details: None,
+            page_scroll: None,
             citation_comment: None,
             _subscriptions: subscriptions,
         };
@@ -349,6 +365,26 @@ impl ChatComposer {
 
     pub fn editor(&self) -> &Entity<PromptEditor> {
         &self.editor
+    }
+
+    /// Wires PageUp/PageDown from the prompt editor to the open timeline.
+    pub fn bind_page_scroll(
+        &mut self,
+        session: gpui_kit::Entity<TimelinePageScrollSession>,
+        timeline: gpui_kit::Entity<MessagesTimeline>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.page_scroll = Some(PageScrollBinding { session, timeline });
+    }
+
+    pub fn set_context_records(
+        &mut self,
+        records: ComposerDraftContextRecords,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_records = records;
+        cx.notify();
     }
 
     /// Opens the comment field for one composer citation chip. The same chip
@@ -543,11 +579,31 @@ impl ChatComposer {
                 self.open_language_picker(*block, *anchor, window, cx)
             }
             PromptEditorEvent::VisibleSelectionChanged => cx.notify(),
-            // The timeline's page scroll is not wired to the composer yet
-            // (ChatView owns `PageScrollController`).
-            PromptEditorEvent::PageScrollKeyDown(_)
-            | PromptEditorEvent::PageScrollKeyUp(_)
-            | PromptEditorEvent::PageScrollRelease => {}
+            PromptEditorEvent::PageScrollKeyDown(key) => {
+                if let Some(binding) = self.page_scroll.as_ref() {
+                    let metrics = binding.timeline.read(cx).page_scroll_metrics(window);
+                    binding.session.update(cx, |session, _| {
+                        session.handle_key_down(*key, metrics);
+                    });
+                    cx.notify();
+                }
+            }
+            PromptEditorEvent::PageScrollKeyUp(key) => {
+                if let Some(binding) = self.page_scroll.as_ref() {
+                    binding.session.update(cx, |session, _| {
+                        session.handle_key_up(key);
+                    });
+                    cx.notify();
+                }
+            }
+            PromptEditorEvent::PageScrollRelease => {
+                if let Some(binding) = self.page_scroll.as_ref() {
+                    binding.session.update(cx, |session, _| {
+                        session.release_active_key();
+                    });
+                    cx.notify();
+                }
+            }
             // No file preview surface in the composer yet.
             PromptEditorEvent::OpenMention(_) => {}
             PromptEditorEvent::CitationSubmitAndSend => {
@@ -1023,6 +1079,7 @@ impl Render for ChatComposer {
         self.sync_thread(&vm, window, cx);
         self.sync_queue_edit(&vm, window, cx);
         self.sync_restore(&vm, window, cx);
+        self.sync_context_editor(cx);
         self.sync_editor_config(&vm, cx);
         let theme = cx.app_theme().clone();
         let dark = theme.is_dark();

@@ -6,6 +6,7 @@ pub mod chat;
 pub mod chat_view;
 pub mod command_block;
 pub mod command_palette;
+pub mod context_presentation_registry;
 pub mod drag_region;
 pub mod git_actions_control;
 pub mod project_favicon;

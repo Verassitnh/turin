@@ -10,9 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
 use crate::error::OpenCodeRuntimeError;
+use crate::ledger::OpenCodeServerLedger;
+use crate::protocol_log::ProtocolLog;
 use crate::runtime::VerifyFn;
 use crate::server_owner::{OpenCodeServerOwner, OwnerConfig};
 use crate::v2_client::V2Client;
@@ -41,6 +43,9 @@ pub struct OpenCode2Config {
     pub environment: BTreeMap<String, String>,
     pub idle: Option<Duration>,
     pub shutdown_grace: Option<Duration>,
+    pub ledger: Option<OpenCodeServerLedger>,
+    /// Receives each v2 request and response (see `protocol_log`).
+    pub protocol: Option<Arc<dyn ProtocolLog>>,
 }
 
 #[derive(Clone)]
@@ -56,6 +61,7 @@ enum Mode {
         url: String,
         password: String,
         cached: Box<Mutex<Option<OpenCode2Connection>>>,
+        protocol: Option<Arc<dyn ProtocolLog>>,
     },
     Spawned {
         owner: OpenCodeServerOwner,
@@ -76,12 +82,17 @@ impl OpenCode2Server {
                     url: server_url,
                     password: config.server_password,
                     cached: Box::new(Mutex::new(None)),
+                    protocol: config.protocol,
                 },
             });
         }
         let password = generate_password();
         let cached = Arc::new(Mutex::new(None));
-        let verify = spawned_verify(password.clone(), Arc::clone(&cached));
+        let verify = spawned_verify(
+            password.clone(),
+            Arc::clone(&cached),
+            config.protocol.clone(),
+        );
         let owner = OpenCodeServerOwner::new(OwnerConfig {
             binary_path: config.binary_path,
             directory: config.directory,
@@ -90,6 +101,7 @@ impl OpenCode2Server {
             idle: config.idle,
             shutdown_grace: config.shutdown_grace,
             verify: Some(verify),
+            ledger: config.ledger,
         });
         Ok(Self {
             mode: Mode::Spawned { owner, cached },
@@ -102,67 +114,144 @@ impl OpenCode2Server {
         }
     }
 
+    /// Runs `use_connection` with the server borrowed for its whole duration.
+    /// The idle timer starts only after `use_connection` settles, like upstream
+    /// `OpenCode2Server.withConnection` running `use(latest)` inside `withServer`.
     pub async fn with_connection<T, E, F, Fut>(&self, use_connection: F) -> Result<T, E>
     where
         E: From<OpenCodeRuntimeError>,
         F: FnOnce(OpenCode2Connection) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        let connection = match &self.mode {
+        match &self.mode {
             Mode::External {
                 url,
                 password,
                 cached,
+                protocol,
             } => {
-                let mut slot = cached.lock().await;
-                if slot.is_none() {
-                    let client = V2Client::connect(url, password)?;
-                    let version = verify_server(&client).await?;
-                    *slot = Some(OpenCode2Connection {
-                        url: url.clone(),
-                        version,
-                        external: true,
-                        client,
-                    });
-                }
-                slot.as_ref()
-                    .expect("cached after a successful verify")
-                    .clone()
+                let connection = {
+                    let mut slot = cached.lock().await;
+                    if slot.is_none() {
+                        let client = attach(V2Client::connect(url, password)?, protocol);
+                        let version = verify_server(&client).await?;
+                        *slot = Some(OpenCode2Connection {
+                            url: url.clone(),
+                            version,
+                            external: true,
+                            client,
+                        });
+                    }
+                    slot.as_ref()
+                        .expect("cached after a successful verify")
+                        .clone()
+                };
+                use_connection(connection).await
             }
             Mode::Spawned { owner, cached } => {
                 let cached = Arc::clone(cached);
                 owner
-                    .with_server(move |server| {
-                        let cached = Arc::clone(&cached);
-                        async move {
-                            let connection = cached.lock().await.clone().ok_or_else(|| {
-                                OpenCodeRuntimeError::new(
-                                    "OpenCode2Server.withConnection",
-                                    "OpenCode 2 server was lent before verification.",
-                                )
-                            })?;
-                            if connection.url != server.url {
-                                return Err(OpenCodeRuntimeError::new(
-                                    "OpenCode2Server.withConnection",
-                                    "OpenCode 2 server was lent before verification.",
-                                ));
-                            }
-                            Ok(connection)
-                        }
+                    .with_server(move |server| async move {
+                        let connection = lent_connection(&cached, &server.url).await?;
+                        use_connection(connection).await
                     })
-                    .await?
+                    .await
             }
+        }
+    }
+
+    /// Lends the server to a session until the loan drops. A spawned server
+    /// stays up while any loan is out; the last one starts the idle timer.
+    pub async fn borrow(&self) -> Result<(OpenCode2Connection, ServerLoan), OpenCodeRuntimeError> {
+        let (owner, cached) = match &self.mode {
+            Mode::External { .. } => {
+                let connection = self
+                    .with_connection(|connection| async move {
+                        Ok::<_, OpenCodeRuntimeError>(connection)
+                    })
+                    .await?;
+                return Ok((connection, ServerLoan { _release: None }));
+            }
+            Mode::Spawned { owner, cached } => (owner.clone(), Arc::clone(cached)),
         };
-        use_connection(connection).await
+        let (lent_tx, lent_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            owner
+                .with_server(move |server| async move {
+                    let connection = lent_connection(&cached, &server.url).await?;
+                    let _ = lent_tx.send(connection);
+                    let _ = release_rx.await;
+                    Ok::<_, OpenCodeRuntimeError>(())
+                })
+                .await
+        });
+        match lent_rx.await {
+            Ok(connection) => Ok((
+                connection,
+                ServerLoan {
+                    _release: Some(release_tx),
+                },
+            )),
+            Err(_) => Err(match task.await {
+                Ok(Err(err)) => err,
+                _ => OpenCodeRuntimeError::new(
+                    "OpenCode2Server.borrow",
+                    "The OpenCode 2 server stopped before it was lent.",
+                ),
+            }),
+        }
     }
 }
 
-fn spawned_verify(password: String, cached: Arc<Mutex<Option<OpenCode2Connection>>>) -> VerifyFn {
+impl Drop for OpenCode2Server {
+    fn drop(&mut self) {
+        if let Mode::Spawned { owner, .. } = &self.mode {
+            owner.kill();
+        }
+    }
+}
+
+/// A session's hold on the instance's server. Dropping it returns the server.
+pub struct ServerLoan {
+    _release: Option<oneshot::Sender<()>>,
+}
+
+async fn lent_connection(
+    cached: &Mutex<Option<OpenCode2Connection>>,
+    url: &str,
+) -> Result<OpenCode2Connection, OpenCodeRuntimeError> {
+    let unverified = || {
+        OpenCodeRuntimeError::new(
+            "OpenCode2Server.withConnection",
+            "OpenCode 2 server was lent before verification.",
+        )
+    };
+    let connection = cached.lock().await.clone().ok_or_else(unverified)?;
+    if connection.url != url {
+        return Err(unverified());
+    }
+    Ok(connection)
+}
+
+fn attach(client: V2Client, protocol: &Option<Arc<dyn ProtocolLog>>) -> V2Client {
+    match protocol {
+        Some(protocol) => client.with_protocol_log(Arc::clone(protocol)),
+        None => client,
+    }
+}
+
+fn spawned_verify(
+    password: String,
+    cached: Arc<Mutex<Option<OpenCode2Connection>>>,
+    protocol: Option<Arc<dyn ProtocolLog>>,
+) -> VerifyFn {
     Arc::new(move |input| {
         let password = password.clone();
         let cached = Arc::clone(&cached);
+        let protocol = protocol.clone();
         Box::pin(async move {
-            let client = V2Client::connect(&input.url, &password)?;
+            let client = attach(V2Client::connect(&input.url, &password)?, &protocol);
             let version = verify_server(&client).await?;
             *cached.lock().await = Some(OpenCode2Connection {
                 url: input.url,
@@ -190,7 +279,7 @@ fn describe_info_failure(err: OpenCodeRuntimeError) -> OpenCodeRuntimeError {
         )
         .with_cause(err);
     }
-    if err.detail == "Couldn't reach the OpenCode server." {
+    if err.detail.starts_with("Couldn't reach the OpenCode server") {
         return OpenCodeRuntimeError::new("server.info", "Could not reach the OpenCode server.")
             .with_cause(err);
     }
@@ -264,6 +353,8 @@ mod tests {
             environment: BTreeMap::new(),
             idle: None,
             shutdown_grace: None,
+            ledger: None,
+            protocol: None,
         })
         .unwrap();
         let version = opencode
@@ -295,6 +386,8 @@ mod tests {
             environment: BTreeMap::new(),
             idle: None,
             shutdown_grace: None,
+            ledger: None,
+            protocol: None,
         })
         .unwrap();
         let err = opencode
@@ -307,6 +400,127 @@ mod tests {
         );
     }
 
+    struct Spawned {
+        server: OpenCode2Server,
+        pid_file: std::path::PathBuf,
+        child_file: std::path::PathBuf,
+    }
+
+    fn spawned(idle: Duration) -> Spawned {
+        use crate::runtime::tests::{temp_file, write_fake_opencode};
+        let pid_file = temp_file("v2-pid");
+        let child_file = temp_file("v2-child");
+        let mut environment = BTreeMap::new();
+        environment.insert("TURIN_TEST_PID".into(), pid_file.display().to_string());
+        environment.insert("TURIN_TEST_CHILD".into(), child_file.display().to_string());
+        let cached = Arc::new(Mutex::new(None));
+        let remember = Arc::clone(&cached);
+        let verify: VerifyFn = Arc::new(move |input| {
+            let cached = Arc::clone(&remember);
+            Box::pin(async move {
+                let client = V2Client::connect(&input.url, "pw")?;
+                *cached.lock().await = Some(OpenCode2Connection {
+                    url: input.url,
+                    version: "2.0.18".into(),
+                    external: false,
+                    client,
+                });
+                Ok("2.0.18".to_string())
+            })
+        });
+        let owner = OpenCodeServerOwner::new(OwnerConfig {
+            binary_path: write_fake_opencode().display().to_string(),
+            directory: std::env::temp_dir().display().to_string(),
+            server_password: None,
+            environment: Some(environment),
+            idle: Some(idle),
+            shutdown_grace: Some(Duration::from_millis(40)),
+            verify: Some(verify),
+            ledger: None,
+        });
+        Spawned {
+            server: OpenCode2Server {
+                mode: Mode::Spawned { owner, cached },
+            },
+            pid_file,
+            child_file,
+        }
+    }
+
+    fn read_pid(path: &std::path::Path) -> u32 {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    async fn gone(pid: u32) -> bool {
+        for _ in 0..100 {
+            if !crate::process_group::process_group_exists(pid)
+                && !crate::runtime::tests::alive(pid)
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn dropping_a_spawned_server_kills_its_process_group() {
+        let spawned = spawned(Duration::from_secs(30));
+        let (_connection, loan) = spawned.server.borrow().await.unwrap();
+        let pgid = read_pid(&spawned.pid_file);
+        let child = read_pid(&spawned.child_file);
+        assert!(crate::runtime::tests::alive(child));
+        drop(spawned.server);
+        assert!(gone(pgid).await, "process group {pgid} survived the drop");
+        assert!(!crate::runtime::tests::alive(child));
+        drop(loan);
+    }
+
+    #[tokio::test]
+    async fn closing_a_spawned_server_kills_its_process_group() {
+        let spawned = spawned(Duration::from_secs(30));
+        let (_connection, _loan) = spawned.server.borrow().await.unwrap();
+        let pgid = read_pid(&spawned.pid_file);
+        let child = read_pid(&spawned.child_file);
+        spawned.server.close().await;
+        assert!(gone(pgid).await, "process group {pgid} survived close");
+        assert!(!crate::runtime::tests::alive(child));
+    }
+
+    #[tokio::test]
+    async fn a_loan_keeps_the_server_until_it_drops_then_idle_stops_it() {
+        let spawned = spawned(Duration::from_millis(100));
+        let (_connection, loan) = spawned.server.borrow().await.unwrap();
+        let pgid = read_pid(&spawned.pid_file);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(crate::process_group::process_group_exists(pgid));
+        drop(loan);
+        assert!(gone(pgid).await, "idle timer left process group {pgid}");
+    }
+
+    #[tokio::test]
+    async fn a_use_longer_than_the_idle_ttl_keeps_the_server_alive() {
+        let spawned = spawned(Duration::from_millis(100));
+        let pid_file = spawned.pid_file.clone();
+        let during = spawned
+            .server
+            .with_connection(|connection| async move {
+                assert_eq!(connection.version, "2.0.18");
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let pgid = read_pid(&pid_file);
+                Ok::<_, OpenCodeRuntimeError>(crate::process_group::process_group_exists(pgid))
+            })
+            .await
+            .unwrap();
+        assert!(during, "idle timer closed the server while it was in use");
+        let pgid = read_pid(&spawned.pid_file);
+        assert!(gone(pgid).await, "idle timer left process group {pgid}");
+    }
+
     #[tokio::test]
     async fn html_is_not_an_opencode_2_server() {
         let server = FakeServer::spawn(|_| FakeResponse {
@@ -315,6 +529,8 @@ mod tests {
             body: b"<!doctype html>".to_vec(),
             stream: None,
             hold: false,
+            follow: None,
+            truncated: false,
         })
         .await;
         let client = V2Client::connect(&server.url, "pw").unwrap();

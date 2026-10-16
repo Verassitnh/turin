@@ -41,7 +41,8 @@ impl V1Client {
     /// `directory` is the session cwd. An empty value is rejected: the 1.x
     /// server otherwise runs the request in its own cwd and turns never finish.
     /// Non-GET requests send it as `x-opencode-directory` (percent-encoded).
-    /// GET and HEAD send `?directory=` instead.
+    /// GET and HEAD send `?directory=` instead. The `GET /event` subscription
+    /// sends the header, as the SDK's SSE path does.
     pub fn new(
         base_url: &str,
         directory: &str,
@@ -63,6 +64,15 @@ impl V1Client {
     }
 
     /// Test hook. Production callers keep the 45s watchdog.
+    /// Records every JSON exchange through `protocol` (see `protocol_log`).
+    pub fn with_protocol_log(
+        mut self,
+        protocol: std::sync::Arc<dyn crate::protocol_log::ProtocolLog>,
+    ) -> Self {
+        self.http = self.http.with_protocol_log(protocol);
+        self
+    }
+
     pub fn with_silent_timeout(mut self, timeout: Duration) -> Self {
         self.silent_timeout = timeout;
         self
@@ -82,7 +92,18 @@ impl V1Client {
                 Some(OPENCODE_HEALTH_TIMEOUT),
             )
             .await?;
-        http_client::decode_json("global.health", &bytes)
+        // Any decode failure, including `healthy: false`, is the upstream health
+        // detail. A raw serde message would not tell the user what to upgrade.
+        serde_json::from_slice(&bytes).map_err(|err| {
+            OpenCodeRuntimeError::new(
+                "global.health",
+                format!(
+                    "OpenCode server returned an invalid health response. T3 Code requires OpenCode v{} or newer.",
+                    crate::version_probe::MINIMUM_OPENCODE_VERSION
+                ),
+            )
+            .with_cause(err)
+        })
     }
 
     pub async fn list_commands(&self) -> Result<Vec<Value>, OpenCodeRuntimeError> {
@@ -299,26 +320,52 @@ impl V1Client {
         Pin<Box<dyn Stream<Item = Result<V1Event, crate::error::EventStreamError>> + Send>>,
         OpenCodeRuntimeError,
     > {
-        if self.event_open.swap(true, Ordering::AcqRel) {
-            return Err(OpenCodeRuntimeError::new(
+        use futures::StreamExt;
+        let frames = self.events_from(None).await?;
+        Ok(Box::pin(frames.filter_map(|frame| async move {
+            match frame {
+                Ok(frame) => frame.event.map(Ok),
+                Err(err) => Some(Err(err)),
+            }
+        })))
+    }
+
+    /// `GET /event` with the SDK's `Last-Event-ID` resume header. Every frame
+    /// comes through, with or without an event, so the caller can track `id:`
+    /// and `retry:` the way the SDK's SSE client does.
+    pub async fn events_from(
+        &self,
+        last_event_id: Option<&str>,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<V1Frame, crate::error::EventStreamError>> + Send>>,
+        OpenCodeRuntimeError,
+    > {
+        let claim = EventClaim::take(&self.event_open).ok_or_else(|| {
+            OpenCodeRuntimeError::new(
                 "event.subscribe",
                 "An OpenCode event subscription is already open for this client.",
-            ));
-        }
-        let frames = match self
+            )
+        })?;
+        // `claim` is released on an error, and on cancellation while the headers are awaited.
+        let frames = self
             .http
-            .open_event_stream("event.subscribe", "/event", &[], self.silent_timeout)
-            .await
-        {
-            Ok(frames) => frames,
-            Err(err) => {
-                self.event_open.store(false, Ordering::Release);
-                return Err(err);
-            }
-        };
+            .open_event_stream(
+                "event.subscribe",
+                "/event",
+                &[],
+                last_event_id,
+                self.silent_timeout,
+            )
+            .await?;
         Ok(Box::pin(Subscribed {
-            inner: Box::pin(filter_frames(frames, events::decode_v1_event)),
-            flag: Arc::clone(&self.event_open),
+            inner: Box::pin(filter_frames(frames, |frame| {
+                Some(V1Frame {
+                    id: frame.id.clone(),
+                    retry: frame.retry,
+                    event: events::decode_v1_event(frame),
+                })
+            })),
+            _claim: claim,
         }))
     }
 
@@ -407,14 +454,34 @@ fn encode(value: &str) -> String {
     crate::auth::encode_uri_component(value)
 }
 
-struct Subscribed<S> {
-    inner: S,
-    flag: Arc<AtomicBool>,
+/// One 1.x SSE frame: its cursor fields and the event it carried, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub struct V1Frame {
+    pub id: Option<String>,
+    pub retry: Option<u64>,
+    pub event: Option<V1Event>,
 }
 
-impl<S> Drop for Subscribed<S> {
+struct Subscribed<S> {
+    inner: S,
+    /// Freed with the stream; never read.
+    _claim: EventClaim,
+}
+
+/// The client's one subscription slot. Dropping it frees the slot, so a
+/// cancelled or failed open does not leave the client refusing every later
+/// subscribe.
+struct EventClaim(Arc<AtomicBool>);
+
+impl EventClaim {
+    fn take(flag: &Arc<AtomicBool>) -> Option<Self> {
+        (!flag.swap(true, Ordering::AcqRel)).then(|| Self(Arc::clone(flag)))
+    }
+}
+
+impl Drop for EventClaim {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::Release);
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -545,6 +612,8 @@ mod tests {
             body: b"<!doctype html>".to_vec(),
             stream: None,
             hold: false,
+            follow: None,
+            truncated: false,
         })
         .await;
         let client = V1Client::new(&server.url, "/work", None).unwrap();
@@ -560,6 +629,8 @@ mod tests {
             body: b"<!doctype html>".to_vec(),
             stream: None,
             hold: false,
+            follow: None,
+            truncated: false,
         })
         .await;
         let client = V1Client::new(&server.url, "/work", None).unwrap();
@@ -589,13 +660,8 @@ mod tests {
             .with_silent_timeout(Duration::from_millis(200));
         let mut events = client.events().await.unwrap();
         let opened = server.requests.recv().await.unwrap();
-        assert!(opened.target.starts_with("/event?"), "{}", opened.target);
-        assert!(
-            opened.target.contains("directory=%2Fwork"),
-            "{}",
-            opened.target
-        );
-        assert!(opened.directory_header.is_none());
+        assert_eq!(opened.target, "/event");
+        assert_eq!(opened.directory_header.as_deref(), Some("%2Fwork"));
         let event = events.next().await.unwrap().unwrap();
         assert_eq!(event.event_type, "server.connected");
         assert!(events.next().await.is_none());
@@ -640,6 +706,32 @@ mod tests {
             .await
             .unwrap();
         assert!(replied);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_open_frees_the_subscription_slot() {
+        // Accepts connections and never answers, so the open is still waiting for headers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = V1Client::new(&url, "/work", None).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.events())
+                .await
+                .is_err()
+        );
+        // The second open must wait on the server like the first did, not fail as "already open".
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.events())
+                .await
+                .is_err(),
+            "a cancelled open left the client refusing subscriptions"
+        );
     }
 
     #[tokio::test]

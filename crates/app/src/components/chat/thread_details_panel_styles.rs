@@ -2,11 +2,6 @@
 
 use gpui_kit::{Pixels, px, rems};
 
-/// `h-8` panel row height.
-pub const THREAD_DETAILS_ROW_HEIGHT: gpui_kit::Rems = rems(2.);
-/// `gap-2.5 px-2.5`.
-pub const THREAD_DETAILS_ROW_GAP: Pixels = px(10.);
-pub const THREAD_DETAILS_ROW_PADDING_X: Pixels = px(10.);
 /// `size-4` icons in rows.
 pub const THREAD_DETAILS_ICON_SIZE: gpui_kit::Rems = rems(1.);
 /// `text-2xs` meta labels.

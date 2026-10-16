@@ -12,8 +12,8 @@ use gpui_kit::{
 use super::agent_elapsed::AgentElapsed;
 use super::subagent_tooltip_content::SubagentTooltipContent;
 use super::thread_details_control::{
-    ThreadDetailsControl, ThreadDetailsControlPart, ThreadDetailsControlTone,
-    thread_details_split_group,
+    ThreadDetailsControl, ThreadDetailsPart as ThreadDetailsControlPart,
+    ThreadDetailsTone as ThreadDetailsControlTone, panel_split_group,
 };
 use super::thread_details_demo::LineagePanelSnapshot;
 use super::thread_details_panel_styles::{
@@ -307,32 +307,34 @@ impl ThreadRelationshipsPanel {
             return div()
                 .flex()
                 .flex_col()
-                .child(thread_details_split_group(vec![
-                    header,
-                    ThreadDetailsControl::new(("workflow-toggle", workflow_id.len()))
-                        .part(ThreadDetailsControlPart::Secondary)
-                        .child(
-                            Icon::new(if expanded {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .size(rems(0.875))
-                            .color(theme.muted_foreground),
-                        )
-                        .on_click({
-                            let id = workflow_id.clone();
-                            cx.listener(move |this, _, _, cx| {
-                                if this.workflow_expanded.contains(&id) {
-                                    this.workflow_expanded.remove(&id);
+                .child(
+                    panel_split_group("workflow-split", expanded, &theme).children(vec![
+                        header,
+                        ThreadDetailsControl::new(("workflow-toggle", workflow_id.len()))
+                            .part(ThreadDetailsControlPart::Secondary)
+                            .child(
+                                Icon::new(if expanded {
+                                    IconName::ChevronUp
                                 } else {
-                                    this.workflow_expanded.insert(id.clone());
-                                }
-                                cx.notify();
+                                    IconName::ChevronDown
+                                })
+                                .size(rems(0.875))
+                                .color(theme.muted_foreground),
+                            )
+                            .on_click({
+                                let id = workflow_id.clone();
+                                cx.listener(move |this, _, _, cx| {
+                                    if this.workflow_expanded.contains(&id) {
+                                        this.workflow_expanded.remove(&id);
+                                    } else {
+                                        this.workflow_expanded.insert(id.clone());
+                                    }
+                                    cx.notify();
+                                })
                             })
-                        })
-                        .into_any_element(),
-                ]))
+                            .into_any_element(),
+                    ]),
+                )
                 .when(expanded, |this| {
                     this.child(
                         div()

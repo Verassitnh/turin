@@ -15,7 +15,7 @@ use notify::RecommendedWatcher;
 use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::task::JoinHandle;
 use turin_contracts::keybindings::{
     KeybindingCommand, KeybindingRule, KeybindingValue, KeybindingWhen, KeybindingsConfigError,
@@ -27,6 +27,7 @@ use crate::shared_keybindings::{
     compile_resolved_keybindings_config, merge_with_default_keybindings, parse_keybinding_shortcut,
 };
 use crate::support::atomic_write::write_file_string_atomically;
+use crate::support::blocking::blocking;
 use crate::support::file_watch::{WATCH_DEBOUNCE, next_debounced, watch_file};
 use crate::support::lenient_json::{parse_lenient_json, to_json_string_pretty};
 
@@ -202,7 +203,7 @@ fn decode_rule_entry(entry: &Value) -> Result<KeybindingRule, String> {
 pub struct Keybindings {
     config_path: PathBuf,
     /// Upstream `startedRef`: the first startup's outcome, returned to later calls.
-    started: Mutex<Option<Result<(), KeybindingsConfigError>>>,
+    started: AsyncMutex<Option<Result<(), KeybindingsConfigError>>>,
     write_lock: Mutex<()>,
     cache: Mutex<Option<KeybindingsConfigState>>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<KeybindingsConfigState>>>,
@@ -225,7 +226,7 @@ impl Keybindings {
     pub fn new(config_path: impl Into<PathBuf>) -> Arc<Self> {
         Arc::new(Self {
             config_path: config_path.into(),
-            started: Mutex::new(None),
+            started: AsyncMutex::new(None),
             write_lock: Mutex::new(()),
             cache: Mutex::new(None),
             subscribers: Mutex::new(Vec::new()),
@@ -237,21 +238,25 @@ impl Keybindings {
     }
 
     /// Port of `start`: ensure the config directory, attach the watcher, sync
-    /// defaults, then load the snapshot. Must run inside a tokio runtime (the
-    /// reload task is spawned here). The caller keeps the returned watcher
-    /// alive for as long as it wants changes.
+    /// defaults, then load the snapshot. The file work runs on the blocking
+    /// pool. Must run inside a tokio runtime (the reload task is spawned here).
+    /// The caller keeps the returned watcher alive for as long as it wants
+    /// changes.
     ///
     /// Idempotent as upstream is. The first call returns the watcher. A later
     /// call returns `Ok(None)` after a successful start, or the first startup's
     /// error, and never reruns the sync or spawns a second watcher.
-    pub fn start(self: &Arc<Self>) -> Result<Option<KeybindingsWatcher>, KeybindingsConfigError> {
-        let mut started = self.started.lock();
+    pub async fn start(
+        self: &Arc<Self>,
+    ) -> Result<Option<KeybindingsWatcher>, KeybindingsConfigError> {
+        let mut started = self.started.lock().await;
         match &*started {
             Some(Ok(())) => return Ok(None),
             Some(Err(error)) => return Err(error.clone()),
             None => {}
         }
-        match self.start_watching() {
+        let this = Arc::clone(self);
+        match blocking(move || this.start_watching()).await {
             Ok(watcher) => {
                 *started = Some(Ok(()));
                 Ok(Some(watcher))
@@ -293,7 +298,8 @@ impl Keybindings {
                 .is_some()
             {
                 // Upstream logs and keeps watching when a reload fails.
-                if let Err(error) = this.revalidate_and_emit() {
+                let reload = Arc::clone(&this);
+                if let Err(error) = blocking(move || reload.revalidate_and_emit()).await {
                     tracing::warn!(error = %error, "keybindings reload failed");
                 }
             }
@@ -301,7 +307,7 @@ impl Keybindings {
 
         self.sync_default_keybindings_on_startup()?;
         self.invalidate_cache();
-        self.snapshot()?;
+        self.snapshot_blocking()?;
         Ok(KeybindingsWatcher {
             _watcher: watcher,
             task,
@@ -317,8 +323,21 @@ impl Keybindings {
     }
 
     /// Port of `getSnapshot` / `loadConfigState`. A failed read is not cached,
-    /// so the next call retries.
-    pub fn snapshot(&self) -> Result<KeybindingsConfigState, KeybindingsConfigError> {
+    /// so the next call retries. A cache hit returns without leaving the async
+    /// worker; a miss reads the file on the blocking pool.
+    pub async fn snapshot(
+        self: &Arc<Self>,
+    ) -> Result<KeybindingsConfigState, KeybindingsConfigError> {
+        let cached = self.cache.lock().clone();
+        if let Some(state) = cached {
+            return Ok(state);
+        }
+        let this = Arc::clone(self);
+        blocking(move || this.snapshot_blocking()).await
+    }
+
+    /// Blocking body of [`Keybindings::snapshot`].
+    fn snapshot_blocking(&self) -> Result<KeybindingsConfigState, KeybindingsConfigError> {
         if let Some(state) = self.cache.lock().clone() {
             return Ok(state);
         }
@@ -329,7 +348,16 @@ impl Keybindings {
 
     /// Port of `upsertKeybindingRule`. Writes atomically, caps the file at
     /// [`MAX_KEYBINDINGS_COUNT`] (oldest first), and returns the merged rules.
-    pub fn upsert_keybinding_rule(
+    /// The read, write and publish run on the blocking pool.
+    pub async fn upsert_keybinding_rule(
+        self: &Arc<Self>,
+        input: UpsertKeybindingInput,
+    ) -> Result<Vec<ResolvedKeybinding>, KeybindingsConfigError> {
+        let this = Arc::clone(self);
+        blocking(move || this.upsert_blocking(input)).await
+    }
+
+    fn upsert_blocking(
         &self,
         input: UpsertKeybindingInput,
     ) -> Result<Vec<ResolvedKeybinding>, KeybindingsConfigError> {
@@ -358,7 +386,17 @@ impl Keybindings {
     }
 
     /// Port of `removeKeybindingRule`: drops the exact key/command/when match.
-    pub fn remove_keybinding_rule(
+    /// The read, write and publish run on the blocking pool.
+    pub async fn remove_keybinding_rule(
+        self: &Arc<Self>,
+        target: &KeybindingRule,
+    ) -> Result<Vec<ResolvedKeybinding>, KeybindingsConfigError> {
+        let this = Arc::clone(self);
+        let target = target.clone();
+        blocking(move || this.remove_blocking(&target)).await
+    }
+
+    fn remove_blocking(
         &self,
         target: &KeybindingRule,
     ) -> Result<Vec<ResolvedKeybinding>, KeybindingsConfigError> {
@@ -375,7 +413,8 @@ impl Keybindings {
     /// Port of `syncDefaultKeybindingsOnStartup`: writes the defaults when the
     /// file is missing; otherwise appends defaults whose command and shortcut
     /// context are both free, keeping existing custom rules first in priority.
-    pub fn sync_default_keybindings_on_startup(&self) -> Result<(), KeybindingsConfigError> {
+    /// Blocking: reached from [`Keybindings::start`] on the blocking pool.
+    fn sync_default_keybindings_on_startup(&self) -> Result<(), KeybindingsConfigError> {
         let _write = self.write_lock.lock();
         let applied = self.read_applied_migration_ids();
         let pending_late: Vec<&LateDefaultKeybinding> = LATE_DEFAULT_KEYBINDINGS
@@ -509,7 +548,7 @@ impl Keybindings {
     fn revalidate_and_emit(&self) -> Result<(), KeybindingsConfigError> {
         let _write = self.write_lock.lock();
         self.invalidate_cache();
-        let state = self.snapshot()?;
+        let state = self.snapshot_blocking()?;
         self.emit(state);
         Ok(())
     }
@@ -766,12 +805,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
-    #[test]
-    fn snapshot_reports_malformed_and_invalid_entries_without_failing() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn snapshot_reports_malformed_and_invalid_entries_without_failing() {
         let (_dir, path) = fixture();
         std::fs::write(&path, "{}").unwrap();
         let service = Keybindings::new(&path);
-        let state = service.snapshot().unwrap();
+        let state = service.snapshot().await.unwrap();
         assert!(matches!(
             state.issues.as_slice(),
             [ServerConfigIssue::MalformedConfig { .. }]
@@ -783,7 +822,7 @@ mod tests {
         )
         .unwrap();
         let service = Keybindings::new(&path);
-        let state = service.snapshot().unwrap();
+        let state = service.snapshot().await.unwrap();
         assert!(matches!(
             state.issues.as_slice(),
             [ServerConfigIssue::InvalidEntry { index: 1, .. }]
@@ -796,8 +835,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn upsert_replaces_the_target_and_puts_the_new_rule_last() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_replaces_the_target_and_puts_the_new_rule_last() {
         let (_dir, path) = fixture();
         std::fs::write(
             &path,
@@ -810,6 +849,7 @@ mod tests {
                 rule: rule("mod+z", "thread.pin", None),
                 replace: Some(rule("mod+x", "thread.pin", None)),
             })
+            .await
             .unwrap();
         assert_eq!(merged.last().unwrap().command.as_str(), "thread.pin");
         let written: Vec<KeybindingRule> = serde_json::from_value(read_json(&path)).unwrap();
@@ -822,8 +862,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn upsert_caps_the_file_at_the_max_count_keeping_the_newest() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_caps_the_file_at_the_max_count_keeping_the_newest() {
         let (_dir, path) = fixture();
         let full: Vec<KeybindingRule> = (0..MAX_KEYBINDINGS_COUNT)
             .map(|index| {
@@ -841,6 +881,7 @@ mod tests {
                 rule: rule("mod+q", "thread.pin", None),
                 replace: None,
             })
+            .await
             .unwrap();
         let written: Vec<KeybindingRule> = serde_json::from_value(read_json(&path)).unwrap();
         assert_eq!(written.len(), MAX_KEYBINDINGS_COUNT);
@@ -848,8 +889,8 @@ mod tests {
         assert_eq!(written.last().unwrap().command.as_str(), "thread.pin");
     }
 
-    #[test]
-    fn remove_matches_key_command_and_when_exactly() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn remove_matches_key_command_and_when_exactly() {
         let (_dir, path) = fixture();
         std::fs::write(
             &path,
@@ -859,6 +900,7 @@ mod tests {
         let service = Keybindings::new(&path);
         service
             .remove_keybinding_rule(&rule("mod+x", "thread.pin", None))
+            .await
             .unwrap();
         let written: Vec<KeybindingRule> = serde_json::from_value(read_json(&path)).unwrap();
         assert_eq!(
@@ -890,8 +932,8 @@ mod tests {
         (key.to_owned(), command.to_owned())
     }
 
-    #[test]
-    fn appends_additional_rules_for_the_same_command() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn appends_additional_rules_for_the_same_command() {
         let (_dir, path) = fixture();
         std::fs::write(
             &path,
@@ -904,6 +946,7 @@ mod tests {
                 rule: rule("mod+shift+r", "script.run-tests.run", None),
                 replace: None,
             })
+            .await
             .unwrap();
         assert_eq!(
             persisted_view(&path),
@@ -914,8 +957,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replacing_a_rule_with_one_that_already_exists_does_not_duplicate_it() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn replacing_a_rule_with_one_that_already_exists_does_not_duplicate_it() {
         let (_dir, path) = fixture();
         std::fs::write(
             &path,
@@ -928,6 +971,7 @@ mod tests {
                 rule: rule("mod+alt+r", "script.run-tests.run", None),
                 replace: Some(rule("mod+r", "script.run-tests.run", None)),
             })
+            .await
             .unwrap();
         assert_eq!(
             persisted_view(&path),
@@ -935,8 +979,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refuses_to_overwrite_a_malformed_config() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn refuses_to_overwrite_a_malformed_config() {
         let (_dir, path) = fixture();
         std::fs::write(&path, "{ not-json").unwrap();
         let service = Keybindings::new(&path);
@@ -945,17 +989,18 @@ mod tests {
                 rule: rule("mod+shift+r", "script.run-tests.run", None),
                 replace: None,
             })
+            .await
             .unwrap_err();
         assert!(error.to_string().contains("expected JSON array"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not-json");
     }
 
-    #[test]
-    fn a_non_array_config_reports_once_without_a_duplicate_prefix() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_non_array_config_reports_once_without_a_duplicate_prefix() {
         let (_dir, path) = fixture();
         std::fs::write(&path, r#"{"key":"mod+j","command":"terminal.toggle"}"#).unwrap();
         let service = Keybindings::new(&path);
-        let state = service.snapshot().unwrap();
+        let state = service.snapshot().await.unwrap();
         let [ServerConfigIssue::MalformedConfig { message }] = state.issues.as_slice() else {
             panic!(
                 "expected one malformed-config issue, got {:?}",
@@ -965,15 +1010,15 @@ mod tests {
         assert_eq!(message.matches("expected a JSON array").count(), 1);
     }
 
-    #[test]
-    fn caches_the_loaded_config_across_repeated_reads() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn caches_the_loaded_config_across_repeated_reads() {
         let (_dir, path) = fixture();
         std::fs::write(&path, r#"[{"key":"mod+x","command":"thread.pin"}]"#).unwrap();
         let service = Keybindings::new(&path);
-        let first = service.snapshot().unwrap();
+        let first = service.snapshot().await.unwrap();
         // Changing the file without a watcher must not show up in a cached read.
         std::fs::write(&path, "[]").unwrap();
-        let second = service.snapshot().unwrap();
+        let second = service.snapshot().await.unwrap();
         assert_eq!(first, second);
         assert!(
             second
@@ -983,13 +1028,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_failed_read_is_retried_instead_of_cached() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_read_is_retried_instead_of_cached() {
         let (_dir, path) = fixture();
         // A directory where the file should be makes the read itself fail.
         std::fs::create_dir_all(&path).unwrap();
         let service = Keybindings::new(&path);
-        let error = service.snapshot().unwrap_err();
+        let error = service.snapshot().await.unwrap_err();
         assert!(
             error
                 .to_string()
@@ -998,7 +1043,7 @@ mod tests {
 
         std::fs::remove_dir_all(&path).unwrap();
         std::fs::write(&path, r#"[{"key":"mod+j","command":"terminal.toggle"}]"#).unwrap();
-        let state = service.snapshot().unwrap();
+        let state = service.snapshot().await.unwrap();
         assert!(state.issues.is_empty());
         assert!(
             state
@@ -1008,19 +1053,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_cache_is_updated_after_an_upsert() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_cache_is_updated_after_an_upsert() {
         let (_dir, path) = fixture();
         std::fs::write(&path, r#"[{"key":"mod+j","command":"terminal.toggle"}]"#).unwrap();
         let service = Keybindings::new(&path);
-        service.snapshot().unwrap();
+        service.snapshot().await.unwrap();
         service
             .upsert_keybinding_rule(UpsertKeybindingInput {
                 rule: rule("mod+shift+r", "script.run-tests.run", None),
                 replace: None,
             })
+            .await
             .unwrap();
-        let loaded = service.snapshot().unwrap().keybindings;
+        let loaded = service.snapshot().await.unwrap().keybindings;
         assert!(
             loaded
                 .iter()
@@ -1033,28 +1079,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn concurrent_upserts_do_not_lose_updates() {
+    /// Upserts from separate tasks on a current-thread runtime. Each write runs
+    /// on the blocking pool, so the write lock is what keeps them ordered.
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_upserts_do_not_lose_updates() {
         let (_dir, path) = fixture();
         std::fs::write(&path, "[]").unwrap();
         let service = Keybindings::new(&path);
         let commands: Vec<String> = (0..20)
             .map(|index| format!("script.concurrent-{index}.run"))
             .collect();
-        std::thread::scope(|scope| {
-            for (index, command) in commands.iter().enumerate() {
-                let service = &service;
-                scope.spawn(move || {
-                    let key = format!("mod+{}", (b'a' + index as u8) as char);
-                    service
-                        .upsert_keybinding_rule(UpsertKeybindingInput {
-                            rule: rule(&key, command, None),
-                            replace: None,
-                        })
-                        .unwrap();
-                });
-            }
-        });
+        let mut tasks = Vec::new();
+        for (index, command) in commands.iter().cloned().enumerate() {
+            let service = Arc::clone(&service);
+            tasks.push(tokio::spawn(async move {
+                let key = format!("mod+{}", (b'a' + index as u8) as char);
+                service
+                    .upsert_keybinding_rule(UpsertKeybindingInput {
+                        rule: rule(&key, &command, None),
+                        replace: None,
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
         let persisted: Vec<String> = persisted_view(&path)
             .into_iter()
             .map(|(_, command)| command)
@@ -1069,7 +1120,7 @@ mod tests {
         let (_dir, path) = fixture();
         let service = Keybindings::new(&path);
         let mut changes = service.subscribe();
-        let _watcher = service.start().unwrap();
+        let _watcher = service.start().await.unwrap();
 
         std::fs::write(&path, r#"[{"key":"mod+x","command":"thread.pin"}]"#).unwrap();
         // Startup's own write also reports events; wait for the external edit.
@@ -1200,19 +1251,19 @@ mod tests {
     async fn a_second_start_returns_no_second_watcher() {
         let (_dir, path) = fixture();
         let service = Keybindings::new(&path);
-        assert!(service.start().unwrap().is_some());
-        assert!(service.start().unwrap().is_none());
+        assert!(service.start().await.unwrap().is_some());
+        assert!(service.start().await.unwrap().is_none());
     }
 
-    #[test]
-    fn a_failed_start_reports_the_same_error_on_a_second_call() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_start_reports_the_same_error_on_a_second_call() {
         let dir = tempfile::tempdir().unwrap();
         // The config directory cannot be created under a regular file.
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, "x").unwrap();
         let service = Keybindings::new(blocker.join("keybindings.json"));
-        let first = service.start().err().expect("the first start fails");
-        let second = service.start().err().expect("the second start fails");
+        let first = service.start().await.err().expect("the first start fails");
+        let second = service.start().await.err().expect("the second start fails");
         assert_eq!(first, second);
     }
 }

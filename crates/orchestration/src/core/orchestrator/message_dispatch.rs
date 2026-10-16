@@ -69,24 +69,26 @@ use super::message_steer::{SteerInput, steer_into_run};
 use super::services::PrepareRootRunScope;
 
 /// The workspace-preparation placeholder, upstream `WORKSPACE_PREPARATION_INPUT`.
-const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
+pub(super) const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
 
 /// Emits one run-scoped event. Every such event carries the same envelope.
 macro_rules! run_scoped_event {
     ($decision:expr, $variant:ident, $thread:expr, $run:expr, $node:expr, $instance:expr, $payload:expr) => {{
         let id = $decision.event_id($thread);
         let occurred_at = $decision.now();
-        $decision.emit(OrchestrationV2DomainEvent::$variant {
-            id,
-            thread_id: $thread.clone(),
-            run_id: Some($run.clone()),
-            node_id: Some($node.clone()),
-            driver: None,
-            provider_instance_id: Some($instance.clone()),
-            raw_event_id: None,
-            occurred_at,
-            payload: $payload,
-        });
+        $decision.emit(
+            turin_contracts::orchestration_v2::OrchestrationV2DomainEvent::$variant {
+                id,
+                thread_id: $thread.clone(),
+                run_id: Some($run.clone()),
+                node_id: Some($node.clone()),
+                driver: None,
+                provider_instance_id: Some($instance.clone()),
+                raw_event_id: None,
+                occurred_at,
+                payload: $payload,
+            },
+        );
     }};
 }
 
@@ -107,7 +109,7 @@ pub(super) async fn decide(
 
 /// `dispatchMessage`. Emits the decision's events and effects; the caller
 /// commits them under the thread lock.
-async fn dispatch_message(
+pub(super) async fn dispatch_message(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     client: &C,
@@ -791,7 +793,7 @@ fn resolve_dispatch_mode(
     }
 }
 
-fn is_blocking_run(run: &OrchestrationV2Run) -> bool {
+pub(super) fn is_blocking_run(run: &OrchestrationV2Run) -> bool {
     matches!(
         run.status,
         OrchestrationV2RunStatus::Preparing
@@ -1094,7 +1096,7 @@ async fn start_run(
         context_handoff_id: None,
         restart_continuation_of_run_id: None,
         delegated_task_id: None,
-        work_started_at: wake_work_started_at(&projection.runs, client),
+        work_started_at: wake_work_started_at(&projection.runs, is_wake(client)),
         restart_cancelled_background_work: None,
         source_plan_ref: source_plan_ref_of(client),
         delegated_completion: None,
@@ -1312,10 +1314,21 @@ async fn provider_session_id_for(
     thread_id: &ThreadId,
     command: &OrchestrationV2ServerCommand,
 ) -> Result<turin_contracts::ProviderSessionId, OrchestratorError> {
+    provider_session_id_for_raw(adapter, instance, thread_id)
+        .await
+        .map_err(|cause| dispatch_failure(command, cause))
+}
+
+/// [`provider_session_id_for`] for callers with no command to blame.
+pub(super) async fn provider_session_id_for_raw(
+    adapter: &dyn ProviderAdapterV2,
+    instance: &ProviderInstanceId,
+    thread_id: &ThreadId,
+) -> Result<turin_contracts::ProviderSessionId, String> {
     let capabilities = adapter
         .get_capabilities()
         .await
-        .map_err(|cause| dispatch_failure(command, cause.to_string()))?;
+        .map_err(|cause| cause.to_string())?;
     Ok(
         if capabilities
             .sessions
@@ -1386,20 +1399,33 @@ pub(super) fn message_template(
     }
 }
 
-/// `wakeWorkStartedAt`: a notification wake carries on the work of the run
-/// that started last, so it keeps that run's work start. Other runs start new
-/// work. (Delegated-completion and restart wakes are refused before here.)
-fn wake_work_started_at(runs: &[OrchestrationV2Run], client: &C) -> Option<UtcDateTime> {
-    let C::MessageDispatch { notification, .. } = client else {
-        unreachable!("wake_work_started_at is called only for message.dispatch");
-    };
-    if notification.is_none() {
+/// `wakeWorkStartedAt`: a wake (a notification, a delegated-completion
+/// delivery or a restart continuation) carries on the work of the run that
+/// started last, so it keeps that run's work start. Other runs start new work.
+pub(super) fn wake_work_started_at(runs: &[OrchestrationV2Run], wake: bool) -> Option<UtcDateTime> {
+    if !wake {
         return None;
     }
     runs.iter()
         .filter(|run| run.started_at.is_some())
         .max_by_key(|run| (run.started_at, run.ordinal.get()))
         .map(|run| *orchestration_v2_run_work_started_at(run))
+}
+
+/// Whether the command is a wake, as `wakeWorkStartedAt` reads its trigger.
+fn is_wake(client: &C) -> bool {
+    let C::MessageDispatch {
+        notification,
+        delegated_completion,
+        restart_continuation_of_run_id,
+        ..
+    } = client
+    else {
+        unreachable!("is_wake is called only for message.dispatch");
+    };
+    notification.is_some()
+        || delegated_completion.is_some()
+        || restart_continuation_of_run_id.is_some()
 }
 
 /// `nextTurnItemOrdinal` for a projection read from the store: the store's
@@ -1621,7 +1647,7 @@ async fn queue_run(
         context_handoff_id: None,
         restart_continuation_of_run_id: restart_continuation_of_run_id.clone(),
         delegated_task_id: None,
-        work_started_at: None,
+        work_started_at: wake_work_started_at(&projection.runs, is_wake(input.client)),
         restart_cancelled_background_work: None,
         source_plan_ref: source_plan_ref_of(input.client),
         delegated_completion: None,
@@ -1785,19 +1811,36 @@ pub(super) async fn prepare_root_scope(
     now: UtcDateTime,
 ) -> Result<OrchestrationV2CheckpointScope, OrchestratorError> {
     let _ = model_selection;
-    let thread = &projection.thread;
+    prepare_root_scope_raw(
+        orchestrator,
+        &projection.thread,
+        session_cwd,
+        run_id,
+        root_node_id,
+        provider_thread_id,
+        now,
+    )
+    .await
+    .map_err(|cause| dispatch_failure(command, cause))
+}
+
+/// [`prepare_root_scope`] for callers with no command to blame.
+pub(super) async fn prepare_root_scope_raw(
+    orchestrator: &Orchestrator,
+    thread: &OrchestrationV2AppThread,
+    session_cwd: Option<String>,
+    run_id: &RunId,
+    root_node_id: &NodeId,
+    provider_thread_id: &ProviderThreadId,
+    now: UtcDateTime,
+) -> Result<OrchestrationV2CheckpointScope, String> {
     let project_root = orchestrator
         .seams
         .project_roots
         .workspace_root(&thread.project_id)
         .await
-        .map_err(|cause| dispatch_failure(command, cause.to_string()))?
-        .ok_or_else(|| {
-            dispatch_failure(
-                command,
-                format!("Project {} has no workspace root.", thread.project_id),
-            )
-        })?;
+        .map_err(|cause| cause.to_string())?
+        .ok_or_else(|| format!("Project {} has no workspace root.", thread.project_id))?;
     let policy = runtime_policy::resolve(
         thread,
         &project_root,
@@ -1817,7 +1860,7 @@ pub(super) async fn prepare_root_scope(
             created_at: now,
         })
         .await
-        .map_err(|cause| dispatch_failure(command, cause.to_string()))
+        .map_err(|cause| cause.to_string())
 }
 
 /// `pendingMergeBackTransfersForThread` is non-empty.

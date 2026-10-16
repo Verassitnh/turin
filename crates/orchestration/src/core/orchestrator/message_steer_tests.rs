@@ -178,6 +178,22 @@ pub(super) async fn harness_with(
     restart_steering: bool,
     transition: Option<ProviderSelectionTransitionPlan>,
 ) -> Steer {
+    harness_with_settings(
+        active_steering,
+        restart_steering,
+        transition,
+        Arc::new(super::services::AllProviderInstancesEnabled),
+    )
+    .await
+}
+
+/// [`harness_with`] with the project's provider-instance settings.
+pub(super) async fn harness_with_settings(
+    active_steering: bool,
+    restart_steering: bool,
+    transition: Option<ProviderSelectionTransitionPlan>,
+    settings: Arc<dyn super::services::ProviderInstanceSettings>,
+) -> Steer {
     let db = Db::open_in_memory().await.expect("in-memory db");
     let projection = Arc::new(ProjectionStore::new(db.clone()));
     let sink = EventSink::new(
@@ -210,6 +226,7 @@ pub(super) async fn harness_with(
         adapters: Arc::new(FakeAdapters { adapter }),
         project_roots: Arc::new(FakeProjectRoots),
         sessions: sessions.clone(),
+        provider_instances: settings,
         ..DispatchSeams::default()
     });
     Steer {

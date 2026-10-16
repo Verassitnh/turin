@@ -23,7 +23,7 @@ fn cause(error: &crate::pipeline::orchestrator_port::OrchestratorError) -> Strin
 
 /// The running run now expects delivery 1 of `TASK` as `MESSAGE`; the task is
 /// an app-owned subagent whose completion always wakes the parent.
-async fn open_delivery(h: &Steer, thread_id: &str, run_id: &str, wake: &str) {
+pub(super) async fn open_delivery(h: &Steer, thread_id: &str, run_id: &str, wake: &str) {
     let projection = h
         .orchestrator
         .get_thread_projection(&thread(thread_id))

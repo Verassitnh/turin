@@ -11,6 +11,9 @@
 //! return an error here. Command kinds not yet ported are rejected in
 //! `dispatch::decide`, which reports `OrchestratorError::CommandRejected`.
 
+mod cohort;
+#[cfg(test)]
+mod cohort_tests;
 pub mod dispatch;
 #[cfg(test)]
 mod dispatch_limit_tests;
@@ -22,7 +25,22 @@ mod message_plan_tests;
 mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;
+mod prepared_run;
+#[cfg(test)]
+mod prepared_run_tests;
 mod provider_detach;
+mod queue_start;
+#[cfg(test)]
+mod queue_start_tests;
+mod queued_run;
+#[cfg(test)]
+mod queued_run_tests;
+mod run_stop;
+#[cfg(test)]
+mod run_stop_tests;
+mod runtime_request;
+#[cfg(test)]
+mod runtime_request_tests;
 pub mod services;
 #[cfg(test)]
 pub(super) mod test_harness;
@@ -157,6 +175,12 @@ fn projection_record_filter(filter: &RecordFilter) -> ProjectionRecordFilter {
             .map(|ids| ids.iter().map(|id| id.as_str().to_owned()).collect()),
         run_ids: filter.run_ids.clone(),
         turn_item_types: filter.turn_item_types.clone(),
+        turn_item_statuses: filter.turn_item_statuses.clone(),
+        turn_item_run_ids: filter.turn_item_run_ids.clone(),
+        message_run_ids: filter
+            .message_run_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|id| id.as_str().to_owned()).collect()),
         omit_settled_leaf_nodes: filter.omit_settled_leaf_nodes,
         ..ProjectionRecordFilter::default()
     }

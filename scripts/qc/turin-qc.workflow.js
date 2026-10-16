@@ -1,6 +1,6 @@
 export const meta = {
   name: 'turin-qc',
-  description: 'Quality-control gate for a Turin branch/worktree: dimension reviews (Sonnet), adversarial verify (Haiku), ranked report (Sonnet); look-and-feel on Opus',
+  description: 'Quality-control gate for a Turin branch/worktree: dimension reviews, 2 adversarial skeptics per finding, ranked report; models/efforts per role via args (models, efforts)',
   whenToUse: 'Before merging any Turin task branch, and for cross-crate audits of main',
   phases: [
     { title: 'Review', detail: 'one reviewer per quality dimension' },
@@ -16,6 +16,8 @@ const UPSTREAM = A.upstream
 const CONTEXT = A.context || ''
 // Model policy (user, 2026-10-15): Sonnet/Haiku where reasonable; Opus only for look-and-feel judgement.
 const M = Object.assign({ review: 'sonnet', verify: 'haiku', lead: 'sonnet', lookAndFeel: 'opus' }, A.models || {})
+// Per-role reasoning effort (user, 2026-10-16: "fable light" = model 'fable' with effort 'low' for important roles).
+const E = Object.assign({ review: 'high', verify: 'high', lead: 'high', lookAndFeel: 'high' }, A.efforts || {})
 
 const BASE = `You are a QC reviewer for Turin, a faithful Rust/GPUI port of T3 Code (TypeScript/Effect).
 Checkout to review (read-only, do NOT edit or commit anything): ${WT}
@@ -70,11 +72,11 @@ const VERDICT = {
 
 const results = await pipeline(
   DIMENSIONS,
-  d => agent(`${BASE}\n\n${d.prompt}`, { label: `review:${d.key}`, phase: 'Review', schema: FINDINGS, effort: 'high', model: d.key === 'look-and-feel' ? M.lookAndFeel : M.review }),
+  d => agent(`${BASE}\n\n${d.prompt}`, { label: `review:${d.key}`, phase: 'Review', schema: FINDINGS, effort: d.key === 'look-and-feel' ? E.lookAndFeel : E.review, model: d.key === 'look-and-feel' ? M.lookAndFeel : M.review }),
   (review, d) => parallel((review?.findings || []).map((f, i) => () =>
     parallel([0, 1].map(k => () => agent(
       `${BASE}\n\nYou are skeptic #${k + 1}. Another reviewer (dimension: ${d.key}) claims:\n${JSON.stringify(f, null, 2)}\n\nTry hard to REFUTE it: re-read the cited code and upstream, run checks. refuted=true if the claim is wrong, already handled, intentionally logged in Deviations, or not actually a problem. If it is real, refuted=false and give adjustedSeverity.`,
-      { label: `verify:${d.key}#${i}.${k}`, phase: 'Verify', schema: VERDICT, effort: 'high', model: M.verify },
+      { label: `verify:${d.key}#${i}.${k}`, phase: 'Verify', schema: VERDICT, effort: E.verify, model: M.verify },
     ))).then(vs => {
       const ok = vs.filter(Boolean)
       const upheld = ok.filter(v => !v.refuted)
@@ -91,6 +93,6 @@ log(`${all.length} findings raised, ${confirmed.length} survived verification, $
 phase('Report')
 const report = await agent(
   `${BASE}\n\nYou are the QC lead. Confirmed findings (survived adversarial verification):\n${JSON.stringify(confirmed, null, 2)}\n\nDeduplicate overlapping findings, rank by severity, and write a concise fix list for the implementing agent: each item = severity, file:line, problem, required fix. Then a one-line verdict: PASS (no critical/high) or FAIL. Plain text, no preamble.`,
-  { label: 'qc-lead', phase: 'Report', effort: 'high', model: M.lead },
+  { label: 'qc-lead', phase: 'Report', effort: E.lead, model: M.lead },
 )
 return { confirmed, rejectedCount: rejected, report }

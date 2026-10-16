@@ -373,12 +373,18 @@ impl Replay {
     ) -> Vec<ProviderAdapterV2Event> {
         let mut seen = Vec::new();
         loop {
-            let event = self
-                .events
-                .next()
-                .await
-                .expect("event stream ended")
-                .expect("event error");
+            // A replay that stops answering fails the test instead of hanging it.
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(20), self.events.next())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "replay stalled; replay state: {:?}",
+                            self.driver.verify_complete().err()
+                        )
+                    })
+                    .expect("event stream ended")
+                    .expect("event error");
             let stop = done(&event);
             seen.push(event);
             if stop {
@@ -1413,6 +1419,196 @@ fn pending_background_work_follows_running_commands_tools_and_subagents() {
         &state,
         "provider-thread-1"
     ));
+}
+
+/// Provider thread ids carry the driver and native id, not the instance
+/// (`idAllocator.derive.providerThread({driver, nativeThreadId})`), so a T3 database imports.
+#[tokio::test]
+async fn provider_thread_ids_omit_the_provider_instance() {
+    let transcript = fixture("simple");
+    let native = native_thread_of(&transcript.entries);
+    let replay = open(transcript).await;
+    assert_eq!(
+        replay.thread.id.as_str(),
+        format!("provider-thread:provider:codex:native-thread:{native}")
+    );
+}
+
+/// `fixture_name` with its first server request replaced by `request` (keeping the
+/// request id) and the answer it expects by `answer`.
+fn with_request_swapped(fixture_name: &str, request: Value, answer: Value) -> ReplayTranscript {
+    let mut transcript = fixture(fixture_name);
+    for entry in &mut transcript.entries {
+        match entry {
+            ReplayEntry::EmitInbound { frame, .. }
+                if frame["method"]
+                    .as_str()
+                    .is_some_and(|method| method.ends_with("/requestApproval")) =>
+            {
+                let id = frame["id"].clone();
+                let mut swapped = request.clone();
+                swapped["id"] = id;
+                *frame = swapped;
+            }
+            ReplayEntry::ExpectOutbound { frame, .. }
+                if frame.pointer("/result/decision").is_some() =>
+            {
+                let id = frame["id"].clone();
+                *frame = json!({"id": id, "result": answer.clone()});
+            }
+            _ => {}
+        }
+    }
+    transcript
+}
+
+/// The legacy `execCommandApproval` names a conversation and a call, not a turn and an item.
+#[tokio::test]
+async fn legacy_exec_command_approval_is_raised_on_the_active_turn_of_its_conversation() {
+    let base = fixture("tool_call_read_only_on_request");
+    let thread = native_thread_of(&base.entries);
+    let policy = read_only_policy(&base);
+    let text = recorded_turn_params(&base, 0)["input"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let transcript = with_request_swapped(
+        "tool_call_read_only_on_request",
+        json!({"method": "execCommandApproval", "params": {
+            "conversationId": thread, "callId": "call-1", "approvalId": null,
+            "command": ["git", "status"], "cwd": "/workspace", "parsedCmd": [],
+            "reason": null
+        }}),
+        json!({"decision": "approved"}),
+    );
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let seen = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&seen).remove(0);
+    assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::Command);
+    assert_eq!(
+        request
+            .native_request_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "call-1"
+    );
+    let prompt = seen.iter().find_map(|event| match event {
+        ProviderAdapterV2Event::TurnItemUpdated {
+            turn_item: OrchestrationV2TurnItem::ApprovalRequest { prompt, .. },
+            ..
+        } => Some(prompt.clone()),
+        _ => None,
+    });
+    assert_eq!(prompt.flatten().as_deref(), Some("git status"));
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.finish_turn().await,
+        ProviderAdapterV2TurnTerminalStatus::Completed
+    );
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn legacy_apply_patch_approval_describes_the_patch() {
+    let base = fixture("tool_call_restricted_granular");
+    let thread = native_thread_of(&base.entries);
+    let text = recorded_text(&base, 0);
+    let policy = recorded_policy(&base, RuntimeMode::ApprovalRequired);
+    let transcript = with_request_swapped(
+        "tool_call_restricted_granular",
+        json!({"method": "applyPatchApproval", "params": {
+            "conversationId": thread, "callId": "patch-1", "reason": null, "grantRoot": null,
+            "fileChanges": {"/tmp/added.ts": {"type": "add", "content": ""}}
+        }}),
+        json!({"decision": "approved"}),
+    );
+    let mut replay = open(transcript).await;
+    replay.start(&text, policy).await;
+    let seen = replay
+        .next_until(|event| !runtime_requests(std::slice::from_ref(event)).is_empty())
+        .await;
+    let request = runtime_requests(&seen).remove(0);
+    assert_eq!(request.kind, OrchestrationV2RuntimeRequestKind::FileChange);
+    let prompt = seen.iter().find_map(|event| match event {
+        ProviderAdapterV2Event::TurnItemUpdated {
+            turn_item: OrchestrationV2TurnItem::ApprovalRequest { prompt, .. },
+            ..
+        } => Some(prompt.clone()),
+        _ => None,
+    });
+    assert_eq!(prompt.flatten().as_deref(), Some("add /tmp/added.ts"));
+    replay
+        .runtime
+        .respond_to_runtime_request(accept(&request))
+        .await
+        .unwrap();
+    replay.finish_turn().await;
+    replay.driver.verify_complete().unwrap();
+}
+
+/// A request no active turn can show is answered at once, so Codex is not left waiting.
+#[tokio::test]
+async fn a_legacy_approval_without_an_active_turn_gets_a_protocol_error() {
+    let thread = native_thread_of(&preamble());
+    let transcript = synthetic(
+        "no-turn-legacy",
+        vec![
+            emit(json!({"method": "execCommandApproval", "id": 0, "params": {
+                "conversationId": thread, "callId": "call-1", "approvalId": null,
+                "command": ["ls"], "cwd": "/w", "parsedCmd": [], "reason": null
+            }})),
+            expect(json!({"id": 0, "error": {
+                "code": -32603,
+                "message": "Codex App Server request handler failed for method 'execCommandApproval'"
+            }})),
+        ],
+    );
+    let replay = open(transcript).await;
+    // The answer is sent from the pump; wait until the driver has consumed it.
+    for _ in 0..200 {
+        if replay.driver.verify_complete().is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    replay.driver.verify_complete().unwrap();
+}
+
+#[tokio::test]
+async fn an_mcp_elicitation_without_a_turn_is_declined() {
+    let thread = native_thread_of(&preamble());
+    let transcript = synthetic(
+        "no-turn-elicitation",
+        vec![
+            emit(
+                json!({"method": "mcpServer/elicitation/request", "id": 0, "params": {
+                    "threadId": thread, "serverName": "gmail", "mode": "form",
+                    "message": "Allow ChatGPT to use Gmail?",
+                    "requestedSchema": {"type": "object", "properties": {}}
+                }}),
+            ),
+            expect(json!({"id": 0, "result": {"action": "decline"}})),
+        ],
+    );
+    let replay = open(transcript).await;
+    for _ in 0..200 {
+        if replay.driver.verify_complete().is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    replay.driver.verify_complete().unwrap();
 }
 
 /// Policy with the approval and sandbox settings the upstream recorder sent, so

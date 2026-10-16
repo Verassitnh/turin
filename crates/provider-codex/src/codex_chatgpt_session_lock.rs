@@ -58,24 +58,50 @@ pub async fn with_chatgpt_session_lock_policy<T>(
         return Ok(task.await);
     };
     let lock_dir = directory.join(format!("{key}.bin.lock"));
-    acquire(&lock_dir, policy).await?;
+    let mut held = acquire(&lock_dir, policy).await?;
     let (compromised_tx, mut compromised) = oneshot::channel::<()>();
-    let heartbeat = spawn_heartbeat(lock_dir.clone(), policy.update, compromised_tx);
-    let result = tokio::select! {
+    held.heartbeat = Some(spawn_heartbeat(
+        lock_dir.clone(),
+        policy.update,
+        compromised_tx,
+    ));
+    // `held` releases the lock when it drops, so cancelling this future releases it too.
+    tokio::select! {
         value = task => Ok(value),
         _ = &mut compromised => Err(CredentialLockError),
-    };
-    heartbeat.abort();
-    let _ = tokio::fs::remove_dir_all(&lock_dir).await;
-    result
+    }
+}
+
+/// A taken lock. Dropping it stops the heartbeat and removes the lock directory, whether the
+/// task finished, lost the lock, or was cancelled by its caller dropping the future.
+struct HeldLock {
+    lock_dir: PathBuf,
+    heartbeat: Option<JoinHandle<()>>,
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
+        }
+        // Synchronous: a drop cannot await, and the lock must be gone before the next acquire.
+        let _ = std::fs::remove_dir_all(&self.lock_dir);
+    }
 }
 
 /// Creates the lock directory, retrying while another holder has it. A holder
 /// whose directory is older than `stale` is taken over.
-async fn acquire(lock_dir: &Path, policy: LockPolicy) -> Result<(), CredentialLockError> {
+async fn acquire(lock_dir: &Path, policy: LockPolicy) -> Result<HeldLock, CredentialLockError> {
     for attempt in 0..=policy.retries {
-        match tokio::fs::create_dir(lock_dir).await {
-            Ok(()) => return Ok(()),
+        // A plain `mkdir`: with no await between creating the directory and holding the
+        // guard, a cancelled caller can never leave a lock behind.
+        match std::fs::create_dir(lock_dir) {
+            Ok(()) => {
+                return Ok(HeldLock {
+                    lock_dir: lock_dir.to_path_buf(),
+                    heartbeat: None,
+                });
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if is_stale(lock_dir, policy.stale).await {
                     let _ = tokio::fs::remove_dir_all(lock_dir).await;
@@ -191,6 +217,36 @@ mod tests {
         let value =
             with_chatgpt_session_lock_policy(Some(temp.path()), "acct", policy, async { 4 }).await;
         assert_eq!(value, Ok(4));
+    }
+
+    /// A cancelled holder (logout, stop, the flow timeout) releases the lock and stops
+    /// its heartbeat, so the next acquire succeeds.
+    #[tokio::test]
+    async fn dropping_the_holder_mid_task_releases_the_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
+        let holder_dir = dir.clone();
+        let holder = tokio::spawn(async move {
+            with_chatgpt_session_lock_policy(Some(&holder_dir), "acct", fast_policy(), async {
+                std::future::pending::<()>().await
+            })
+            .await
+        });
+        while !dir.join("acct.bin.lock").exists() {
+            tokio::task::yield_now().await;
+        }
+        holder.abort();
+        let _ = holder.await;
+        assert!(
+            !dir.join("acct.bin.lock").exists(),
+            "the lock directory is removed"
+        );
+        // Nothing recreates it: the heartbeat is gone.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!dir.join("acct.bin.lock").exists());
+        let next =
+            with_chatgpt_session_lock_policy(Some(&dir), "acct", fast_policy(), async { 5 }).await;
+        assert_eq!(next, Ok(5));
     }
 
     #[tokio::test]

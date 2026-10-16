@@ -270,16 +270,17 @@ impl CodexSession {
                 }
             }
         }
-        let response = payload(
-            self.client.request("turn/start", Some(params)).await?,
-            "turn/start",
-        )?;
-        let turn_id = id(&response, "/turn/id", "turn/start")?;
+        // Before the request: an approval can arrive before the response, and it must see this
+        // turn's mode, not the previous one.
         let mode = serde_json::to_value(policy.runtime_mode).expect("runtime mode");
         if let Some(mode) = mode.as_str() {
             self.broker.set_runtime_mode(thread_id, mode);
         }
-        Ok(turn_id)
+        let response = payload(
+            self.client.request("turn/start", Some(params)).await?,
+            "turn/start",
+        )?;
+        id(&response, "/turn/id", "turn/start")
     }
 
     pub async fn steer_turn(

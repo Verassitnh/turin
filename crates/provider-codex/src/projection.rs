@@ -166,6 +166,8 @@ pub struct RuntimeState {
     /// A compaction's turn is unknown until Codex reports it: the next `turn/started`
     /// on the thread adopts this input (`pendingRootTurns`).
     pub pending_root_turns: HashMap<String, ProviderAdapterV2TurnInput>,
+    /// Requests no turn can show, to answer at once as (broker id, decision). The pump sends them.
+    pub unanswered: Vec<(u64, crate::approvals::Decision)>,
 }
 
 fn group_of(kind: TextKind) -> usize {

@@ -2,7 +2,7 @@
 //! at the provider-core `ProviderAdapterV2` boundary.
 use crate::{
     adapter::{CodexAdapter, CodexEvent, CodexSession},
-    approvals::{Decision, PendingRequest},
+    approvals::{Decision, PendingRequest, codex_file_change_approval_prompt},
     codex_input::{AttachmentPathResolver, to_codex_input},
     codex_mcp_elicitation::describe_mcp_elicitation,
     codex_usage_limits::{CodexRateLimitSnapshot, codex_rate_limits_to_update},
@@ -411,6 +411,15 @@ fn project_parked(
 /// Whether an item's turn is registered, or is the first `turn/started` of a
 /// registered subagent, which opens a child turn when it projects.
 fn admitted(item: &Parked, state: &RuntimeState) -> bool {
+    // A legacy approval names a conversation. While that thread's turn is still starting,
+    // its turn is not registered yet, so the request waits for it.
+    if let Parked::Request(request) = item
+        && is_legacy_approval(&request.method)
+        && let Some(thread) = request.params.get("conversationId").and_then(Value::as_str)
+    {
+        return active_turn_on_thread(state, thread).is_some()
+            || !(state.starting.contains(thread) || state.pending_root_turns.contains_key(thread));
+    }
     match item.turn() {
         None => true,
         Some(turn) => {
@@ -534,6 +543,10 @@ async fn project_pump(
             } => projection::flush_due(&mut state.lock(), tokio::time::Instant::now()),
         };
         batch.extend(drain_parked(&mut parked, &mut state.lock(), &session_id));
+        let unanswered = std::mem::take(&mut state.lock().unanswered);
+        for (id, decision) in unanswered {
+            session.broker.reply(id, decision);
+        }
         let interrupts = std::mem::take(&mut state.lock().interrupts);
         for (thread, turn) in interrupts {
             // Upstream interrupts a late child turn and does not wait on it: the
@@ -580,7 +593,8 @@ fn thread_from(
                 detail: "missing thread.id".into(),
             })?;
     Ok(OrchestrationV2ProviderThread {
-        id: derive::provider_thread(&driver(), Some(instance_id), id),
+        // Upstream derives it from the driver and native id alone, so a T3 database imports.
+        id: derive::provider_thread(&driver(), None, id),
         driver: driver(),
         provider_instance_id: instance_id.clone(),
         provider_session_id: Some(session_id.clone()),
@@ -1559,13 +1573,27 @@ impl ProviderSessionRuntime for CodexProviderRuntime {
     }
 }
 
-/// The runtime request kind for a Codex server request method.
-fn runtime_kind(method: &str) -> OrchestrationV2RuntimeRequestKind {
+/// The runtime request kind for a Codex server request. A permissions request takes
+/// the kind of what it asks for (`providerRequestKindFromPermissions`): writes are a
+/// file change, reads a file read, anything else a command.
+fn runtime_kind(method: &str, params: &Value) -> OrchestrationV2RuntimeRequestKind {
+    let asks = |access: &str| {
+        params
+            .pointer(&format!("/permissions/fileSystem/{access}"))
+            .and_then(Value::as_array)
+            .is_some_and(|paths| !paths.is_empty())
+    };
     match method {
         "item/fileChange/requestApproval" | "applyPatchApproval" => {
             OrchestrationV2RuntimeRequestKind::FileChange
         }
-        "item/permissions/requestApproval" => OrchestrationV2RuntimeRequestKind::Permission,
+        "item/permissions/requestApproval" if asks("write") => {
+            OrchestrationV2RuntimeRequestKind::FileChange
+        }
+        "item/permissions/requestApproval" if asks("read") => {
+            OrchestrationV2RuntimeRequestKind::FileRead
+        }
+        "item/permissions/requestApproval" => OrchestrationV2RuntimeRequestKind::Command,
         "mcpServer/elicitation/request" => OrchestrationV2RuntimeRequestKind::McpElicitation,
         "item/tool/requestUserInput" => OrchestrationV2RuntimeRequestKind::UserInput,
         _ => OrchestrationV2RuntimeRequestKind::Command,
@@ -1574,8 +1602,8 @@ fn runtime_kind(method: &str) -> OrchestrationV2RuntimeRequestKind {
 
 /// The approval kind an approval node is raised for. Plan questions are not
 /// approvals, so they have none.
-fn approval_kind(method: &str) -> Option<ProviderRequestKind> {
-    match runtime_kind(method) {
+fn approval_kind(method: &str, params: &Value) -> Option<ProviderRequestKind> {
+    match runtime_kind(method, params) {
         OrchestrationV2RuntimeRequestKind::Command => Some(ProviderRequestKind::Command),
         OrchestrationV2RuntimeRequestKind::FileRead => Some(ProviderRequestKind::FileRead),
         OrchestrationV2RuntimeRequestKind::FileChange => Some(ProviderRequestKind::FileChange),
@@ -1589,6 +1617,102 @@ fn approval_kind(method: &str) -> Option<ProviderRequestKind> {
     }
 }
 
+fn is_legacy_approval(method: &str) -> bool {
+    matches!(method, "execCommandApproval" | "applyPatchApproval")
+}
+
+/// `findActiveTurnByNativeThreadId`: the active turn running on a native thread.
+fn active_turn_on_thread(state: &RuntimeState, thread: &str) -> Option<String> {
+    state
+        .turns
+        .values()
+        .find(|turn| {
+            let on = match &turn.subagent {
+                Some(child) => Some(child.as_str()),
+                None => turn
+                    .input
+                    .provider_thread
+                    .native_thread_ref
+                    .as_ref()
+                    .and_then(|native| native.native_id.as_ref())
+                    .map(|id| id.as_str()),
+            };
+            on == Some(thread)
+        })
+        .map(|turn| turn.native_turn.clone())
+}
+
+/// The request's prompt: what the user is asked to approve.
+fn approval_prompt(method: &str, params: &Value) -> Option<String> {
+    let text = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_owned);
+    match method {
+        // `payload.reason ?? payload.command.join(" ")`
+        "execCommandApproval" => text("reason").or_else(|| {
+            params
+                .get("command")
+                .and_then(Value::as_array)
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+        }),
+        "item/fileChange/requestApproval" | "applyPatchApproval" => {
+            codex_file_change_approval_prompt(params)
+        }
+        // `payload.reason ?? payload.command`
+        _ => text("reason").or_else(|| text("command")),
+    }
+}
+
+/// A request nobody can show is answered at once, so Codex does not wait on it: an
+/// elicitation is declined, anything else is a protocol error.
+fn reject_unanswered(state: &mut RuntimeState, request: &PendingRequest) {
+    let param = |key: &str| {
+        request
+            .params
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    let decision = match request.method.as_str() {
+        "mcpServer/elicitation/request" => {
+            tracing::warn!(
+                server_name = param("serverName"),
+                "Declined an MCP elicitation without an active Codex turn context."
+            );
+            Decision::Approval("decline")
+        }
+        "execCommandApproval" => Decision::Reject(format!(
+            "No active Codex turn context for exec approval thread {}.",
+            param("conversationId")
+        )),
+        "applyPatchApproval" => Decision::Reject(format!(
+            "No active Codex turn context for apply patch approval thread {}.",
+            param("conversationId")
+        )),
+        "item/fileChange/requestApproval" => Decision::Reject(format!(
+            "No active Codex turn context for file change approval turn {}.",
+            param("turnId")
+        )),
+        "item/permissions/requestApproval" => Decision::Reject(format!(
+            "No active Codex turn context for permissions approval turn {}.",
+            param("turnId")
+        )),
+        "item/tool/requestUserInput" => Decision::Reject(format!(
+            "No active Codex turn context for user input request turn {}.",
+            param("turnId")
+        )),
+        _ => Decision::Reject(format!(
+            "No active Codex turn context for approval turn {}.",
+            param("turnId")
+        )),
+    };
+    state.unanswered.push((request.id, decision));
+}
+
 /// Upstream `item/tool/requestUserInput`: a plan question is answered on the turn
 /// that asked it, with its node and item under that turn's root.
 fn project_user_input(
@@ -1596,10 +1720,9 @@ fn project_user_input(
     state: &mut RuntimeState,
     session_id: &ProviderSessionId,
 ) -> Vec<ProviderAdapterV2Event> {
-    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
-        return vec![];
-    };
-    let Some(turn) = state.turns.get_mut(native_turn) else {
+    let native_turn = request.params.get("turnId").and_then(Value::as_str);
+    let Some(turn) = native_turn.and_then(|native_turn| state.turns.get_mut(native_turn)) else {
+        reject_unanswered(state, &request);
         return vec![];
     };
     let native_item = request
@@ -1645,13 +1768,30 @@ fn project_request(
     state: &mut RuntimeState,
     session_id: &ProviderSessionId,
 ) -> Vec<ProviderAdapterV2Event> {
-    let Some(native_turn) = request.params.get("turnId").and_then(Value::as_str) else {
-        return vec![];
-    };
-    if runtime_kind(&request.method) == OrchestrationV2RuntimeRequestKind::UserInput {
+    if runtime_kind(&request.method, &request.params)
+        == OrchestrationV2RuntimeRequestKind::UserInput
+    {
         return project_user_input(request, state, session_id);
     }
-    let Some(context) = state.turns.get(native_turn) else {
+    // The legacy approvals name a conversation, not a turn: the active turn on that thread.
+    let native_turn = if is_legacy_approval(&request.method) {
+        request
+            .params
+            .get("conversationId")
+            .and_then(Value::as_str)
+            .and_then(|thread| active_turn_on_thread(state, thread))
+    } else {
+        request
+            .params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let Some(context) = native_turn
+        .as_deref()
+        .and_then(|native_turn| state.turns.get(native_turn))
+    else {
+        reject_unanswered(state, &request);
         return vec![];
     };
     let owner_native = subagent::owner_native_turn(state, context);
@@ -1676,15 +1816,15 @@ fn project_request(
             )
         }
     });
+    let param = |key: &str| request.params.get(key).and_then(Value::as_str);
+    // Legacy approvals name the item `callId`; their request is the approval, or the call.
     let native_item = elicitation_request
         .as_deref()
-        .or_else(|| request.params.get("itemId").and_then(Value::as_str));
+        .or_else(|| param("itemId").or_else(|| param("callId")));
     let native_req = elicitation_request.as_deref().or_else(|| {
-        request
-            .params
-            .get("approvalId")
-            .or_else(|| request.params.get("itemId"))
-            .and_then(Value::as_str)
+        param("approvalId")
+            .or_else(|| param("itemId"))
+            .or_else(|| param("callId"))
     });
     let parent_node = subagent::subagent_node(state, context).unwrap_or_else(|| {
         derive::node_from_provider_item(&driver(), native_item.or(native_req).unwrap_or_default())
@@ -1696,8 +1836,8 @@ fn project_request(
     let provider_turn_id = derive::provider_turn(&driver(), &owner_native);
     let id = IdAllocator.runtime_request(&driver(), Some(&provider_turn_id), native_req);
     state.requests.insert(id.clone(), request.id);
-    let kind = runtime_kind(&request.method);
-    let Some(item_kind) = approval_kind(&request.method) else {
+    let kind = runtime_kind(&request.method, &request.params);
+    let Some(item_kind) = approval_kind(&request.method, &request.params) else {
         return vec![];
     };
     let ordinal_key = format!(
@@ -1726,12 +1866,7 @@ fn project_request(
         )
     } else {
         (
-            request
-                .params
-                .get("reason")
-                .or_else(|| request.params.get("command"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            approval_prompt(&request.method, &request.params),
             None,
             None,
         )
@@ -1811,4 +1946,43 @@ fn project_request(
             runtime_request,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `providerRequestKindFromPermissions`.
+    #[test]
+    fn a_permissions_request_takes_the_kind_of_what_it_asks_for() {
+        let kind = |permissions: Value| {
+            runtime_kind(
+                "item/permissions/requestApproval",
+                &json!({"permissions": permissions}),
+            )
+        };
+        assert_eq!(
+            kind(json!({"fileSystem": {"write": ["/w"], "read": ["/r"]}})),
+            OrchestrationV2RuntimeRequestKind::FileChange
+        );
+        assert_eq!(
+            kind(json!({"fileSystem": {"read": ["/r"]}})),
+            OrchestrationV2RuntimeRequestKind::FileRead
+        );
+        assert_eq!(
+            kind(json!({"fileSystem": {"write": [], "read": []}})),
+            OrchestrationV2RuntimeRequestKind::Command
+        );
+        assert_eq!(
+            kind(json!({"network": {"enabled": true}})),
+            OrchestrationV2RuntimeRequestKind::Command
+        );
+        assert_eq!(
+            approval_kind(
+                "item/permissions/requestApproval",
+                &json!({"permissions": {"fileSystem": {"read": ["/r"]}}})
+            ),
+            Some(ProviderRequestKind::FileRead)
+        );
+    }
 }

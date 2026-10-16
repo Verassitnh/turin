@@ -555,8 +555,7 @@ pub fn register(
     let child_root =
         derive::node_from_provider_item(&driver(), &format!("{}:thread-root", spawn.native_item));
     let child_thread = derive::thread_from_provider_thread(&driver(), None, spawn.native_thread);
-    let provider_thread_id =
-        derive::provider_thread(&driver(), Some(&instance), spawn.native_thread);
+    let provider_thread_id = derive::provider_thread(&driver(), None, spawn.native_thread);
     let turn_item_id = derive::turn_item_from_provider_item(&driver(), &spawn.native_item);
     // Upstream `registerSubagentThread`: a spawn's model and effort are the child's
     // selection, unless the child has already reported one. The subagent is not

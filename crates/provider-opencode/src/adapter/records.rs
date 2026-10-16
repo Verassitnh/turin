@@ -447,12 +447,16 @@ pub fn user_input_questions(questions: &[Value]) -> Vec<OrchestrationV2UserInput
         .enumerate()
         .filter_map(|(index, question)| {
             // Upstream `header.trim() || Question ${n}`, and the question falls back to the header.
-            let header = question
+            let raw_header = question
                 .get("header")
                 .and_then(Value::as_str)
                 .map(js_trim)
-                .filter(|header| !header.is_empty())
-                .map_or_else(|| format!("Question {}", index + 1), str::to_owned);
+                .unwrap_or("");
+            let header = if raw_header.is_empty() {
+                format!("Question {}", index + 1)
+            } else {
+                raw_header.to_owned()
+            };
             let text = question
                 .get("question")
                 .and_then(Value::as_str)
@@ -489,7 +493,7 @@ pub fn user_input_questions(questions: &[Value]) -> Vec<OrchestrationV2UserInput
                 })
                 .collect();
             Some(OrchestrationV2UserInputQuestion {
-                id: TrimmedNonEmptyString::new(open_code_question_id(index, &header)).ok()?,
+                id: TrimmedNonEmptyString::new(open_code_question_id(index, raw_header)).ok()?,
                 header: TrimmedNonEmptyString::new(header).ok()?,
                 question: TrimmedNonEmptyString::new(text).ok()?,
                 options,
@@ -752,5 +756,16 @@ mod tests {
             .map(|option| option.label.as_str())
             .collect();
         assert_eq!(labels, ["Option", "Yes"]);
+    }
+
+    #[test]
+    fn a_blank_header_question_id_matches_the_answer_lookup_key() {
+        let questions = user_input_questions(&[json!({
+            "header": "",
+            "question": "pick one",
+            "options": [{"label": "Yes"}],
+        })]);
+        assert_eq!(questions[0].id.as_str(), "question-0");
+        assert_eq!(questions[0].header.as_str(), "Question 1");
     }
 }

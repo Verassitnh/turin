@@ -1467,17 +1467,30 @@ impl OpenCodeV1Session {
                 questions: user_input_questions(&questions),
             }
         } else {
+            let patterns: Vec<String> = props
+                .get("patterns")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect();
+            let permission = props
+                .get("permission")
+                .and_then(Value::as_str)
+                .unwrap_or("bash");
+            let prompt = if patterns.is_empty() {
+                permission.to_owned()
+            } else {
+                patterns.join("\n")
+            };
             RequestBody::Approval {
                 request_kind: match kind {
                     "file-read" => ProviderRequestKind::FileRead,
                     "file-change" => ProviderRequestKind::FileChange,
                     _ => ProviderRequestKind::Command,
                 },
-                title: props
-                    .get("permission")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                prompt: None,
+                title: Some(permission.to_owned()),
+                prompt: Some(prompt),
                 options: None,
             }
         };

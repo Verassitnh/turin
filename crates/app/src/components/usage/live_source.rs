@@ -13,22 +13,27 @@ use turin_contracts::provider_usage_limits::{
 };
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
 use turin_contracts::settings::ServerSettingsPatch;
-use turin_contracts::usage::{UsageSummary, UsageSummaryInput};
+use turin_contracts::usage::{UsageSourceAction, UsageSummary, UsageSummaryInput};
 use turin_shared::keybindings::{
     ResolvedKeybindingRule, compile_resolved_keybindings_config, default_keybinding_rules,
 };
 
 use super::backend::{
-    LimitsEnvironment, ResetCreditError, ResetCreditResult, UsageBackend,
+    LimitsEnvironment, LimitsProvider, ResetCreditError, ResetCreditResult, UsageBackend,
 };
 use super::usage_price_targets::{
     UsagePricePatch, UsagePriceTarget, UsageWriteError, UsageWriteOutcome,
 };
 use super::view_model::EnvironmentUsageStatus;
 use crate::app_runtime::write::bus::CommandBus;
+use crate::app_runtime::write::commands::CommandError;
 use crate::shell::usage_commands;
 use crate::state;
+use crate::state::helpers::usage::UsageLimitsRefresher;
 use crate::timestamp_format::TimestampFormat;
+use turin_provider_core::server_provider::{
+    ServerProvider, ServerProviderAuthStatus, ServerProviderState,
+};
 
 #[derive(Clone)]
 struct EnvironmentRow {
@@ -47,9 +52,61 @@ struct State {
     keybindings: Vec<ResolvedKeybindingRule>,
 }
 
+fn limits_provider_from_snapshot(provider: &ServerProvider) -> LimitsProvider {
+    LimitsProvider {
+        instance_id: provider.instance_id.clone(),
+        driver: provider.driver.clone(),
+        enabled: provider.enabled,
+        installed: provider.installed,
+        available: provider.is_available(),
+        display_name: provider
+            .display_name
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        accent_color: provider
+            .accent_color
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        authenticated: provider.auth.status == ServerProviderAuthStatus::Authenticated,
+        auth_email: provider
+            .auth
+            .email
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        auth_label: provider
+            .auth
+            .label
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        auth_workspace_id: provider
+            .auth
+            .workspace_id
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        subscription_sharing: provider.auth.subscription_sharing.unwrap_or(false),
+        usage_limits: provider.usage_limits.clone(),
+        slash_commands: provider
+            .slash_commands
+            .iter()
+            .map(|command| command.name.as_str().to_owned())
+            .collect(),
+    }
+}
+
+fn provider_snapshots(bus: &CommandBus) -> Vec<ServerProvider> {
+    let cached = bus.providers().borrow().iter().cloned().collect::<Vec<_>>();
+    if !cached.is_empty() {
+        return cached;
+    }
+    bus.commands()
+        .map(|commands| commands.provider_snapshots())
+        .unwrap_or_default()
+}
+
 pub struct LiveUsageBackend {
     bus: CommandBus,
     state: Rc<RefCell<State>>,
+    limits_refresher: UsageLimitsRefresher<Vec<ServerProvider>, String>,
 }
 
 impl LiveUsageBackend {
@@ -65,6 +122,7 @@ impl LiveUsageBackend {
                 windows: HashMap::new(),
                 keybindings: compile_resolved_keybindings_config(&default_keybinding_rules()),
             })),
+            limits_refresher: UsageLimitsRefresher::new(|| chrono::Utc::now().timestamp_millis()),
         }
     }
 
@@ -119,6 +177,7 @@ impl UsageBackend for LiveUsageBackend {
         let key = Self::window_key(window);
         let state = self.state.borrow();
         let cache = state.windows.get(&key);
+        let providers = provider_snapshots(&self.bus);
         state
             .environments
             .iter()
@@ -139,7 +198,14 @@ impl UsageBackend for LiveUsageBackend {
                     can_read_diagnostics: true,
                     is_connected: true,
                     error,
-                    needs_cursor_keychain_access: false,
+                    needs_cursor_keychain_access: summary.as_ref().is_some_and(|summary| {
+                        summary.sources.iter().any(|source| {
+                            source.action == Some(UsageSourceAction::EnableCursorKeychain)
+                        })
+                    }) && providers.iter().any(|provider| {
+                        provider.driver.as_str() == "cursor"
+                            && provider.status == ServerProviderState::Ready
+                    }),
                     summary,
                 }
             })
@@ -161,36 +227,70 @@ impl UsageBackend for LiveUsageBackend {
     }
 
     fn limits_environments(&self) -> Vec<LimitsEnvironment> {
-        Vec::new()
+        let providers: Vec<LimitsProvider> = provider_snapshots(&self.bus)
+            .into_iter()
+            .map(|provider| limits_provider_from_snapshot(&provider))
+            .collect();
+        self.state
+            .borrow()
+            .environments
+            .iter()
+            .map(|environment| LimitsEnvironment {
+                environment_id: environment.id.clone(),
+                label: environment.label.clone(),
+                connected: true,
+                has_server_config: true,
+                providers: providers.clone(),
+                usage_limit_sources: Default::default(),
+            })
+            .collect()
     }
 
     fn refresh_limits(
         &self,
-        _environment_id: EnvironmentId,
-        _automatic: bool,
-        _after_pending: bool,
+        environment_id: EnvironmentId,
+        automatic: bool,
+        after_pending: bool,
         cx: &mut App,
     ) -> Task<()> {
+        let bus = self.bus.clone();
+        let refresher = self.limits_refresher.clone();
         cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1))
+            let _ = refresher
+                .refresh(
+                    &environment_id,
+                    move || {
+                        let bus = bus.clone();
+                        async move {
+                            let commands = bus
+                                .commands()
+                                .map_err(|error: CommandError| error.message)?;
+                            Ok(commands.refresh_usage_limits().await)
+                        }
+                    },
+                    automatic,
+                    after_pending,
+                )
                 .await;
+            cx.update(|_| ());
         })
     }
 
     fn consume_reset_credit(
         &self,
         _environment_id: EnvironmentId,
-        _input: ProviderConsumeResetCreditInput,
+        input: ProviderConsumeResetCreditInput,
         cx: &mut App,
     ) -> Task<ResetCreditResult> {
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1))
-                .await;
-            Err(ResetCreditError::Message(
-                "Reset credit is not wired yet.".into(),
-            ))
+        let bus = self.bus.clone();
+        cx.spawn(async move |_cx| {
+            let commands = bus.commands().map_err(|error| {
+                ResetCreditError::Message(error.message)
+            })?;
+            commands
+                .consume_reset_credit(input)
+                .await
+                .map_err(|error| ResetCreditError::Message(error.message))
         })
     }
 

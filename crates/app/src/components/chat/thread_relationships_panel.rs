@@ -180,6 +180,13 @@ impl ThreadRelationshipsPanel {
         self
     }
 
+    /// Replace the projected snapshot while keeping wired actions.
+    pub fn reload(&mut self, snapshot: LineagePanelSnapshot, cx: &mut Context<Self>) {
+        let actions = self.actions.clone();
+        *self = Self::new(snapshot).actions(actions);
+        cx.notify();
+    }
+
     /// The caller's `mergeBack` / `stopSession` command settled.
     #[allow(dead_code)]
     pub fn finish_busy_action(&mut self, cx: &mut Context<Self>) {

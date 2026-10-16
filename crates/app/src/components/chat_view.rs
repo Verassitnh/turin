@@ -23,7 +23,10 @@ use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
 use super::chat::live_chat::LiveChat;
+use super::chat::live_lineage::lineage_panel_snapshot;
 use super::chat::live_wiring::{live_overlay_banners, subagent_bar_from_state};
+use super::chat::thread_navigation::request_open_thread;
+use super::chat::thread_relationships_panel::{LineageActions, ThreadRelationshipsPanel};
 use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::{
     get_provider_status_banner_key, should_show_provider_status_banner,
@@ -49,6 +52,7 @@ use crate::app_runtime::write::bus::CommandBus;
 use crate::composer::catalog::{
     CompatibilityAdvisory, CompatibilityAdvisoryStatus, ProviderInstanceEntry,
 };
+use crate::composer::live_catalog::provider_entries;
 use crate::composer::mock_source::MockComposerSource;
 use crate::composer::views::chat_composer::ChatComposer;
 use crate::state::store::ClientStore;
@@ -361,10 +365,49 @@ impl ChatView {
         } else {
             selection_toolbar_demo()
         };
+        let live_lineage_panel = live_target.as_ref().and_then(|live| {
+            if !self.thread_details_open {
+                return None;
+            }
+            let thread_id = live.thread.as_ref()?;
+            let state = live.client.read(cx).state();
+            let providers = provider_entries(&live.bus.providers().borrow());
+            let driver = state.thread(thread_id).and_then(|entry| {
+                let projection = entry.state.data.as_ref()?;
+                let instance_id = projection.thread.model_selection.instance_id.as_str();
+                providers
+                    .iter()
+                    .find(|entry| entry.instance_id == instance_id)
+                    .map(|entry| entry.driver_kind.clone())
+            });
+            let snapshot = lineage_panel_snapshot(state, thread_id, driver)?;
+            let open_thread = Rc::new(|id: &ThreadId, _: &mut Window, cx: &mut App| {
+                request_open_thread(id.as_str(), cx);
+            });
+            let panel = window.use_keyed_state(
+                format!("live-thread-lineage:{}", thread_id.as_str()),
+                cx,
+                |_, _| {
+                    ThreadRelationshipsPanel::new(snapshot.clone()).actions(LineageActions {
+                        open_thread: Some(open_thread.clone()),
+                        ..Default::default()
+                    })
+                },
+            );
+            panel.update(cx, |panel, cx| panel.reload(snapshot, cx));
+            Some(panel)
+        });
         let details_card = demo_card.map(|(_, _, card)| card).or_else(|| {
-            self.thread_details_open
-                .then(|| self.git_host.read(cx).details_card(cx))
-                .flatten()
+            if !self.thread_details_open {
+                return None;
+            }
+            if live_target.is_some() {
+                self.git_host
+                    .read(cx)
+                    .details_card_with_lineage(live_lineage_panel, cx)
+            } else {
+                self.git_host.read(cx).details_card(cx)
+            }
         });
         div()
             .flex()

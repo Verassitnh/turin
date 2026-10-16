@@ -282,6 +282,14 @@ impl ChatGitHost {
 
     /// The thread details card, anchored top right of the chat canvas.
     pub fn details_card(&self, cx: &gpui_kit::App) -> Option<AnyElement> {
+        self.details_card_with_lineage(None, cx)
+    }
+
+    pub fn details_card_with_lineage(
+        &self,
+        lineage: Option<gpui_kit::Entity<crate::components::chat::thread_relationships_panel::ThreadRelationshipsPanel>>,
+        cx: &gpui_kit::App,
+    ) -> Option<AnyElement> {
         let (workspace, branch, git) = (
             self.workspace_toolbar.as_ref()?,
             self.branch_toolbar.as_ref()?,
@@ -319,6 +327,7 @@ impl ChatGitHost {
                     div()
                         .flex()
                         .flex_col()
+                        .children(lineage.map(|panel| panel.clone()))
                         .child(section(false).child(workspace.clone()))
                         .child(section(true).child(branch.clone()).child(git.clone())),
                 )

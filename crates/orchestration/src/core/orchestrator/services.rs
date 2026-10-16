@@ -1,4 +1,5 @@
-//! Narrow seams between the orchestrator decider and the turn, recovery and
+//! Turin seams with no single upstream file (the Effect context in
+//! upstream/apps/server/src/orchestration-v2/Orchestrator.ts). Narrow seams between the orchestrator decider and the turn, recovery and
 //! continuation services. Upstream: `ProviderTurnStartService.ts`,
 //! `ProviderTurnControlService.ts`, `RuntimeRequestService.ts`,
 //! `ProviderRuntimeRecoveryService.ts`, `RestartContinuation.ts`,

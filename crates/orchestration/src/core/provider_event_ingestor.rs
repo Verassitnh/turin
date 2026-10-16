@@ -391,7 +391,7 @@ impl ProviderEventIngestor {
         };
         let write = WriteInput {
             command_id: input.command_id.clone(),
-            events: events.clone(),
+            events,
             effects: Vec::new(),
             guard_pending_user_input_cancellations: true,
         };
@@ -525,16 +525,22 @@ fn event_driver(
     }
 }
 
-/// Thread, run and node of a plan artifact, read through its wire shape.
+/// Thread, run and node of a plan artifact.
 fn plan_scope(plan: &OrchestrationV2PlanArtifact) -> (ThreadId, Option<RunId>, Option<NodeId>) {
-    let value = serde_json::to_value(plan).unwrap_or(Value::Null);
-    let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
-    let thread_id = text("threadId")
-        .and_then(|id| ThreadId::new(id).ok())
-        .unwrap_or_else(|| ThreadId::new("thread:unknown").expect("static id"));
-    let run_id = text("runId").and_then(|id| RunId::new(id).ok());
-    let node_id = text("nodeId").and_then(|id| NodeId::new(id).ok());
-    (thread_id, run_id, node_id)
+    match plan {
+        OrchestrationV2PlanArtifact::ProposedPlan {
+            thread_id,
+            run_id,
+            node_id,
+            ..
+        }
+        | OrchestrationV2PlanArtifact::TodoList {
+            thread_id,
+            run_id,
+            node_id,
+            ..
+        } => (thread_id.clone(), run_id.clone(), Some(node_id.clone())),
+    }
 }
 
 /// `normalize`: the mapping from provider events to domain events. Every
@@ -550,7 +556,10 @@ async fn normalize(
             let existing = reads.app_thread(&app_thread.id).await?;
             if let Some(existing) = &existing
                 && existing.title == app_thread.title
-                && existing.model_selection == app_thread.model_selection
+                && turin_shared::model::model_selections_equal(
+                    &existing.model_selection,
+                    &app_thread.model_selection,
+                )
             {
                 return Ok(Vec::new());
             }

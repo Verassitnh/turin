@@ -4,7 +4,8 @@
 //! pending merge-back for the same pair is superseded first, so only the newest
 //! transfer stays pending.
 //!
-//! Not ported: the dispatch mode limit check (see `thread_fork`).
+//! The dispatch mode limit is checked against the source thread (see
+//! `thread_fork`).
 
 use turin_contracts::orchestration_v2::{
     OrchestrationV2Command as C, OrchestrationV2ContextTransfer,

@@ -332,7 +332,11 @@ fn wire_text<T: Serialize>(value: &T) -> String {
 
 /// `compactText`. Lengths are UTF-16 code units, as in JavaScript.
 fn compact_text(text: &str, max_length: usize) -> String {
-    let compacted = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compacted = text
+        .split(turin_contracts::base_schemas::is_js_whitespace)
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let units: Vec<u16> = compacted.encode_utf16().collect();
     if units.len() <= max_length {
         return compacted;
@@ -666,5 +670,17 @@ mod tests {
             handoff.strategy,
             OrchestrationV2ContextHandoffStrategy::DeltaSinceTargetLastSeen
         );
+    }
+}
+
+#[cfg(test)]
+mod js_whitespace_tests {
+    use super::compact_text;
+
+    /// `text.replace(/\s+/g, " ").trim()`: U+FEFF is whitespace, U+0085 is not.
+    #[test]
+    fn compact_text_collapses_js_whitespace_only() {
+        assert_eq!(compact_text("\u{feff} a \n\t b\u{a0}c ", 240), "a b c");
+        assert_eq!(compact_text("a\u{85}b", 240), "a\u{85}b");
     }
 }

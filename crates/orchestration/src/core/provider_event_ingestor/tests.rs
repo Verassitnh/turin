@@ -566,3 +566,53 @@ fn analytics_properties_carry_usage_model_and_duration() {
     assert_eq!(properties["effort"], "high");
     assert_eq!(properties["durationMs"], 2_500);
 }
+
+#[tokio::test]
+async fn an_item_of_a_child_node_keeps_its_own_run_and_node_ids() {
+    let mut item = crate::projection::test_support::turn_item(
+        "thread:a",
+        "item:child-file",
+        Some("run:child"),
+        3,
+        "file_change",
+        "completed",
+        json!({"fileName": "a.txt"}),
+    );
+    item["nodeId"] = json!("node:child");
+    // The subscriber's input names the root run and node; the item's own win.
+    let events = normalize_with(
+        ingestor_reads(None),
+        &input(json!({"type": "turn_item.updated", "driver": "codex", "turn_item": item})),
+    )
+    .await;
+    let [
+        OrchestrationV2DomainEvent::TurnItemUpdated {
+            run_id, node_id, ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one turn item event: {events:?}");
+    };
+    assert_eq!(
+        run_id.as_ref().map(ToString::to_string).as_deref(),
+        Some("run:child")
+    );
+    assert_eq!(
+        node_id.as_ref().map(ToString::to_string).as_deref(),
+        Some("node:child")
+    );
+}
+
+#[tokio::test]
+async fn an_app_thread_whose_options_only_reorder_is_unchanged() {
+    let existing = app_thread("Same");
+    let mut offered = existing.clone();
+    // Option order and an omitted empty list are presentation, not a change.
+    offered.model_selection.options = Some(Vec::new());
+    let events = normalize_with(
+        ingestor_reads(Some(existing)),
+        &input(json!({"type": "app_thread.created", "driver": "codex", "app_thread": offered})),
+    )
+    .await;
+    assert!(events.is_empty(), "{events:?}");
+}

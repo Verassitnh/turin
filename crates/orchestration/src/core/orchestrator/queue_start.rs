@@ -135,7 +135,7 @@ pub(super) async fn decide(
 }
 
 /// The latest `lastError` of a session on the thread's current provider.
-fn session_error(projection: &OrchestrationV2ThreadProjection) -> Option<String> {
+pub(super) fn session_error(projection: &OrchestrationV2ThreadProjection) -> Option<String> {
     projection
         .provider_sessions
         .iter()
@@ -624,7 +624,6 @@ impl Orchestrator {
             None => prepare_root_scope_raw(
                 self,
                 &projection.thread,
-                None,
                 &queued_run.id,
                 &root_node.id,
                 &queued_provider_thread.id,

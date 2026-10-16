@@ -941,6 +941,59 @@ async fn a_detach_that_releases_the_session_reads_the_detached_threads_roster() 
     );
 }
 
+/// Upstream `removeLiveEntry` also refuses an idle removal while turns are
+/// busy: `mark_busy` does not bump the idle generation.
+#[tokio::test]
+async fn an_idle_removal_never_takes_a_session_with_a_busy_turn() {
+    let harness = harness(vec![FakeRuntime::new(session("provider-session:1", false))]);
+    harness
+        .manager
+        .open(open_input("thread:a", "provider-session:1"))
+        .await
+        .expect("open");
+    let id = provider_session_id("provider-session:1");
+    let live = harness
+        .manager
+        .inner
+        .get_session(&id)
+        .expect("live session");
+    let generation = live.state.lock().idle_generation;
+    let request = || ReleaseRequest {
+        provider_session_id: id.clone(),
+        reason: ProviderSessionReleaseReason::IdleTimeout,
+        detail: None,
+        graceful_subscribers: true,
+        only_if_idle_generation: Some(generation),
+        origin: ReleaseOrigin::IdleTimer,
+        detached_thread_id: None,
+    };
+
+    harness.manager.inner.mark_busy(
+        &live,
+        (
+            turin_contracts::ProviderThreadId::new("provider-thread:1").expect("id"),
+            1,
+        ),
+    );
+    assert!(
+        harness
+            .manager
+            .inner
+            .remove_live_session(&request())
+            .is_none(),
+        "a busy session stays"
+    );
+    assert!(harness.manager.get(&id).is_some());
+    live.state.lock().busy_turns.clear();
+    assert!(
+        harness
+            .manager
+            .inner
+            .remove_live_session(&request())
+            .is_some()
+    );
+}
+
 #[tokio::test]
 async fn shutdown_releases_every_session_with_server_shutdown() {
     let harness = harness(vec![FakeRuntime::new(session("provider-session:1", false))]);

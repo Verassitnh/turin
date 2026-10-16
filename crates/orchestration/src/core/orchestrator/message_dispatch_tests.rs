@@ -237,6 +237,32 @@ async fn a_message_starts_a_run_and_queues_its_provider_turn_effect() {
 }
 
 #[tokio::test]
+async fn a_started_runs_provider_thread_event_names_the_adapter_driver() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create", "thread:driver", "Thread"))
+        .await
+        .expect("create commits");
+    let result = orchestrator
+        .dispatch(message_command("command:first", "thread:driver", json!({})))
+        .await
+        .expect("the start commits");
+    let driver = result
+        .stored_events
+        .iter()
+        .find_map(|stored| match &stored.event {
+            OrchestrationV2DomainEvent::ProviderThreadUpdated { driver, .. } => {
+                Some(driver.clone())
+            }
+            _ => None,
+        });
+    assert_eq!(
+        driver.flatten().map(|driver| driver.to_string()),
+        Some("codex".to_owned())
+    );
+}
+
+#[tokio::test]
 async fn a_first_message_on_a_fresh_thread_does_not_unsnooze_it() {
     let (orchestrator, _) = harness().await;
     orchestrator

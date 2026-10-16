@@ -60,7 +60,8 @@ use crate::pipeline::notification_mailbox::is_undelivered_mailbox_steer;
 use crate::pipeline::orchestrator_port::OrchestratorError;
 use crate::pipeline::runtime_policy::{self, RuntimePolicyOverride};
 use turin_shared::orchestration_v2_thread_error::{
-    latest_executed_run, latest_root_provider_failure, run_ran_after, usage_limit_blocked_run,
+    latest_executed_run, latest_root_provider_failure, latest_unheld_run, run_ran_after,
+    thread_error_summary, usage_limit_blocked_run, usage_limit_run_presented_as_latest,
 };
 
 use super::Orchestrator;
@@ -216,10 +217,25 @@ pub(super) async fn dispatch_message(
             .snoozed_until
             .flatten()
             .is_some_and(|until| millis(until) > millis(now));
+        // The thread shell's `lastErrorClass`: a distinct provider-session error
+        // supersedes the limit, so the resume no longer applies.
+        let session_error = super::queue_start::session_error(&projection);
+        let presented_latest = usage_limit_run_presented_as_latest(
+            &projection.runs,
+            &projection.turn_items,
+            session_error.as_deref(),
+        )
+        .or_else(|| latest_unheld_run(&projection.runs));
+        let shell_error_class = thread_error_summary(
+            latest_root_provider_failure(presented_latest, &projection.turn_items),
+            session_error.as_deref(),
+        )
+        .last_error_class;
         let blocked = run.is_none_or(|run| &run.id != source_id)
             || failure.is_none_or(|failure| {
                 failure.class != OrchestrationV2ProviderFailureClass::UsageLimit
             })
+            || shell_error_class != Some(OrchestrationV2ProviderFailureClass::UsageLimit)
             || recovery.as_ref().is_none_or(|recovery| {
                 !recovery.auto_resume
                     || Some(&recovery.run_id) != run.map(|run| &run.id)
@@ -891,7 +907,13 @@ pub(super) fn is_blocking_run(run: &OrchestrationV2Run) -> bool {
 
 /// `isNativeMaintenanceCommand`: `/compact` and `/logout` without attachments.
 pub(crate) fn is_native_maintenance_command(text: &str, attachments: &[ChatAttachment]) -> bool {
-    attachments.is_empty() && matches!(text.trim().to_lowercase().as_str(), "/compact" | "/logout")
+    attachments.is_empty()
+        && matches!(
+            turin_contracts::base_schemas::js_trim(text)
+                .to_lowercase()
+                .as_str(),
+            "/compact" | "/logout"
+        )
 }
 
 pub(super) fn emit_thread_event(
@@ -1167,8 +1189,6 @@ async fn start_run(
                 orchestrator,
                 command,
                 projection,
-                requested_model,
-                None,
                 &run_id,
                 &root_node_id,
                 &provider_thread_id,
@@ -1312,7 +1332,7 @@ async fn start_run(
         thread_id: thread.id.clone(),
         run_id: None,
         node_id: None,
-        driver: None,
+        driver: Some(adapter.driver().clone()),
         provider_instance_id: Some(instance.clone()),
         raw_event_id: None,
         occurred_at: now,
@@ -1774,8 +1794,6 @@ async fn queue_run(
                 orchestrator,
                 command,
                 projection,
-                input.model_selection,
-                selected_session.map(|session| session.cwd.to_string()),
                 &run_id,
                 &root_node_id,
                 &provider_thread.id,
@@ -1972,24 +1990,20 @@ async fn queue_run(
 
 /// `checkpointService.prepareRootRunScope` for a queued or started root run.
 /// The cwd follows `RuntimePolicyV2.resolve`: the thread's worktree, else the
-/// project root; the provider session's cwd wins over both, as upstream.
-#[allow(clippy::too_many_arguments)]
+/// project root. The resolved policy cwd always wins (upstream only falls back
+/// to the provider session's cwd when the policy has none).
 pub(super) async fn prepare_root_scope(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     projection: &OrchestrationV2ThreadProjection,
-    model_selection: &ModelSelection,
-    session_cwd: Option<String>,
     run_id: &RunId,
     root_node_id: &NodeId,
     provider_thread_id: &ProviderThreadId,
     now: UtcDateTime,
 ) -> Result<OrchestrationV2CheckpointScope, OrchestratorError> {
-    let _ = model_selection;
     prepare_root_scope_raw(
         orchestrator,
         &projection.thread,
-        session_cwd,
         run_id,
         root_node_id,
         provider_thread_id,
@@ -2003,7 +2017,6 @@ pub(super) async fn prepare_root_scope(
 pub(super) async fn prepare_root_scope_raw(
     orchestrator: &Orchestrator,
     thread: &OrchestrationV2AppThread,
-    session_cwd: Option<String>,
     run_id: &RunId,
     root_node_id: &NodeId,
     provider_thread_id: &ProviderThreadId,
@@ -2022,7 +2035,7 @@ pub(super) async fn prepare_root_scope_raw(
         None,
         &RuntimePolicyOverride::default(),
     );
-    let cwd = session_cwd.unwrap_or(policy.cwd);
+    let cwd = policy.cwd;
     orchestrator
         .seams
         .checkpoints

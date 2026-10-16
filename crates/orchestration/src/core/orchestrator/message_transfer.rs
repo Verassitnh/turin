@@ -764,8 +764,6 @@ pub(super) async fn start_run_with_transfers(
         orchestrator,
         command,
         projection,
-        requested_model,
-        None,
         &run_id,
         &root_node_id,
         &provider_thread.id,

@@ -260,7 +260,7 @@ pub(super) async fn respond(
             let answer = answers
                 .and_then(|answers| answers.get(question.id.as_str()))
                 .and_then(|answer| answer.as_str())
-                .map(str::trim)
+                .map(turin_contracts::base_schemas::js_trim)
                 .filter(|answer| !answer.is_empty());
             let Some(answer) = answer else {
                 if question.required == Some(false) {

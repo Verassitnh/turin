@@ -85,7 +85,7 @@ impl SwitchAdapters for ProviderAdapterRegistry {
     async fn metadata(&self, instance_id: &ProviderInstanceId) -> Option<ProviderAdapterMetadata> {
         // Upstream falls back to `get` + `getCapabilities` when the registry has
         // no metadata lookup. Turin's registry always has one, so that fallback
-        // is not ported (see the handoff's Deviations).
+        // is not ported (see docs/handoff/T13e.md, Deviations).
         self.get_metadata(instance_id).await.ok()
     }
 

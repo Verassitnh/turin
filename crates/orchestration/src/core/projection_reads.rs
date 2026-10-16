@@ -1,4 +1,5 @@
-//! Projection reads the orchestrator core needs, implemented over T13a's
+//! Turin seam, no upstream counterpart (upstream reads `ProjectionStoreV2`
+//! directly). Projection reads the orchestrator core needs, implemented over T13a's
 //! `ProjectionStore`. Upstream reads these through `ProjectionStoreV2` inside
 //! `ProviderSessionManager` and `ProviderTurnControlService`; here the
 //! session manager depends on the [`ProviderSessionReads`] trait and this

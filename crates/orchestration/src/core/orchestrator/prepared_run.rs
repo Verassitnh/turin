@@ -209,8 +209,6 @@ async fn release(
         orchestrator,
         command,
         &projection,
-        &state.run.model_selection,
-        None,
         &state.run.id,
         &state.root_node.id,
         &state.provider_thread.id,

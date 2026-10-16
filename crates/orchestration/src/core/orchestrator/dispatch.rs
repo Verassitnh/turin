@@ -1,4 +1,5 @@
-//! The command path of upstream `Orchestrator.ts`: `dispatchWithReceipt`
+//! Port of upstream/apps/server/src/orchestration-v2/Orchestrator.ts, the
+//! command path: `dispatchWithReceipt`
 //! (receipt replay, the per-thread lock, the rejected-command record and the
 //! commit) and `dispatchOnce` (routing to a handler).
 //!
@@ -669,9 +670,9 @@ async fn dispatch_locked(
     })
 }
 
-/// What upstream runs after a command commits (or replays). `queue.resume`
+/// What upstream runs after a command commits or replays: `queue.resume`
 /// starts the thread's next queued run, still under the command's lock.
-async fn run_post_commit_hooks(
+async fn run_replay_hooks(
     orchestrator: &Orchestrator,
     command_id: &CommandId,
     command_type: &str,
@@ -683,6 +684,19 @@ async fn run_post_commit_hooks(
             .await
             .map_err(|cause| dispatch_error(command_id, command_type, cause))?;
     }
+    Ok(())
+}
+
+/// What upstream runs after a fresh commit only: the replay hooks, then the
+/// delegated-completion wake offers of `notification.delivery.accept` and
+/// `delegated_task.wake-policy`. A replay does not repeat the offers.
+async fn run_post_commit_hooks(
+    orchestrator: &Orchestrator,
+    command_id: &CommandId,
+    command_type: &str,
+    thread_id: &ThreadId,
+) -> Result<(), OrchestratorError> {
+    run_replay_hooks(orchestrator, command_id, command_type, thread_id).await?;
     // A task wake policy names its parent thread, which is the command's thread.
     if matches!(
         command_type,
@@ -729,7 +743,7 @@ async fn replay_receipt(
         .read_by_command_id(&command_id)
         .await
         .map_err(|cause| dispatch_error(&command_id, &command_type, cause))?;
-    run_post_commit_hooks(orchestrator, &command_id, &command_type, &thread_id).await?;
+    run_replay_hooks(orchestrator, &command_id, &command_type, &thread_id).await?;
     Ok(DispatchResult {
         sequence: receipt.result_sequence,
         stored_events,

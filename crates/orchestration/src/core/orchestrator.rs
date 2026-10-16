@@ -33,6 +33,8 @@ mod subagent_followup;
 mod subagent_followup_tests;
 pub(crate) use message_dispatch::is_native_maintenance_command;
 #[cfg(test)]
+mod js_whitespace_tests;
+#[cfg(test)]
 mod message_dispatch_tests;
 #[cfg(test)]
 mod message_plan_tests;
@@ -80,6 +82,8 @@ mod thread_fork;
 mod thread_lifecycle;
 mod thread_merge_back;
 mod thread_metadata;
+#[cfg(test)]
+mod thread_metadata_tests;
 mod thread_mutation;
 mod thread_pull_request;
 #[cfg(test)]

@@ -64,12 +64,14 @@ pub(super) struct SteerInput {
 
 /// A native `/goal` command. It changes the provider's goal, so it never
 /// steers a running turn (`isGoalCommand`).
-fn is_goal_command(text: &str, attachments: &[ChatAttachment]) -> bool {
-    let text = text.trim();
+pub(super) fn is_goal_command(text: &str, attachments: &[ChatAttachment]) -> bool {
+    let text = turin_contracts::base_schemas::js_trim(text);
     attachments.is_empty()
-        && text
-            .strip_prefix("/goal")
-            .is_some_and(|rest| rest.chars().next().is_none_or(char::is_whitespace))
+        && text.strip_prefix("/goal").is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(turin_contracts::base_schemas::is_js_whitespace)
+        })
 }
 
 fn status_text<T: serde::Serialize>(status: &T) -> String {
@@ -99,7 +101,7 @@ pub(super) async fn steer_into_run(
     if is_native_maintenance_command(text, attachments) {
         return Err(dispatch_failure(
             command,
-            if text.trim().to_lowercase() == "/compact" {
+            if turin_contracts::base_schemas::js_trim(text).to_lowercase() == "/compact" {
                 "Context compaction must run as a separate turn. Queue it or wait for the active turn to finish."
             } else {
                 "Signing out must run as a separate turn. Queue it or wait for the active turn to finish."
@@ -120,7 +122,9 @@ pub(super) async fn steer_into_run(
     {
         return Err(dispatch_failure(
             command,
-            if target_message.text.trim().to_lowercase() == "/compact" {
+            if turin_contracts::base_schemas::js_trim(&target_message.text).to_lowercase()
+                == "/compact"
+            {
                 "Wait for context compaction to finish before steering the thread."
             } else {
                 "Wait for sign-out to finish before steering the thread."
@@ -507,8 +511,6 @@ pub(super) async fn steer_into_run(
         orchestrator,
         command,
         projection,
-        &input.model_selection,
-        None,
         &target_run.id,
         &next_root_node_id,
         &restart_provider_thread.id,

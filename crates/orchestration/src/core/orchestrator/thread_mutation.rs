@@ -374,7 +374,7 @@ pub(super) async fn decide(
             interaction_mode,
             ..
         } => {
-            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let thread = load_thread(orchestrator, command, thread_id).await?;
             let now = decision.now();
             let updated = OrchestrationV2AppThread {
                 interaction_mode: *interaction_mode,
@@ -388,7 +388,7 @@ pub(super) async fn decide(
             runtime_mode,
             ..
         } => {
-            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let thread = load_thread(orchestrator, command, thread_id).await?;
             let now = decision.now();
             let updated = OrchestrationV2AppThread {
                 runtime_mode: *runtime_mode,
@@ -433,7 +433,7 @@ pub(super) async fn decide(
             model_selection,
             ..
         } => {
-            let thread = load_live_thread(orchestrator, command, thread_id).await?;
+            let thread = load_thread(orchestrator, command, thread_id).await?;
             let always_switch = matches!(client_of(command), Some(C::ProviderSwitch { .. }));
             // The target instance must exist, and the planner decides how the
             // live sessions move.

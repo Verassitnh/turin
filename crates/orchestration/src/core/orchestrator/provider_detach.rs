@@ -1,4 +1,5 @@
-//! Provider-session detach for thread-row commands: the `detachSessionIds`
+//! Port of upstream/apps/server/src/orchestration-v2/Orchestrator.ts
+//! (`detachSessionIds`). Provider-session detach for thread-row commands: the `detachSessionIds`
 //! block of upstream `Orchestrator.ts`. Each live session gets one
 //! `provider-session.detached` event and one `provider-session.detach` effect.
 //! The effect is what stops the live process (T13e's executor runs it).

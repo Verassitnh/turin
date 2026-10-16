@@ -1,3 +1,4 @@
+//! Port of upstream/apps/server/src/orchestration-v2/EffectWorker.ts (240-335).
 //! The `provider-turn.steer` effect's two after-effects, from upstream
 //! `EffectWorker.ts` (240-335):
 //!

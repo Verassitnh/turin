@@ -19,7 +19,7 @@ use turin_orchestration::core::run_finalization_service::{
 use turin_orchestration::pipeline::orchestrator_port::BoxError;
 use turin_orchestration::pipeline::seams::{
     ProjectDirectory, ProjectSummary, ProviderSessionLookup, RuntimeTaskStopper,
-    ServerSettingsSource, SessionTaskStopper, instance_enabled_for_project,
+    ServerSettingsSource, SessionTaskStopper,
 };
 use turin_orchestration::projection::project_store::ProjectStore;
 use turin_orchestration::reactors::checkpoint_service::{self, CheckpointService};
@@ -119,11 +119,25 @@ impl ProviderInstanceSettings for HostSettings {
         instance_id: &ProviderInstanceId,
     ) -> Result<bool, BoxError> {
         let settings = self.0.settings().await;
-        Ok(!instance_enabled_for_project(
-            &settings,
-            project_id,
-            instance_id,
-        ))
+        // Only an explicit turn-off holds the queue: an instance with no
+        // settings entry was already admitted when the message was queued
+        // (`startNextQueuedRun`), unlike `instance_enabled_for_project`, which
+        // reads an unconfigured custom instance as off.
+        let project_override = settings
+            .project_settings_overrides
+            .get(project_id)
+            .and_then(|overrides| overrides.provider_instances.as_ref())
+            .and_then(|instances| instances.get(instance_id))
+            .and_then(|instance| instance.enabled);
+        Ok(match project_override {
+            Some(enabled) => !enabled,
+            None => settings
+                .provider_instances
+                .get(instance_id)
+                .is_some_and(|instance| {
+                    !turin_contracts::settings::resolve_provider_instance_enabled(instance)
+                }),
+        })
     }
 }
 

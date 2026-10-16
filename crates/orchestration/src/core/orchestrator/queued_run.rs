@@ -207,7 +207,7 @@ async fn edit(
     attachments: Option<&[ChatAttachment]>,
     context: Option<&OrchestrationMessageContext>,
 ) -> Result<(), OrchestratorError> {
-    if text.trim().is_empty() {
+    if turin_contracts::base_schemas::js_trim(text).is_empty() {
         return Err(dispatch_failure(
             command,
             format!("Queued run {run_id} cannot be edited to an empty message."),

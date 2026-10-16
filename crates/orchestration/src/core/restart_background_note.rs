@@ -26,7 +26,11 @@ const MAX_NOTE_ENTRIES: usize = 10;
 /// `compactLabel`: collapses whitespace and truncates with an ellipsis.
 /// Upstream counts UTF-16 units; this counts scalar values (see PORTING.md).
 fn compact_label(value: Option<&str>) -> Option<String> {
-    let collapsed = value?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = value?
+        .split(turin_contracts::base_schemas::is_js_whitespace)
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let text = js_trim(&collapsed);
     if text.is_empty() {
         return None;
@@ -852,5 +856,20 @@ mod tests {
             )
             .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod js_whitespace_tests {
+    use super::compact_label;
+
+    #[test]
+    fn compact_label_collapses_js_whitespace_only() {
+        assert_eq!(
+            compact_label(Some("\u{feff} build \n  all ")).as_deref(),
+            Some("build all")
+        );
+        assert_eq!(compact_label(Some("a\u{85}b")).as_deref(), Some("a\u{85}b"));
+        assert_eq!(compact_label(Some("\u{feff}\n")), None);
     }
 }

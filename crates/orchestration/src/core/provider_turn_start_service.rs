@@ -654,7 +654,8 @@ impl ProviderTurnStartService {
 
         if message.attachments.is_empty() && message.text.trim_start().starts_with('/') {
             let is_empty_compaction =
-                message.text.trim().to_lowercase() == "/compact" && !projection.has_conversation;
+                turin_contracts::base_schemas::js_trim(&message.text).to_lowercase() == "/compact"
+                    && !projection.has_conversation;
             // Preparing a run may already point the thread at a newly selected
             // provider. Account commands still belong to its last native session.
             let native_threads: Vec<&OrchestrationV2ProviderThread> = projection
@@ -768,7 +769,8 @@ impl ProviderTurnStartService {
                             },
                             None => SettleItem::Command {
                                 title: "Provider signed out".to_owned(),
-                                input: message.text.trim().to_owned(),
+                                input: turin_contracts::base_schemas::js_trim(&message.text)
+                                    .to_owned(),
                                 output: "Provider signed out".to_owned(),
                                 exit_code: 0,
                             },
@@ -1398,7 +1400,8 @@ impl ProviderTurnStartService {
             .iter()
             .filter(|candidate| {
                 candidate.attachments.is_empty()
-                    && candidate.text.trim().to_lowercase() == "/compact"
+                    && turin_contracts::base_schemas::js_trim(&candidate.text).to_lowercase()
+                        == "/compact"
             })
             .map(|candidate| candidate.id.clone())
             .collect();
@@ -1694,7 +1697,9 @@ fn ready_handoffs(
                                     && projection.messages.iter().any(|message| {
                                         message.id == source.user_message_id
                                             && message.attachments.is_empty()
-                                            && message.text.trim().to_lowercase() == "/compact"
+                                            && turin_contracts::base_schemas::js_trim(&message.text)
+                                                .to_lowercase()
+                                                == "/compact"
                                     })))
                         })))
         })

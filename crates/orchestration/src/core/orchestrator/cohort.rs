@@ -1,4 +1,5 @@
-//! Delegated-completion cohort disposal and queued-run cancellation, the
+//! Port of upstream/apps/server/src/orchestration-v2/Orchestrator.ts (shared
+//! helpers). Delegated-completion cohort disposal and queued-run cancellation, the
 //! helpers `Orchestrator.ts` shares between archive, stop and the queue
 //! commands: `disposeDelegatedCompletionCohort` (2129),
 //! `disposeAllDelegatedCompletionCohorts` (2212), `completionDeliveryRun`

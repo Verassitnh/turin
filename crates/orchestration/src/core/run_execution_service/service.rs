@@ -521,7 +521,8 @@ impl RunExecutionService {
             app_context: None,
         };
         let compact = input.message.attachments.is_empty()
-            && input.message.text.trim().to_lowercase() == "/compact";
+            && turin_contracts::base_schemas::js_trim(&input.message.text).to_lowercase()
+                == "/compact";
         let started: Result<(), BoxError> = match &should_start {
             Err(_) => Ok(()),
             Ok(_) if compact => match input.session.compact_thread(turn_input) {

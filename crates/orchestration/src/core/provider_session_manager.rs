@@ -10,9 +10,10 @@
 //! implements it over `EventSink`, and tests use a recording fake.
 //!
 //! Not ported here (see docs/handoff/T13c-needs.md): MCP credential issuance,
-//! agent access settings, background-task roster cleanup on release, shared
-//! runtime idle thread unload, interrupting running turns on detach (needs
-//! projection reads), and retried release-record writes.
+//! agent access settings, shared runtime idle thread unload, the keyed attach
+//! lock and loaded-thread cache (PORTING.md Deviations), and retried
+//! release-record writes. Background-task roster cleanup on release and the
+//! interrupt of running turns on detach are done.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -458,10 +459,13 @@ impl Inner {
     fn remove_live_session(&self, request: &ReleaseRequest) -> Option<Arc<LiveSession>> {
         let mut sessions = self.sessions.lock();
         let session = sessions.get(&request.provider_session_id)?.clone();
-        if let Some(generation) = request.only_if_idle_generation
-            && session.state.lock().idle_generation != generation
-        {
-            return None;
+        if let Some(generation) = request.only_if_idle_generation {
+            // `mark_busy` does not bump the generation, so the busy set is
+            // checked here, under the same state lock, as upstream does.
+            let state = session.state.lock();
+            if !state.busy_turns.is_empty() || state.idle_generation != generation {
+                return None;
+            }
         }
         sessions.remove(&request.provider_session_id);
         Some(session)

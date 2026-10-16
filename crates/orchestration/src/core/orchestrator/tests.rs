@@ -1008,3 +1008,53 @@ async fn a_shared_thread_executor_serializes_dispatch_with_other_writers() {
         .expect("create commits once the lock frees");
     other_writer.await.expect("task joins");
 }
+
+/// Upstream's archived guard (Orchestrator.ts ~2575) lists only settle,
+/// unsettle, snooze, unsnooze, auto-settle, pin, unpin, the reorders and
+/// pull-request sync; mode and model changes are allowed on an archived thread.
+#[tokio::test]
+async fn an_archived_thread_still_takes_mode_changes_but_not_a_pin() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command(
+            "command:create-arch",
+            "thread:arch",
+            "Thread",
+        ))
+        .await
+        .expect("create commits");
+    orchestrator
+        .dispatch(archive("command:archive-arch", "thread:arch"))
+        .await
+        .expect("archive commits");
+
+    orchestrator
+        .dispatch(mutation(
+            "thread.runtime-mode.set",
+            "command:runtime-arch",
+            "thread:arch",
+            json!({"runtimeMode": "approval-required"}),
+        ))
+        .await
+        .expect("a runtime mode change commits");
+    orchestrator
+        .dispatch(mutation(
+            "thread.interaction-mode.set",
+            "command:interaction-arch",
+            "thread:arch",
+            json!({"interactionMode": "plan"}),
+        ))
+        .await
+        .expect("an interaction mode change commits");
+
+    let error = orchestrator
+        .dispatch(mutation(
+            "thread.pin",
+            "command:pin-arch",
+            "thread:arch",
+            json!({}),
+        ))
+        .await
+        .expect_err("a pin is refused");
+    assert!(refusal_text(&error).contains("is archived"), "{error:?}");
+}

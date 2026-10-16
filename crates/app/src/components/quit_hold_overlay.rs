@@ -1,6 +1,5 @@
 //! Port of upstream/apps/web/src/components/QuitHoldOverlay.tsx.
 
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Context, IntoElement, ParentElement as _, Render, Styled as _, div, rems};
 
 use crate::desktop::quit_hold::QuitShortcutHint;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/hooks/useNavigateBack.ts.
 
 use crate::shell::app_route::NavigationStack;

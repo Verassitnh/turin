@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream TanStack route paths under `apps/web/src/routes/*` as
 //! in-app navigation state (no URL bar).
 
@@ -8,9 +10,10 @@ use super::thread_routes::{
 };
 
 /// Mirrors the `_chat` layout's active child route.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum AppRoute {
     /// `/_chat/` index landing (draft bootstrap).
+    #[default]
     ChatIndex,
     /// `/_chat/new` deep link handler.
     ChatNew { search: String },
@@ -18,12 +21,6 @@ pub enum AppRoute {
     ChatThread { target: ThreadRouteTarget },
     /// `/projects/$projectKey` redirect target.
     ProjectSettings { project_key: String },
-}
-
-impl Default for AppRoute {
-    fn default() -> Self {
-        Self::ChatIndex
-    }
 }
 
 /// In-app back stack (`useNavigateBack` without `window.history`).
@@ -107,13 +104,13 @@ pub fn app_route_from_path(path: &str) -> Option<AppRoute> {
     }
     let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
     match segments.as_slice() {
+        ["draft", draft_id] => Some(route_from_draft(*draft_id)),
         [environment_id, thread_id] => resolve_thread_route_target(&ThreadRouteParamsPartial {
             environment_id: Some(environment_id.to_string()),
             thread_id: Some(thread_id.to_string()),
             draft_id: None,
         })
         .map(|target| AppRoute::ChatThread { target }),
-        ["draft", draft_id] => Some(route_from_draft(*draft_id)),
         _ => None,
     }
 }

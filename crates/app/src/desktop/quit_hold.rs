@@ -73,11 +73,11 @@ impl QuitShortcutHandler {
         &mut self,
         callbacks: &mut QuitShortcutCallbacks<'_>,
     ) -> QuitShortcutEffect {
-        if let Some(deadline) = self.watchdog_deadline {
-            if self.now_ms >= deadline {
-                self.watchdog_deadline = None;
-                return self.quit_now(callbacks);
-            }
+        if let Some(deadline) = self.watchdog_deadline
+            && self.now_ms >= deadline
+        {
+            self.watchdog_deadline = None;
+            return self.quit_now(callbacks);
         }
         QuitShortcutEffect::None
     }
@@ -148,7 +148,7 @@ impl QuitShortcutHandler {
             {
                 self.armed = false;
                 self.quit_on_release = true;
-                callbacks.conceal_window();
+                (callbacks.conceal_window)();
                 self.quit_after_quiet_period(callbacks);
             }
             return QuitShortcutEffect::PreventDefault;
@@ -178,7 +178,7 @@ impl QuitShortcutHandler {
             }
             self.mode = Some(mode);
             self.notified = true;
-            callbacks.notify(QuitShortcutHint::Down { mode });
+            (callbacks.notify)(QuitShortcutHint::Down { mode });
             self.watchdog_deadline = Some(now + QUIT_DOUBLE_PRESS_MS);
             return QuitShortcutEffect::PreventDefault;
         }
@@ -188,7 +188,7 @@ impl QuitShortcutHandler {
         }
         self.mode = Some(QuitConfirmationMode::Hold);
         self.notified = true;
-        callbacks.notify(QuitShortcutHint::Down {
+        (callbacks.notify)(QuitShortcutHint::Down {
             mode: QuitConfirmationMode::Hold,
         });
         self.armed = true;
@@ -238,7 +238,7 @@ impl QuitShortcutHandler {
         self.watchdog_deadline = None;
         if self.notified {
             self.notified = false;
-            callbacks.notify(QuitShortcutHint::Up);
+            (callbacks.notify)(QuitShortcutHint::Up);
         }
     }
 }
@@ -298,7 +298,7 @@ mod tests {
             notify: &mut |_| {},
             conceal_window: &mut || {},
         };
-        handler.set_now_ms(0);
+        handler.set_now_ms(1_000);
         handler.handle(
             QuitHoldKeyInput {
                 phase: QuitHoldKeyPhase::KeyDown,
@@ -312,7 +312,7 @@ mod tests {
             QuitConfirmationMode::Hold,
             &mut callbacks,
         );
-        handler.set_now_ms(200);
+        handler.set_now_ms(1_200);
         let effect = handler.handle(
             QuitHoldKeyInput {
                 phase: QuitHoldKeyPhase::KeyDown,

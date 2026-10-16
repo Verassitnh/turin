@@ -31,10 +31,7 @@ fn set_dock_badge_count(count: u32) {
     } else {
         None
     };
-    // SAFETY: main thread after NSApplication exists.
-    unsafe {
-        NSApplication::sharedApplication(mtm)
-            .dockTile()
-            .setBadgeLabel(label.as_deref());
-    }
+    NSApplication::sharedApplication(mtm)
+        .dockTile()
+        .setBadgeLabel(label.as_deref());
 }

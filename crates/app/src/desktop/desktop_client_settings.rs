@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/desktop/src/settings/DesktopClientSettings.ts (local
 //! JSON read/write for `ClientSettings`; Effect services are inlined).
 

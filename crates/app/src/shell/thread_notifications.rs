@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/threadNotifications.ts (pure helpers; dock
 //! badge and sound playback live in `desktop::notification_badge` and future
 //! audio assets).
@@ -32,7 +34,7 @@ pub fn has_desktop_notifications(mode: NotificationMode) -> bool {
 
 /// Forwards to the native dock badge (`setNotificationBadge`).
 pub fn set_notification_badge(count: u32) {
-    crate::desktop::apply_notification_badge(count);
+    crate::desktop::notification_badge::apply_notification_badge(count);
 }
 
 #[cfg(test)]

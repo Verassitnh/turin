@@ -1,18 +1,11 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/components/RenderErrorBoundary.tsx.
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderErrorBoundary {
     failed: bool,
     reset_generation: u64,
-}
-
-impl Default for RenderErrorBoundary {
-    fn default() -> Self {
-        Self {
-            failed: false,
-            reset_generation: 0,
-        }
-    }
 }
 
 impl RenderErrorBoundary {

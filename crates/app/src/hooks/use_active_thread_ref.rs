@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/hooks/useActiveThreadRef.ts.
 
 use turin_contracts::environment::ScopedThreadRef;

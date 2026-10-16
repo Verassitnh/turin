@@ -1,9 +1,11 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/reopenClosedView.ts (+ reopenClosedView.test.ts).
 
 use turin_contracts::{EnvironmentId, ProjectId};
 
 use crate::state::right_panel_store::{
-    PullRequestTarget, RightPanelStore, RightPanelSurface, ThreadRightPanelState, thread_key,
+    RightPanelStore, RightPanelSurface, ThreadRightPanelState, thread_key,
 };
 
 /// `ClosedViewEntry` (panel-tab only; browser entries are cut).
@@ -66,7 +68,7 @@ pub fn plan_next_reopen(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlanNextReopen {
     pub dropped: Vec<ClosedViewEntry>,
     pub restore: Option<ClosedViewEntry>,
@@ -203,7 +205,8 @@ pub fn closed_view_entries_from_store(store: &RightPanelStore) -> Vec<ClosedView
 mod tests {
     use super::*;
     use crate::state::right_panel_store::{
-        FileSurface, RightPanelSurface, ThreadRightPanelState, pull_request_surface,
+        FileSurface, PullRequestTarget, RightPanelSurface, ThreadRightPanelState,
+        pull_request_surface,
     };
     use turin_contracts::environment::ScopedThreadRef;
     use turin_contracts::{EnvironmentId, ThreadId};
@@ -268,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_requests_search_for_restore() {
+    fn pull_requests_search_restore_cases() {
         let surface = RightPanelSurface::PullRequest(pull_request_surface(&PullRequestTarget {
             environment_id: Some("remote".into()),
             project_id: "project-1".into(),
@@ -292,18 +295,15 @@ mod tests {
         assert_eq!(search.involvement, "reviewing");
         assert_eq!(search.repository.as_deref(), Some("owner/repo"));
         assert_eq!(search.number, Some(42));
-        assert_eq!(
-            pull_requests_search_for_restore(
-                PullRequestsSearchLike {
-                    repository: Some("old/repo".into()),
-                    number: Some(7),
-                    ..Default::default()
-                },
-                None,
-            )
-            .involvement,
-            "all"
+        let cleared = pull_requests_search_for_restore(
+            PullRequestsSearchLike {
+                repository: Some("old/repo".into()),
+                number: Some(7),
+                ..Default::default()
+            },
+            None,
         );
+        assert_eq!(cleared.involvement, "all");
     }
 
     #[test]

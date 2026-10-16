@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/confirmDialog.ts (+ confirmDialog.test.ts).
 
 use parking_lot::Mutex;
@@ -49,10 +51,10 @@ fn inner() -> &'static Mutex<ConfirmDialogInner> {
 }
 
 fn resolve_pending(inner: &mut ConfirmDialogInner, confirmed: bool) {
-    if let Some(mut active) = inner.active.take() {
-        if let Some(resolve) = active.resolve.take() {
-            let _ = resolve.send(confirmed);
-        }
+    if let Some(mut active) = inner.active.take()
+        && let Some(resolve) = active.resolve.take()
+    {
+        let _ = resolve.send(confirmed);
     }
     for mut queued in inner.queued.drain(..) {
         if let Some(resolve) = queued.resolve.take() {
@@ -185,8 +187,8 @@ pub fn reset_confirm_dialog_for_tests() {
 
 #[cfg(test)]
 mod tests {
+    use super::ConfirmDialogVariant;
     use super::*;
-    use turin_contracts::settings::ConfirmDialogVariant;
 
     fn require_confirmation(request: Option<ConfirmDialogRequest>) -> ConfirmDialogRequest {
         request.expect("expected a registered confirmation host")
@@ -195,7 +197,7 @@ mod tests {
     #[test]
     fn returns_none_without_host() {
         reset_confirm_dialog_for_tests();
-        assert!(request_confirm_dialog("Confirm this action?").is_none());
+        assert!(request_confirm_dialog("Confirm this action?", None).is_none());
         assert_eq!(read_confirm_dialog_state(), ConfirmDialogState::Idle);
     }
 
@@ -233,8 +235,9 @@ mod tests {
     async fn serializes_concurrent_confirmations() {
         reset_confirm_dialog_for_tests();
         let _host = register_confirm_dialog_host();
-        let mut first = require_confirmation(request_confirm_dialog("Delete the project?"));
-        let mut second = require_confirmation(request_confirm_dialog("Delete the worktree too?"));
+        let mut first = require_confirmation(request_confirm_dialog("Delete the project?", None));
+        let mut second =
+            require_confirmation(request_confirm_dialog("Delete the worktree too?", None));
         respond_to_confirm_dialog(false);
         assert_eq!(first.try_wait(), Some(false));
         complete_confirm_dialog_close();

@@ -33,6 +33,7 @@ impl ThreadNotificationCoordinator {
         set_notification_badge(0);
     }
 
+    #[allow(dead_code)]
     pub fn pending_count(&self) -> u32 {
         self.pending_count
     }

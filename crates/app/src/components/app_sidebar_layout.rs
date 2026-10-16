@@ -25,6 +25,7 @@ use gpui_kit::{
 use super::chat::panel_layout_controls::PanelLayoutControls;
 use super::confirm_dialog_host::ConfirmDialogHost;
 use super::quit_hold_overlay::QuitHoldOverlay;
+use super::reopen_closed_view_shortcut::try_reopen_closed_view;
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
@@ -36,11 +37,26 @@ use super::thread_sidebar_width::{
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
 };
 use super::workspace_titlebar::workspace_controls_left;
+use crate::desktop::desktop_application_menu::QuitApplication;
+use crate::desktop::desktop_client_settings::{default_client_settings_path, read_client_settings};
+use crate::desktop::notification_badge::clear_notification_badge_on_focus;
+use crate::desktop::quit_hold::{
+    QuitHoldKeyInput, QuitHoldKeyPhase, QuitShortcutCallbacks, QuitShortcutEffect,
+    QuitShortcutHandler, QuitShortcutHint,
+};
+use crate::desktop::window_bounds_persist::WindowBoundsPersist;
 use crate::hooks::use_preview_panel_inline_size::{
     PREVIEW_PANEL_DEFAULT_WIDTH, clamp_preview_panel_width, get_preview_panel_max_width,
 };
 use crate::shell::app_route::{AppRoute, NavigationStack, route_from_draft};
+use crate::shell::chat_route_shortcuts::{OpenCommandPalette, ReopenClosedView};
+use crate::shell::environment_coordinator::poll_environment_notifications;
+use crate::shell::reopen_closed_view::{
+    ReopenOwnerState, closed_view_entries_from_store, plan_next_reopen, reopen_closed_panel_tab,
+};
 use crate::shell::thread_routes::{ThreadRouteRenderState, ThreadRouteTarget};
+use crate::state::right_panel_store::{RightPanelStore, ThreadRightPanelState};
+use crate::state::store::ClientStoreGlobal;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{WORKSPACE_CONTROLS_INSET, WORKSPACE_TOPBAR_HEIGHT};
 use crate::theme::{self, ActiveAppTheme};
@@ -51,6 +67,7 @@ use crate::ui::sidebar::{
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{AppContext as _, Entity, SharedString};
+use turin_contracts::settings::{ClientSettings, QuitConfirmationMode};
 
 actions!(
     turin,
@@ -59,6 +76,8 @@ actions!(
         ToggleSidebar,
         /// `rightPanel.toggle` (mod+alt+b).
         ToggleRightPanel,
+        /// ⌘Q key-down (quit-hold handler).
+        QuitShortcut,
     ]
 );
 
@@ -70,8 +89,10 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-b", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-q", QuitShortcut, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
+    crate::shell::bind_chat_route_keys(cx);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,14 +133,21 @@ pub struct AppSidebarLayout {
     /// A modal layer over the whole window (dialogs).
     overlay: Option<AnyView>,
     navigation: NavigationStack,
-    #[allow(dead_code)]
     notifications: ThreadNotificationCoordinator,
+    quit_handler: QuitShortcutHandler,
+    quit_clock_start: std::time::Instant,
     quit_overlay: Entity<QuitHoldOverlay>,
     confirm_dialog: Entity<ConfirmDialogHost>,
+    client_settings: ClientSettings,
+    bounds_persist: WindowBoundsPersist,
+    right_panel_store: RightPanelStore,
     sidebar: Entity<Sidebar>,
     store: Entity<SidebarStore>,
     _appearance: Subscription,
     _sidebar_events: Subscription,
+    _bounds: Subscription,
+    _store_watch: Subscription,
+    _activation: Subscription,
 }
 
 impl AppSidebarLayout {
@@ -138,7 +166,32 @@ impl AppSidebarLayout {
         sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
         let quit_overlay = cx.new(|_| QuitHoldOverlay::new());
         let confirm_dialog = cx.new(|cx| ConfirmDialogHost::new(window, cx));
-        Self {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let client_settings = read_client_settings(&default_client_settings_path(&home))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let bounds_persist = WindowBoundsPersist::new(
+            crate::desktop::window_bounds_persist::desktop_settings_path(),
+        );
+        let bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            this.bounds_persist.note_bounds_changed(window);
+            this.bounds_persist.flush_if_due(window);
+            cx.notify();
+        });
+        let store_watch = cx.observe_global::<ClientStoreGlobal>(|this, cx| {
+            this.sync_notifications(cx);
+        });
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                clear_notification_badge_on_focus();
+                this.notifications.clear();
+            }
+            cx.notify();
+        });
+        let mut layout = Self {
             focus_handle,
             sidebar_open: true,
             sidebar_width: resolve_initial_thread_sidebar_width(None, viewport_width),
@@ -152,13 +205,23 @@ impl AppSidebarLayout {
             overlay: None,
             navigation: NavigationStack::default(),
             notifications: ThreadNotificationCoordinator::new(),
+            quit_handler: QuitShortcutHandler::new(cfg!(target_os = "macos")),
+            quit_clock_start: std::time::Instant::now(),
             quit_overlay,
             confirm_dialog,
+            client_settings,
+            bounds_persist,
+            right_panel_store: RightPanelStore::default(),
             sidebar,
             store,
             _appearance: appearance,
             _sidebar_events: sidebar_events,
-        }
+            _bounds: bounds,
+            _store_watch: store_watch,
+            _activation: activation,
+        };
+        layout.sync_notifications(cx);
+        layout
     }
 
     /// Shows `content` where the chat column normally sits.
@@ -193,7 +256,7 @@ impl AppSidebarLayout {
                     self.navigation.replace(match sidebar_route {
                         SidebarRoute::Thread(key) => {
                             if let Some((environment_id, thread_id)) =
-                                crate::state::models::parse_scoped_thread_key(&key)
+                                crate::state::models::parse_scoped_thread_key(key)
                             {
                                 AppRoute::ChatThread {
                                     target: ThreadRouteTarget::Server {
@@ -272,6 +335,137 @@ impl AppSidebarLayout {
         cx.notify();
     }
 
+    fn sync_notifications(&mut self, cx: &App) {
+        let environment_ids = vec![crate::state::local_environment_id()];
+        let snapshot = cx.global::<ClientStoreGlobal>().0.read(cx).state().clone();
+        poll_environment_notifications(
+            &mut self.notifications,
+            &environment_ids,
+            Some(snapshot.as_ref()),
+            &self.client_settings,
+        );
+    }
+
+    fn quit_confirmation_mode(&self) -> QuitConfirmationMode {
+        self.client_settings.confirm_quit
+    }
+
+    fn run_quit_shortcut(
+        &mut self,
+        phase: QuitHoldKeyPhase,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let now_ms = self.quit_clock_start.elapsed().as_millis() as u64;
+        self.quit_handler.set_now_ms(now_ms);
+        let mut notify = |hint: QuitShortcutHint| {
+            self.quit_overlay.update(cx, |overlay, cx| {
+                overlay.apply_hint(hint, now_ms, cx);
+            });
+        };
+        let mut conceal = || {
+            if crate::desktop::desktop_window::should_conceal_window_for_pending_quit() {
+                window.minimize_window();
+            }
+        };
+        let mut callbacks = QuitShortcutCallbacks {
+            notify: &mut notify,
+            conceal_window: &mut conceal,
+        };
+        let effect = self.quit_handler.handle(
+            QuitHoldKeyInput {
+                phase,
+                key: 'q',
+                meta: cfg!(target_os = "macos"),
+                control: !cfg!(target_os = "macos"),
+                alt: false,
+                shift: false,
+                is_auto_repeat: false,
+            },
+            self.quit_confirmation_mode(),
+            &mut callbacks,
+        );
+        let _ = self.quit_handler.poll_watchdog(&mut callbacks);
+        if effect == QuitShortcutEffect::Quit {
+            cx.quit();
+        }
+        cx.notify();
+    }
+
+    fn on_quit_shortcut(&mut self, _: &QuitShortcut, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_quit_shortcut(QuitHoldKeyPhase::KeyDown, window, cx);
+    }
+
+    fn on_quit_application(
+        &mut self,
+        _: &QuitApplication,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.quit_confirmation_mode() == QuitConfirmationMode::Direct {
+            cx.quit();
+            return;
+        }
+        self.run_quit_shortcut(QuitHoldKeyPhase::KeyDown, window, cx);
+    }
+
+    fn on_open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = window;
+        crate::shell::chat_route_shortcuts::open_command_palette_if_closed();
+        cx.notify();
+    }
+
+    fn on_reopen_closed_view(
+        &mut self,
+        _: &ReopenClosedView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = closed_view_entries_from_store(&self.right_panel_store);
+        let reopened = try_reopen_closed_view(
+            &entries,
+            |_| ReopenOwnerState {
+                environment_known: true,
+                catalog_ready: true,
+                owner_exists: true,
+                shell_live: true,
+                panel: ThreadRightPanelState {
+                    is_open: self.right_panel_open,
+                    active_surface_id: None,
+                    surfaces: vec![],
+                    maximized: self.right_panel_maximized,
+                },
+            },
+            &mut self.right_panel_store,
+            true,
+        ) || plan_next_reopen(&entries, |_| ReopenOwnerState {
+            environment_known: true,
+            catalog_ready: true,
+            owner_exists: true,
+            shell_live: true,
+            panel: ThreadRightPanelState {
+                is_open: self.right_panel_open,
+                active_surface_id: None,
+                surfaces: vec![],
+                maximized: self.right_panel_maximized,
+            },
+        })
+        .restore
+        .is_some_and(|restore| {
+            reopen_closed_panel_tab(&mut self.right_panel_store, &restore, true)
+        });
+        if reopened {
+            self.right_panel_open = true;
+        }
+        let _ = window;
+        cx.notify();
+    }
+
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
@@ -330,6 +524,11 @@ impl AppSidebarLayout {
 
 impl Render for AppSidebarLayout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let now_ms = self.quit_clock_start.elapsed().as_millis() as u64;
+        self.quit_handler.set_now_ms(now_ms);
+        self.quit_overlay
+            .update(cx, |overlay, cx| overlay.tick(now_ms, cx));
+        self.bounds_persist.flush_if_due(window);
         // "Open diff" on a turn's changed files card shows the right panel.
         if crate::diff::take_open_panel_request(cx) {
             self.right_panel_open = true;
@@ -479,11 +678,18 @@ impl Render for AppSidebarLayout {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_panel))
+            .on_action(cx.listener(Self::on_quit_shortcut))
+            .on_action(cx.listener(Self::on_quit_application))
+            .on_action(cx.listener(Self::on_open_command_palette))
+            .on_action(cx.listener(Self::on_reopen_closed_view))
             .on_modifiers_changed(cx.listener(
-                |this, event: &gpui_kit::ModifiersChangedEvent, _, cx| {
+                |this, event: &gpui_kit::ModifiersChangedEvent, window, cx| {
                     let modifiers = event.modifiers;
                     this.sidebar
                         .update(cx, |sidebar, cx| sidebar.modifiers_changed(&modifiers, cx));
+                    if !modifiers.platform {
+                        this.run_quit_shortcut(QuitHoldKeyPhase::KeyUp, window, cx);
+                    }
                 },
             ))
             .map(|this| forward_sidebar_actions(this, cx))

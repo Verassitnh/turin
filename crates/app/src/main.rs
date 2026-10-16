@@ -99,18 +99,26 @@ fn main() {
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             desktop::bind_menu_keys(cx, app_sidebar_layout::KEY_CONTEXT);
+            desktop::install_native_menus(cx);
             let right_panel = dev_overrides(cx);
             // Dev hook: `TURIN_SETTINGS=<page>` shows the settings window on mock data.
-            if settings::demo::open_if_requested(window_options(cx), cx) {
+            if settings::demo::open_if_requested(
+                desktop::merge_window_options(window_options(cx), cx),
+                cx,
+            ) {
                 return;
             }
-            let handle = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
-                cx.new(|cx| {
-                    let mut layout = AppSidebarLayout::new(window, cx);
-                    layout.set_right_panel_open(right_panel);
-                    layout
-                })
-            })
+            let handle = gpui_kit::open_window(
+                desktop::merge_window_options(window_options(cx), cx),
+                cx,
+                |window, cx| {
+                    cx.new(|cx| {
+                        let mut layout = AppSidebarLayout::new(window, cx);
+                        layout.set_right_panel_open(right_panel);
+                        layout
+                    })
+                },
+            )
             .expect("failed to open window");
             // Dev hook: `TURIN_PULL_REQUESTS_DEMO` shows the pull request views on the mock source.
             if let Some(scenario) = pull_request::demo::scenario_from_env() {

@@ -1,14 +1,14 @@
 //! Port of upstream/apps/web/src/components/ThreadRouteView.tsx (route-scoped
 //! chat surface; full draft promotion wiring lands with the composer task).
 
-use gpui_kit::{IntoElement, ParentElement as _, div};
+use gpui_kit::{IntoElement, ParentElement as _, Styled as _, div};
 
 use crate::components::chat_view::ChatView;
 use crate::shell::thread_routes::{ThreadRouteRenderState, ThreadRouteTarget};
 
 /// Renders the chat column for the active thread route target.
 pub fn thread_route_view(
-    target: &ThreadRouteTarget,
+    _target: &ThreadRouteTarget,
     render_state: ThreadRouteRenderState,
     sidebar_open: bool,
     right_panel_open: bool,

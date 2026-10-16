@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/hooks/useActiveProjectTarget.ts (pure resolution).
 
 use turin_contracts::environment::ScopedThreadRef;

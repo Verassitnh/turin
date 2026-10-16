@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/threadRoutes.ts (+ threadRoutes.test.ts).
 
 use turin_contracts::environment::ScopedThreadRef;
@@ -134,14 +136,14 @@ mod tests {
         EnvironmentId::new(id).unwrap()
     }
 
-    fn thread(id: &str) -> ThreadId {
+    fn tid(id: &str) -> ThreadId {
         ThreadId::new(id).unwrap()
     }
 
     fn scoped(environment_id: &str, thread_id: &str) -> ScopedThreadRef {
         ScopedThreadRef {
             environment_id: env(environment_id),
-            thread_id: thread(id),
+            thread_id: tid(thread_id),
         }
     }
 
@@ -168,7 +170,7 @@ mod tests {
             build_thread_route_params(&reference),
             ThreadRouteParams {
                 environment_id: env("env-1"),
-                thread_id: thread("thread-1"),
+                thread_id: tid("thread-1"),
             }
         );
         assert_eq!(
@@ -234,7 +236,7 @@ mod tests {
                 Some(&target),
                 Some(&DraftThreadRouteState {
                     environment_id: env("env-1"),
-                    thread_id: thread("draft-thread"),
+                    thread_id: tid("draft-thread"),
                     promoted_to: Some(scoped("env-2", "server-thread")),
                 }),
             ),
@@ -245,7 +247,7 @@ mod tests {
                 Some(&target),
                 Some(&DraftThreadRouteState {
                     environment_id: env("env-1"),
-                    thread_id: thread("draft-thread"),
+                    thread_id: tid("draft-thread"),
                     promoted_to: None,
                 }),
             ),

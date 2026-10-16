@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/desktop/src/window/DesktopWindow.ts (GPUI window
 //! geometry; renderer/Electron paths are cut).
 
@@ -57,13 +59,12 @@ pub fn resolve_initial_main_window_bounds(
     persisted: Option<DesktopWindowBounds>,
     displays: &[DisplayBounds],
 ) -> InitialMainWindowBounds {
-    if let Some(bounds) = persisted {
-        if displays
+    if let Some(bounds) = persisted
+        && displays
             .iter()
             .any(|display| window_fits_within_display(bounds, *display))
-        {
-            return InitialMainWindowBounds::Explicit(bounds);
-        }
+    {
+        return InitialMainWindowBounds::Explicit(bounds);
     }
     InitialMainWindowBounds::DefaultSize
 }

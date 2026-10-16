@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/closedViewStore.ts (panel-tab entries; browser
 //! preview sessions are cut — see PORTING.md Deviations).
 

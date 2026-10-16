@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/desktop/src/window/ContextMenuImage.ts.
 //!
 //! Browser `WebContents` image copy is cut (no embedded preview browser). The

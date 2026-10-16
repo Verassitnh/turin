@@ -1,8 +1,10 @@
+#![allow(dead_code)]
+
 //! Port of upstream/apps/web/src/commandPaletteBus.ts.
 
 use parking_lot::Mutex;
 use std::sync::OnceLock;
-use turin_contracts::environment::EnvironmentId;
+use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::PullRequestLinkedThreadsEntry;
 
 /// `CommandPaletteLinkedThreads`.

@@ -54,7 +54,7 @@ use super::super::provider_status::{
 use super::super::search::searchable_setting;
 use super::super::time_format::{RelativeTimeState, get_relative_time_state};
 use super::super::view::{SettingsView, Which};
-use crate::theme::color::{color, with_alpha};
+use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip, scroll_area};
@@ -83,6 +83,8 @@ pub struct ProvidersState {
     /// `ManagedCodexSetup` state per instance.
     pub codex:
         std::collections::HashMap<String, super::super::codex_setup_logic::ManagedCodexState>,
+    /// `ProviderAccentColorPicker` state per picker.
+    pub accent: super::super::provider_accent_color_picker::AccentPickerStates,
     /// `AddCodexAccountDialog` state.
     pub add_codex: super::super::add_codex_account_dialog::AddCodexAccountState,
     /// `ProviderAuthCallbackCoordinator`'s `started` ref.
@@ -1153,7 +1155,8 @@ impl SettingsView {
         .into_any_element()
     }
 
-    /// Accent colour: a swatch button opening preset swatches and a hex field.
+    /// `ProviderAccentColorPicker layout="inline" commitDelayMs={120}` of the
+    /// instance card.
     fn accent_picker(
         &mut self,
         id: &str,
@@ -1162,115 +1165,25 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.app_theme().clone();
-        let menu_id = SharedString::from(format!("accent-{id}"));
-        let open = self.menus.is_open(&menu_id);
-        let toggle_id = menu_id.clone();
-        let swatch = value.map(color);
-        let trigger = div()
-            .id(SharedString::from(format!("accent-trigger-{id}")))
-            .flex()
-            .size_7()
-            .items_center()
-            .justify_center()
-            .rounded(RADIUS_MD)
-            .cursor(CursorStyle::PointingHand)
-            .when_some(swatch, |this, swatch| this.bg(swatch))
-            .when(swatch.is_none(), |this| {
-                this.hover(|style| style.bg(theme.accent))
-            })
-            .tooltip({
-                let tooltip = Tooltip::new(format!(
-                    "{} accent color for {display_name}",
-                    if value.is_some() { "Change" } else { "Add" }
-                ));
-                move |window, cx| tooltip.clone().build(window, cx)
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.menus.toggle(toggle_id.clone());
-                cx.notify();
-            }))
-            .when(swatch.is_none(), |this| {
-                this.child(
-                    Icon::new(IconName::Plus)
-                        .size(rems(1.))
-                        .color(theme.muted_foreground),
-                )
-            });
-        let popup = open.then(|| {
-            const PRESETS: [&str; 8] = [
-                "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#ca8a04", "#16a34a",
-                "#0d9488",
-            ];
-            let row_id = id.to_owned();
-            let swatches = PRESETS.iter().map(|hex| {
-                let hex = (*hex).to_owned();
-                let row_id = row_id.clone();
-                div()
-                    .id(SharedString::from(format!("accent-swatch-{row_id}-{hex}")))
-                    .size_6()
-                    .rounded_full()
-                    .bg(color(&hex))
-                    .cursor(CursorStyle::PointingHand)
-                    .border_2()
-                    .border_color(if value.is_some_and(|v| v.eq_ignore_ascii_case(&hex)) {
-                        theme.ring
-                    } else {
-                        theme.popover
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let rows = this.instance_rows(cx);
-                        if let Some(row) = rows.iter().find(|row| row.id == row_id) {
-                            this.update_instance(
-                                row,
-                                vec![("accentColor", Some(Value::String(hex.clone())))],
-                                cx,
-                            );
-                        }
-                    }))
-            });
-            let clear_id = id.to_owned();
-            div()
-                .id(SharedString::from(format!("accent-popup-{id}")))
-                .occlude()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .w(rems(14.))
-                .p_3()
-                .rounded(RADIUS_LG)
-                .border_1()
-                .border_color(crate::ui::tooltip::dropdown_glass_border(&theme))
-                .bg(theme.popover)
-                .shadow(tokens::shadow_popover(theme.is_dark()))
-                .child(div().flex().flex_wrap().gap_2().children(swatches))
-                .children(value.map(|_| {
-                    Button::new(SharedString::from(format!("accent-clear-{clear_id}")))
-                        .variant(ButtonVariant::GhostMuted)
-                        .size(ButtonSize::Compact)
-                        .icon(IconName::X)
-                        .icon_size(rems(0.875))
-                        .label("Clear accent color")
-                        .w_full()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let rows = this.instance_rows(cx);
-                            if let Some(row) = rows.iter().find(|row| row.id == clear_id) {
-                                this.update_instance(row, vec![("accentColor", None)], cx);
-                            }
-                            this.menus.close();
-                            cx.notify();
-                        }))
-                }))
-                .into_any_element()
-        });
-        let _ = window;
-        with_popup(
-            trigger,
-            popup,
-            PopupAlign::Start,
-            rems(1.75).to_pixels(px(16.)),
+        let row_id = id.to_owned();
+        self.provider_accent_color_picker(
+            id,
+            display_name,
+            value,
+            120,
+            window,
+            cx,
+            move |this, hex, cx| {
+                let rows = this.instance_rows(cx);
+                if let Some(row) = rows.iter().find(|row| row.id == row_id) {
+                    this.update_instance(
+                        row,
+                        vec![("accentColor", (!hex.is_empty()).then(|| Value::String(hex)))],
+                        cx,
+                    );
+                }
+            },
         )
-        .into_any_element()
     }
 
     fn environment_field_row(

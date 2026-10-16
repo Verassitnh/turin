@@ -270,6 +270,17 @@ pub trait SettingsSource {
         project_icon: Option<crate::state::models::ProjectIcon>,
         cx: &mut App,
     ) -> SetupResult;
+    /// `useProjectFilePickerQuery` with `imageOnly`: the project's entries
+    /// matching `query`, ranked.
+    fn search_project_files(
+        &self,
+        cwd: &str,
+        query: &str,
+        cx: &mut App,
+    ) -> Result<Vec<super::project_file_picker_logic::ProjectEntry>, String>;
+    /// `desktopBridge.pickProjectFavicon`: the native image picker; `None` when
+    /// the user cancels.
+    fn pick_project_favicon(&self, cwd: &str, cx: &mut App) -> Result<Option<String>, String>;
     /// `runStorageCleanup`.
     fn run_storage_cleanup(&self, cx: &mut App);
     fn delete_thread(&self, thread_id: &str, cx: &mut App);

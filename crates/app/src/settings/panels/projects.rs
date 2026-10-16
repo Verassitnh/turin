@@ -41,6 +41,8 @@ pub struct ProjectsState {
     pub title_refused: Option<String>,
     /// `ProjectIconPickerDialog`.
     pub icon_picker: Option<super::super::project_icon_picker_dialog::IconPicker>,
+    /// `ProjectFaviconPickerDialog`.
+    pub favicon_picker: Option<super::super::project_favicon_picker_dialog::FaviconPicker>,
 }
 
 #[derive(Default, Clone)]

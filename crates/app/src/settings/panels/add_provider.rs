@@ -389,22 +389,31 @@ impl SettingsView {
                         }
                     },
                 );
-                let accent_input =
-                    self.input_live("add-provider-accent", &accent, "#2563eb", window, cx, {
-                        let driver = driver.clone();
-                        move |this, text, _, cx| {
-                            let wizard = &mut this.panels.providers.wizard;
-                            wizard.identity = update_provider_identity_draft(
-                                &wizard.identity,
-                                &driver,
-                                ProviderIdentityDraftUpdate {
-                                    accent_color: Some(text),
-                                    ..Default::default()
-                                },
-                            );
-                            cx.notify();
-                        }
-                    });
+                let accent_driver = driver.clone();
+                let accent_picker = self.provider_accent_color_picker(
+                    "add-provider",
+                    &(if label.is_empty() {
+                        driver_label(&driver)
+                    } else {
+                        label.clone()
+                    }),
+                    Some(accent.as_str()).filter(|accent| !accent.is_empty()),
+                    0,
+                    window,
+                    cx,
+                    move |this, hex, cx| {
+                        let wizard = &mut this.panels.providers.wizard;
+                        wizard.identity = update_provider_identity_draft(
+                            &wizard.identity,
+                            &accent_driver,
+                            ProviderIdentityDraftUpdate {
+                                accent_color: Some(hex),
+                                ..Default::default()
+                            },
+                        );
+                        cx.notify();
+                    },
+                );
                 // The label draft starts from the driver's label; a typed label replaces it.
                 let mut error_status = None;
                 if show_error {
@@ -440,13 +449,7 @@ impl SettingsView {
                     .child(
                         SettingsRow::new("Accent color")
                             .description("Optional marker shown in the picker.")
-                            .control(div().w(rems(14.)).child(text_field(
-                                &accent_input,
-                                None,
-                                FieldSize::Sm,
-                                true,
-                                cx,
-                            ))),
+                            .control(accent_picker),
                     )
                     .into_any_element()
             }

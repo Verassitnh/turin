@@ -924,6 +924,33 @@ impl SettingsSource for MockSettingsSource {
         Ok(())
     }
 
+    fn search_project_files(
+        &self,
+        _cwd: &str,
+        query: &str,
+        _cx: &mut App,
+    ) -> Result<Vec<super::project_file_picker_logic::ProjectEntry>, String> {
+        use super::project_file_picker_logic::{ProjectEntry, ProjectEntryKind};
+        let query = query.trim().to_lowercase();
+        Ok([
+            "assets/icon.png",
+            "assets/logo.svg",
+            "docs/screenshots/overview.png",
+            "public/favicon.ico",
+        ]
+        .into_iter()
+        .filter(|path| query.is_empty() || path.contains(query.as_str()))
+        .map(|path| ProjectEntry {
+            kind: ProjectEntryKind::File,
+            path: path.to_owned(),
+        })
+        .collect())
+    }
+
+    fn pick_project_favicon(&self, _cwd: &str, _cx: &mut App) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     fn run_storage_cleanup(&self, cx: &mut App) {
         self.state.borrow_mut().vm.storage_cleanup = Some(CleanupReport {
             finished_at: "2026-10-15T10:00:00.000Z".into(),

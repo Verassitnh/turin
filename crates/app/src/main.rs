@@ -11,6 +11,8 @@ mod diff;
 #[cfg(target_os = "macos")]
 mod dock_icon;
 mod hooks;
+#[allow(dead_code)]
+mod lib_color;
 mod project_icon_colors;
 mod project_identity;
 mod pull_request;

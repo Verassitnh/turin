@@ -16,6 +16,9 @@ pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// Watches the directory holding `file_path` and sends `()` for every event
 /// that names that file. The watch lives as long as the returned watcher.
+///
+/// Blocking: the directory is canonicalized on the calling thread. Async
+/// callers run it on the blocking pool.
 pub fn watch_file(
     file_path: &Path,
     events: mpsc::UnboundedSender<()>,

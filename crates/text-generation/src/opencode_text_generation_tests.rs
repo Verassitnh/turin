@@ -109,6 +109,7 @@ fn owner() -> OpenCodeServerOwner {
         idle: None,
         shutdown_grace: None,
         verify: None,
+        ledger: None,
     })
 }
 

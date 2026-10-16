@@ -8,6 +8,7 @@
 //! menus and attachment strip live in sibling modules as further `impl`
 //! blocks of this type.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,6 +18,13 @@ use gpui_kit::{
     Subscription, Window, div, point, px,
 };
 
+use crate::components::chat::assistant_citation_chip::replace_citation_comment;
+use crate::components::chat::assistant_citation_comment_editor::{
+    AssistantCitationCommentEditor, CitationCommentEvent,
+};
+use crate::components::chat::timeline::assistant_citations::{
+    AssistantCitation, serialize_assistant_citation,
+};
 use crate::composer::dispatch::{
     ComposerDispatchMode, ResolveComposerDispatchModeInput, resolve_composer_dispatch_mode,
 };
@@ -83,7 +91,15 @@ pub struct ChatComposer {
     pub(super) stash_highlight: Option<String>,
     pub(super) editing_run_id: Option<String>,
     pub(super) pre_edit_prompt: Option<String>,
+    citation_comment: Option<OpenCitationComment>,
     _subscriptions: Vec<Subscription>,
+}
+
+struct OpenCitationComment {
+    key: String,
+    citation: AssistantCitation,
+    editor: Entity<AssistantCitationCommentEditor>,
+    _subscription: Subscription,
 }
 
 /// The painted bounds of each footer trigger, for anchoring its layer.
@@ -140,6 +156,7 @@ impl ChatComposer {
             stash_highlight: None,
             editing_run_id: None,
             pre_edit_prompt: None,
+            citation_comment: None,
             _subscriptions: subscriptions,
         };
         this.install_key_handler(cx);
@@ -267,6 +284,87 @@ impl ChatComposer {
 
     pub fn editor(&self) -> &Entity<PromptEditor> {
         &self.editor
+    }
+
+    /// Opens the comment field for one composer citation chip. The same chip
+    /// toggles it shut. Save rewrites that marker; Command/Ctrl+Enter also sends.
+    fn open_citation_comment(
+        &mut self,
+        citation: AssistantCitation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = serialize_assistant_citation(&citation);
+        if self
+            .citation_comment
+            .as_ref()
+            .is_some_and(|open| open.key == key)
+        {
+            self.citation_comment = None;
+            cx.notify();
+            return;
+        }
+        let initial = citation.comment.clone().unwrap_or_default();
+        let editor = cx.new(|cx| AssistantCitationCommentEditor::new(&initial, window, cx));
+        let subscription = cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &CitationCommentEvent, window, cx| {
+                this.on_citation_comment(event.clone(), window, cx);
+            },
+        );
+        self.citation_comment = Some(OpenCitationComment {
+            key,
+            citation,
+            editor,
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn on_citation_comment(
+        &mut self,
+        event: CitationCommentEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (comment, send) = match event {
+            CitationCommentEvent::Draft(_) => return,
+            CitationCommentEvent::Cancel => {
+                let weak = cx.weak_entity();
+                window.defer(cx, move |_, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.citation_comment = None;
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                return;
+            }
+            CitationCommentEvent::Submit(comment) => (comment, false),
+            CitationCommentEvent::SubmitAndSend(comment) => (comment, true),
+        };
+        let Some(citation) = self
+            .citation_comment
+            .as_ref()
+            .map(|open| open.citation.clone())
+        else {
+            return;
+        };
+        let prompt = self.prompt(cx);
+        let next = replace_citation_comment(&prompt, &citation, &comment);
+        let weak = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            weak.update(cx, |this, cx| {
+                this.replace_prompt(&next, window, cx);
+                this.citation_comment = None;
+                if send {
+                    this.submit(ComposerSubmissionIntent::Foreground, window, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        });
     }
 
     pub(super) fn view_model(&self, cx: &App) -> Arc<ComposerViewModel> {
@@ -894,6 +992,36 @@ impl Render for ChatComposer {
                     .pb_2()
                     .child(super::chrome::track_bounds(&self.trigger_bounds.body))
                     .children(attachments)
+                    .child({
+                        let citations = crate::components::chat::chat_media::prompt_citation_chips(
+                            &self.prompt(cx),
+                        );
+                        if citations.is_empty() {
+                            div().into_any_element()
+                        } else {
+                            let editing_key =
+                                self.citation_comment.as_ref().map(|open| open.key.as_str());
+                            let editor = self
+                                .citation_comment
+                                .as_ref()
+                                .map(|open| open.editor.clone().into_any_element());
+                            let weak = cx.weak_entity();
+                            let on_edit: crate::components::chat::chat_media::CitationEditHandler =
+                                Rc::new(move |citation, window, cx| {
+                                    let citation = citation.clone();
+                                    weak.update(cx, |this, cx| {
+                                        this.open_citation_comment(citation, window, cx);
+                                    })
+                                    .ok();
+                                });
+                            crate::components::chat::chat_media::citation_chip_row(
+                                &citations,
+                                editing_key,
+                                editor,
+                                on_edit,
+                            )
+                        }
+                    })
                     .child(self.editor.clone()),
             )
             .when_some(validation, |this, message| {

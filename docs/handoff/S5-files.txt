@@ -1,0 +1,31 @@
+## N7b App shell, routing and command palette — 3197 lines, 22 files
+   628 apps/web/src/routes/__root.tsx
+   498 apps/web/src/hooks/useHandleNewThread.ts
+   255 apps/web/src/components/ThreadNotificationCoordinator.tsx
+   246 apps/web/src/routes/_chat.tsx
+   220 apps/web/src/components/ReopenClosedViewShortcut.tsx
+   198 apps/web/src/components/ThreadRouteView.tsx
+   179 apps/web/src/routes/_chat.index.tsx
+   150 apps/web/src/reopenClosedView.ts
+   143 apps/web/src/closedViewStore.ts
+   136 apps/web/src/confirmDialog.ts
+   106 apps/web/src/threadRoutes.ts
+   100 apps/web/src/threadNotifications.ts
+    96 apps/web/src/components/ConfirmDialogHost.tsx
+    41 apps/web/src/components/RenderErrorBoundary.tsx
+    41 apps/web/src/hooks/useActiveProjectTarget.ts
+    40 apps/web/src/hooks/useNavigateBack.ts
+    39 apps/web/src/commandPaletteBus.ts
+    30 apps/web/src/routes/_chat.new.tsx
+    20 apps/web/src/hooks/useActiveThreadRef.ts
+    17 apps/web/src/routes/projects.$projectKey.tsx
+     7 apps/web/src/routes/_chat.$environmentId.$threadId.tsx
+     7 apps/web/src/routes/_chat.draft.$draftId.tsx
+## N9 Native macOS shell — 2051 lines, 7 files
+  1074 apps/desktop/src/window/DesktopWindow.ts
+   291 apps/desktop/src/window/DesktopApplicationMenu.ts
+   234 apps/desktop/src/settings/DesktopClientSettings.ts
+   221 apps/desktop/src/window/QuitHold.ts
+   104 apps/desktop/src/window/ContextMenuImage.ts
+    71 apps/desktop/src/ipc/methods/notificationBadge.ts
+    56 apps/web/src/components/QuitHoldOverlay.tsx

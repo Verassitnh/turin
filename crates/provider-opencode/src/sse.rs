@@ -1,8 +1,9 @@
 //! Manual SSE decoder.
 //!
 //! The 45s watchdog sits on the raw byte stream, before frames are parsed, so a
-//! `: heartbeat` comment keeps a quiet server alive. Nothing here reconnects or
-//! sends `Last-Event-ID`. The adapter subscribes again and backfills.
+//! `: heartbeat` comment keeps a quiet server alive. Nothing here reconnects.
+//! Frames carry `id:` and `retry:` so the v1 adapter can resubscribe with
+//! `Last-Event-ID` the way the 1.x SDK does.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -24,6 +25,8 @@ pub struct SseFrame {
     pub data: String,
     pub event: Option<String>,
     pub id: Option<String>,
+    /// Reconnection delay in milliseconds from a `retry:` field.
+    pub retry: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -32,6 +35,7 @@ struct SseDecoder {
     data: Vec<String>,
     event: Option<String>,
     id: Option<String>,
+    retry: Option<u64>,
 }
 
 impl SseDecoder {
@@ -65,6 +69,11 @@ impl SseDecoder {
                 "id" if !value.contains('\0') => {
                     self.id = Some(value.to_string());
                 }
+                "retry" => {
+                    if let Ok(retry) = value.trim().parse() {
+                        self.retry = Some(retry);
+                    }
+                }
                 _ => {}
             }
         }
@@ -75,13 +84,15 @@ impl SseDecoder {
         let data = std::mem::take(&mut self.data);
         let event = self.event.take();
         let id = self.id.take();
-        if data.is_empty() && event.is_none() && id.is_none() {
+        let retry = self.retry.take();
+        if data.is_empty() && event.is_none() && id.is_none() && retry.is_none() {
             return None;
         }
         Some(SseFrame {
             data: data.join("\n"),
             event,
             id,
+            retry,
         })
     }
 }
@@ -228,6 +239,17 @@ mod tests {
             frames[0].data,
             "{\"type\":\"server.connected\"}\n{\"more\":true}"
         );
+    }
+
+    #[test]
+    fn id_and_retry_fields_ride_on_the_frame() {
+        let mut decoder = SseDecoder::default();
+        let frames = decoder.push(b"id: 7\nretry: 1500\ndata: {}\n\nretry: nope\nid: 8\n\n");
+        assert_eq!(frames[0].id.as_deref(), Some("7"));
+        assert_eq!(frames[0].retry, Some(1500));
+        assert_eq!(frames[1].id.as_deref(), Some("8"));
+        assert_eq!(frames[1].retry, None);
+        assert!(frames[1].data.is_empty());
     }
 
     #[tokio::test]

@@ -192,6 +192,11 @@ fn query_pairs(search: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Upstream `URLSearchParams.has(key)` — true when the query names `key`, even with an empty value.
+pub fn search_has_query_key(search: &str, key: &str) -> bool {
+    query_pairs(search).iter().any(|(name, _)| name == key)
+}
+
 fn pair<'a>(pairs: &'a [(String, String)], key: &str) -> Option<&'a str> {
     pairs
         .iter()
@@ -500,6 +505,14 @@ mod tests {
             parse_new_thread_link(&format!("?prompt={}", "x".repeat(8_001))),
             PromptLinkResult::Failure(_)
         ));
+    }
+
+    #[test]
+    fn detects_prompt_query_key_like_url_search_params_has() {
+        assert!(search_has_query_key("?prompt=", "prompt"));
+        assert!(search_has_query_key("?prompt=Fix+it", "prompt"));
+        assert!(!search_has_query_key("?panel=diff", "prompt"));
+        assert!(!search_has_query_key("?notprompt=1", "prompt"));
     }
 
     #[test]

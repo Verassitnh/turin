@@ -459,6 +459,11 @@ pub fn apply(window_appearance: Option<WindowAppearance>, cx: &mut App) {
     });
 }
 
+/// The preferences the theme was last resolved from.
+pub fn preferences(cx: &App) -> AppearancePreferences {
+    cx.global::<ThemeState>().preferences.clone()
+}
+
 /// Replaces the appearance preferences (Settings → Appearance) and re-applies.
 pub fn set_preferences(preferences: AppearancePreferences, cx: &mut App) {
     cx.global_mut::<ThemeState>().preferences = preferences;

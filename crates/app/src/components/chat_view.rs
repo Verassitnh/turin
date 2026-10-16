@@ -6,11 +6,13 @@
 //! details panel are not ported yet; the terminal drawer is cut.
 
 use gpui_kit::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div, px, rems,
+    App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Styled as _, Window, div, px, rems,
 };
 
+use super::chat::chat_git_host::ChatGitHost;
 use super::chat::chat_header::ChatHeader;
+use super::chat::chat_media::chat_media_layer;
 use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
@@ -30,6 +32,11 @@ pub struct ChatView {
     pub right_panel_open: bool,
     /// The routed thread's `(project, title)` (sidebar selection).
     pub thread: Option<(SharedString, SharedString)>,
+    /// The branch toolbar and thread details card (`BranchToolbar`,
+    /// `GitActionsControl`), hosted with the state upstream's ChatView owns.
+    pub git_host: Entity<ChatGitHost>,
+    /// The thread details card is shown (the titlebar toggle).
+    pub thread_details_open: bool,
 }
 
 impl RenderOnce for ChatView {
@@ -75,6 +82,11 @@ impl RenderOnce for ChatView {
                 .map(|prompt| ComposerPendingUserInputBanner { prompt, source }.into_any_element())
         };
 
+        let composer_strip = self.git_host.read(cx).composer_strip();
+        let details_card = self
+            .thread_details_open
+            .then(|| self.git_host.read(cx).details_card(cx))
+            .flatten();
         div()
             .flex()
             .flex_col()
@@ -110,7 +122,7 @@ impl RenderOnce for ChatView {
                     .min_h_0()
                     // `MessagesTimeline`, owned by the chat column for now; the
                     // thread route will own it once threads are selectable.
-                    .child(timeline)
+                    .child(timeline.clone())
                     .child(
                         div()
                             .flex_shrink_0()
@@ -122,11 +134,16 @@ impl RenderOnce for ChatView {
                                     .w_full()
                                     .max_w(CHAT_CONTENT_MAX_WIDTH)
                                     .children(drawer)
-                                    .child(composer),
+                                    .child(composer)
+                                    // The strip hangs under the composer, joined by the glass seam.
+                                    .children(composer_strip),
                             )
                             // Bottom spacer: `h-[calc(env(safe-area-inset-bottom)+1.25rem)]`.
                             .child(div().h(rems(1.25))),
-                    ),
+                    )
+                    // `ThreadDetailsCard` (inline): top right of the canvas.
+                    .children(details_card)
+                    .child(chat_media_layer(timeline, window, cx)),
             )
     }
 }

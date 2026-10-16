@@ -119,7 +119,10 @@ pub struct OpenCodeServerProcess {
     exit_tx: watch::Sender<Option<i32>>,
     exit_rx: watch::Receiver<Option<i32>>,
     tasks: std::sync::Mutex<Vec<JoinHandle<()>>>,
-    stopped: AtomicBool,
+    /// Set once the group has been SIGKILLed and its bookkeeping released.
+    killed: AtomicBool,
+    /// Serialises `shutdown`: a second caller waits for the first to finish.
+    stopping: tokio::sync::Mutex<()>,
     shutdown_grace: Duration,
     lease: std::sync::Mutex<Option<ServerLease>>,
 }
@@ -189,14 +192,15 @@ impl OpenCodeServerProcess {
     }
 
     pub async fn shutdown(&self) {
-        if self.stopped.swap(true, Ordering::SeqCst) {
+        let _stopping = self.stopping.lock().await;
+        if self.killed.load(Ordering::SeqCst) {
             return;
         }
         let _ = signal_process_group(self.pid, SIGTERM);
+        // Declared after the lock, so it runs first on every exit from here. That
+        // includes the caller dropping this future during the grace period.
+        let _kill_on_exit = KillOnExit(self);
         tokio::time::sleep(self.shutdown_grace).await;
-        let _ = signal_process_group(self.pid, SIGKILL);
-        self.forget_lease();
-        self.finish_tasks();
     }
 
     fn forget_lease(&self) {
@@ -222,16 +226,30 @@ impl OpenCodeServerProcess {
         let code = (*self.exit_rx.borrow()).or(Some(-1));
         let _ = self.exit_tx.send(code);
     }
-}
 
-impl Drop for OpenCodeServerProcess {
-    fn drop(&mut self) {
-        if self.stopped.swap(true, Ordering::SeqCst) {
+    /// SIGKILLs the process group without the grace period. For drop paths.
+    /// Safe to call while a `shutdown` is still in its grace period.
+    pub fn kill(&self) {
+        if self.killed.swap(true, Ordering::SeqCst) {
             return;
         }
         let _ = signal_process_group(self.pid, SIGKILL);
         self.forget_lease();
         self.finish_tasks();
+    }
+}
+
+impl Drop for OpenCodeServerProcess {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+struct KillOnExit<'a>(&'a OpenCodeServerProcess);
+
+impl Drop for KillOnExit<'_> {
+    fn drop(&mut self) {
+        self.0.kill();
     }
 }
 
@@ -311,10 +329,16 @@ pub async fn start_open_code_server_process(
     command.env("OPENCODE_CONFIG_CONTENT", &config);
 
     let mut child = command.spawn().map_err(|err| {
-        OpenCodeRuntimeError::new(
-            "startOpenCodeServerProcess",
-            format!("Failed to spawn OpenCode server process: {err}"),
-        )
+        // Upstream's status classifier looks for ENOENT, so a missing binary says so.
+        let detail = if err.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "Failed to spawn OpenCode server process: spawn {} ENOENT ({err})",
+                input.binary_path
+            )
+        } else {
+            format!("Failed to spawn OpenCode server process: {err}")
+        };
+        OpenCodeRuntimeError::new("startOpenCodeServerProcess", detail)
     })?;
     let pid = child.id().unwrap_or(0);
     let serve_args = vec![
@@ -322,11 +346,10 @@ pub async fn start_open_code_server_process(
         format!("--hostname={hostname}"),
         format!("--port={port}"),
     ];
-    let recorded = match &input.ledger {
+    let lease = match &input.ledger {
         Some(ledger) => ledger.track(pid, port, &serve_args).await,
         None => None,
     };
-    let mut recorded = Some(std::sync::Mutex::new(recorded));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (exit_tx, exit_rx) = watch::channel(None);
@@ -356,7 +379,23 @@ pub async fn start_open_code_server_process(
         let _ = exit_tx_task.send(Some(code));
     }));
 
-    let mut exit_watch = exit_rx.clone();
+    // The group is owned from here on. If this future is dropped while it waits
+    // for readiness or verify, `Drop` SIGKILLs the group and aborts the readers,
+    // the same as upstream closing the Scope that owns the child.
+    let mut process = OpenCodeServerProcess {
+        url: String::new(),
+        server_password: server_password.clone(),
+        version: String::new(),
+        pid,
+        exit_tx,
+        exit_rx,
+        tasks: std::sync::Mutex::new(tasks),
+        killed: AtomicBool::new(false),
+        stopping: tokio::sync::Mutex::new(()),
+        shutdown_grace,
+        lease: std::sync::Mutex::new(lease),
+    };
+    let mut exit_watch = process.exit_rx.clone();
     let ready = tokio::time::timeout(timeout, async {
         tokio::select! {
             url = url_rx.recv() => url,
@@ -368,45 +407,21 @@ pub async fn start_open_code_server_process(
     let url = match ready {
         Ok(Some(url)) => url,
         Ok(None) => {
-            if exit_rx.borrow().is_none() {
+            if process.exit_rx.borrow().is_none() {
                 let _ = tokio::time::timeout(Duration::from_secs(2), exit_watch.changed()).await;
             }
-            let code = exit_rx.borrow().unwrap_or(-1);
+            let code = process.exit_rx.borrow().unwrap_or(-1);
             tokio::time::sleep(Duration::from_millis(20)).await;
             let stdout = stdout_log.lock().await.clone();
             let stderr = stderr_log.lock().await.clone();
-            let failed = OpenCodeServerProcess {
-                url: String::new(),
-                server_password: server_password.clone(),
-                version: String::new(),
-                pid,
-                exit_tx,
-                exit_rx,
-                tasks: std::sync::Mutex::new(tasks),
-                stopped: AtomicBool::new(false),
-                shutdown_grace,
-                lease: recorded.take().expect("lease"),
-            };
-            failed.shutdown().await;
+            process.shutdown().await;
             return Err(OpenCodeRuntimeError::new(
                 "startOpenCodeServerProcess",
                 startup_exit_detail(code, &stdout, &stderr),
             ));
         }
         Err(_elapsed) => {
-            let failed = OpenCodeServerProcess {
-                url: String::new(),
-                server_password: server_password.clone(),
-                version: String::new(),
-                pid,
-                exit_tx,
-                exit_rx,
-                tasks: std::sync::Mutex::new(tasks),
-                stopped: AtomicBool::new(false),
-                shutdown_grace,
-                lease: recorded.take().expect("lease"),
-            };
-            failed.shutdown().await;
+            process.shutdown().await;
             return Err(OpenCodeRuntimeError::new(
                 "startOpenCodeServerProcess",
                 format!(
@@ -418,18 +433,7 @@ pub async fn start_open_code_server_process(
     };
     capture.store(false, Ordering::SeqCst);
 
-    let mut process = OpenCodeServerProcess {
-        url: url.clone(),
-        server_password: server_password.clone(),
-        version: String::new(),
-        pid,
-        exit_tx,
-        exit_rx,
-        tasks: std::sync::Mutex::new(tasks),
-        stopped: AtomicBool::new(false),
-        shutdown_grace,
-        lease: recorded.take().expect("lease"),
-    };
+    process.url = url.clone();
     match verify(VerifyInput {
         url,
         server_password: server_password.clone(),
@@ -535,14 +539,9 @@ async fn pump_stdout(
     url_tx: mpsc::Sender<String>,
 ) {
     let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
+    let mut bytes = Vec::new();
     let mut armed = true;
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).await.unwrap_or(0);
-        if read == 0 {
-            break;
-        }
+    while let Some(line) = next_line(&mut reader, &mut bytes).await {
         if !armed || !capture.load(Ordering::SeqCst) {
             continue;
         }
@@ -562,18 +561,43 @@ async fn pump_stderr(
     log: Arc<tokio::sync::Mutex<String>>,
 ) {
     let mut reader = BufReader::new(stderr);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).await.unwrap_or(0);
-        if read == 0 {
-            break;
-        }
+    let mut bytes = Vec::new();
+    while let Some(line) = next_line(&mut reader, &mut bytes).await {
         if !capture.load(Ordering::SeqCst) {
             continue;
         }
         let mut buf = log.lock().await;
         push_capped(&mut buf, &line, STARTUP_MAX_CHARS);
+    }
+}
+
+/// Next line as lossy UTF-8. `None` only at EOF or on a real read error.
+/// Invalid bytes decode to U+FFFD and reading goes on, as upstream's
+/// `Stream.decodeText` does. A `read_line` error would end the drain, and the
+/// dropped pipe then kills the server with SIGPIPE. Bytes past the startup cap
+/// are discarded, so a line with no newline cannot grow without bound.
+async fn next_line<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> Option<String> {
+    line.clear();
+    loop {
+        let available = match reader.fill_buf().await {
+            Ok(available) => available,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        if available.is_empty() {
+            return (!line.is_empty()).then(|| String::from_utf8_lossy(line).into_owned());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let used = newline.map_or(available.len(), |index| index + 1);
+        let room = STARTUP_MAX_CHARS.saturating_sub(line.len());
+        line.extend_from_slice(&available[..used.min(room)]);
+        reader.consume(used);
+        if newline.is_some() {
+            return Some(String::from_utf8_lossy(line).into_owned());
+        }
     }
 }
 
@@ -605,7 +629,7 @@ pub fn parse_server_url_from_output(output: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
 
@@ -617,7 +641,7 @@ mod tests {
         Arc::new(|_| Box::pin(async { Ok("1.19.0".to_string()) }))
     }
 
-    fn write_fake_opencode() -> PathBuf {
+    pub(crate) fn write_fake_opencode() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("turin-oc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("opencode.sh");
@@ -640,15 +664,26 @@ if [ -n "${TURIN_TEST_CHILD:-}" ]; then
   sleep 120 &
   echo $! > "$TURIN_TEST_CHILD"
 fi
+if [ "${TURIN_TEST_TRAP_TERM:-}" = "1" ]; then
+  trap '' TERM
+fi
 if [ "${TURIN_TEST_EXIT:-}" = "1" ]; then
   echo boom >&2
   exit 7
+fi
+if [ "${TURIN_TEST_NOISE:-}" = "1" ]; then
+  printf '\377\376 bad\n'
 fi
 if [ "${TURIN_TEST_SILENT:-}" != "1" ]; then
   printf '%s\n' "server listening on http://127.0.0.1:${port}"
 fi
 while true; do
-  sleep 1
+  if [ "${TURIN_TEST_NOISE:-}" = "1" ]; then
+    printf '\377 noise\n'
+    sleep 0.02
+  else
+    sleep 1
+  fi
 done
 "#,
         )
@@ -661,7 +696,7 @@ done
         path
     }
 
-    fn temp_file(name: &str) -> PathBuf {
+    pub(crate) fn temp_file(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "turin-oc-{name}-{}-{}",
             std::process::id(),
@@ -674,7 +709,7 @@ done
         path
     }
 
-    fn alive(pid: u32) -> bool {
+    pub(crate) fn alive(pid: u32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
             .stdout(std::process::Stdio::null())
@@ -806,6 +841,49 @@ done
     }
 
     #[tokio::test]
+    async fn a_cancelled_shutdown_still_kills_the_group() {
+        let binary = write_fake_opencode();
+        let child_file = temp_file("trap-child");
+        let mut environment = BTreeMap::new();
+        environment.insert("TURIN_TEST_TRAP_TERM".into(), "1".into());
+        environment.insert("TURIN_TEST_CHILD".into(), child_file.display().to_string());
+        let process = start_open_code_server_process(
+            StartOpenCodeServer {
+                binary_path: binary.display().to_string(),
+                directory: "/work".into(),
+                server_password: None,
+                environment: Some(environment),
+                hostname: None,
+                port: Some(9),
+                timeout: Some(Duration::from_secs(2)),
+                shutdown_grace: Some(Duration::from_secs(3)),
+                ledger: None,
+            },
+            ok_verify(),
+        )
+        .await
+        .unwrap();
+        let pid = process.pid();
+        let child: u32 = std::fs::read_to_string(&child_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SIGTERM is trapped, so the grace period is still running when the caller gives up.
+        let _ = tokio::time::timeout(Duration::from_millis(300), process.shutdown()).await;
+        // The process is still held here, so only the cancelled shutdown can kill it.
+        for _ in 0..100 {
+            if !alive(pid) && !alive(child) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(pid), "group {pid} survived a cancelled shutdown");
+        assert!(!alive(child), "child {child} survived a cancelled shutdown");
+        assert!(!process.is_running());
+    }
+
+    #[tokio::test]
     async fn exit_before_ready_reports_the_code_and_stderr() {
         let binary = write_fake_opencode();
         let mut environment = BTreeMap::new();
@@ -865,6 +943,112 @@ done
             .parse()
             .unwrap();
         assert!(!alive(pid));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_start_while_it_waits_kills_the_group() {
+        let binary = write_fake_opencode();
+        let pid_file = temp_file("cancel-pid");
+        let child_file = temp_file("cancel-child");
+        let mut environment = BTreeMap::new();
+        environment.insert("TURIN_TEST_SILENT".into(), "1".into());
+        environment.insert("TURIN_TEST_PID".into(), pid_file.display().to_string());
+        environment.insert("TURIN_TEST_CHILD".into(), child_file.display().to_string());
+        let start = start_open_code_server_process(
+            StartOpenCodeServer {
+                binary_path: binary.display().to_string(),
+                directory: "/work".into(),
+                server_password: None,
+                environment: Some(environment),
+                hostname: None,
+                port: Some(9),
+                timeout: Some(Duration::from_secs(30)),
+                shutdown_grace: Some(grace()),
+                ledger: None,
+            },
+            ok_verify(),
+        );
+        // The start never sees a listening line, so the caller's deadline drops it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), start)
+                .await
+                .is_err()
+        );
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let child: u32 = std::fs::read_to_string(&child_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..100 {
+            if !alive(pid) && !alive(child) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(pid), "server group {pid} survived the dropped start");
+        assert!(
+            !alive(child),
+            "server child {child} survived the dropped start"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_on_stdout_does_not_stop_the_drain() {
+        let binary = write_fake_opencode();
+        let mut environment = BTreeMap::new();
+        environment.insert("TURIN_TEST_NOISE".into(), "1".into());
+        let process = start_open_code_server_process(
+            StartOpenCodeServer {
+                binary_path: binary.display().to_string(),
+                directory: "/work".into(),
+                server_password: None,
+                environment: Some(environment),
+                hostname: None,
+                port: Some(9),
+                timeout: Some(Duration::from_secs(2)),
+                shutdown_grace: Some(grace()),
+                ledger: None,
+            },
+            ok_verify(),
+        )
+        .await
+        .expect("non-UTF-8 bytes before the listening line must not stop startup");
+        // Output keeps coming after startup. A stopped reader would close the pipe and kill the server.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            process.is_running(),
+            "server died after its pipe was abandoned"
+        );
+        process.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_health_body_that_cannot_decode_is_an_invalid_health_response() {
+        for body in [
+            r#"{"healthy":false,"version":"1.19.0"}"#,
+            r#"{"healthy":true}"#,
+            r#"{"version":"1.19.0"}"#,
+        ] {
+            let server = crate::test_support::FakeServer::spawn(move |_| {
+                crate::test_support::FakeResponse::json(200, body)
+            })
+            .await;
+            let client = V1Client::new(&server.url, "/work", None).unwrap();
+            let err = verify_open_code_server_version(&client).await.unwrap_err();
+            assert_eq!(err.operation, "global.health");
+            assert_eq!(
+                err.detail,
+                format!(
+                    "OpenCode server returned an invalid health response. T3 Code requires OpenCode v{MINIMUM_OPENCODE_VERSION} or newer."
+                ),
+                "body {body}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 turin-contracts.workspace = true
 turin-provider-core.workspace = true
+turin-shared.workspace = true
+serde_yaml.workspace = true
+fancy-regex.workspace = true
 turin-acp.workspace = true
 async-trait.workspace = true
 base64.workspace = true

@@ -618,7 +618,7 @@ impl FlowLayout {
     }
 }
 
-type LinkHandler = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
+pub type LinkHandler = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
 
 /// A highlighted byte range painted behind the text (the composer's own
 /// selection, which does not take part in the window text selection).
@@ -830,6 +830,12 @@ impl InlineFlow {
 
     pub fn selection_color(mut self, color: Hsla) -> Self {
         self.selection_color = color;
+        self
+    }
+
+    /// Handles a completed link click. Without one, the flow opens the URL.
+    pub fn on_link(mut self, handler: LinkHandler) -> Self {
+        self.on_link = Some(handler);
         self
     }
 

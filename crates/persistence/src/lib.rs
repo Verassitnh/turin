@@ -35,6 +35,7 @@ pub use orchestration_event_store::{
     AgentEvent, AgentReplayStats, AppendAgentEvents, ApplicationStoredEvent, EventSubscription,
     LIVE_STREAM_MAX_ITEMS, OrchestrationEventStore, ProjectEvent, ProjectEventInput,
     ReadAgentEvents, ReadApplicationEvents, ReplayStats, StoredAgentEvent,
+    latest_application_sequence,
 };
 pub use provider_session_runtime::{
     ProviderSessionRuntime, ProviderSessionStatus, UpsertConflict, delete_by_thread_id,

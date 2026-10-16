@@ -1,0 +1,75 @@
+## T16 — 7081 lines, 59 files
+   702 apps/web/src/components/chat/ThreadRelationshipsControl.tsx
+   493 apps/web/src/components/chat/ThreadDetailsPrRow.tsx
+   377 apps/web/src/components/chat/AssistantCitationSource.tsx
+   294 apps/web/src/components/chat/ExpandedImageDialog.tsx
+   278 apps/web/src/components/chat/AssistantCitationChip.tsx
+   266 apps/web/src/components/chat/ThreadLineageWorkflowRow.tsx
+   262 apps/web/src/hooks/useCopyToClipboard.ts
+   247 apps/web/src/components/chat/ZoomableImage.tsx
+   217 apps/web/src/components/chat/MermaidDiagram.tsx
+   204 apps/web/src/components/chat/HighlightedTokens.tsx
+   199 apps/web/src/components/chat/ExpandedImagePreview.tsx
+   191 apps/web/src/components/chat/SubagentTooltipContent.tsx
+   179 apps/web/src/lib/contextWindow.ts
+   172 apps/web/src/components/chat/ChatCanvas.tsx
+   163 apps/web/src/components/chat/AssistantSelectionToolbar.tsx
+   152 apps/web/src/components/chat/ProviderStatusBanner.tsx
+   131 apps/web/src/components/chat/externalLinkContextMenu.ts
+   130 apps/web/src/components/chat/ThreadDetailsPrRows.tsx
+   129 apps/web/src/components/chat/ThreadFindBar.tsx
+   107 apps/web/src/markdown-incremental.ts
+   102 apps/web/src/components/chat/AssistantCitationCommentEditor.tsx
+   102 apps/web/src/lib/chatThreadActions.ts
+    98 apps/web/src/markdown-links.ts
+    98 apps/web/src/components/chat/UsageLimitRecoveryBanner.tsx
+    96 apps/web/src/components/chat/PierreEntryIcon.tsx
+    93 apps/web/src/components/chat/ProviderSubagentBar.tsx
+    90 apps/web/src/vendor/mdast-find-and-replace.ts
+    89 apps/web/src/components/chat/ThreadRelationshipIcon.tsx
+    88 apps/web/src/components/chat/ThreadErrorBanner.tsx
+    76 apps/web/src/components/chat/AgentElapsed.tsx
+    76 apps/web/src/components/chat/ShellCommandBlock.tsx
+    75 apps/web/src/components/chat/ProviderPackageIcon.tsx
+    74 apps/web/src/lib/incrementalHighlighting.ts
+    73 apps/web/src/components/chat/ThreadFindProvider.tsx
+    66 apps/web/src/components/chat/timelineMinimapItems.ts
+    64 apps/web/src/components/chat/agentSpawnSummary.ts
+    63 apps/web/src/questionAttachments.ts
+    62 apps/web/src/state/v2ItemSupport.ts
+    55 apps/web/src/components/chat/threadDetailsCardLayout.ts
+    54 apps/web/src/workspaceBasenameLookup.ts
+    53 apps/web/src/components/chat/MarkdownThreadLink.tsx
+    51 apps/web/src/components/chat/markdownImageGallery.ts
+    48 apps/web/src/components/chat/HighlightedCodeLines.tsx
+    47 apps/web/src/lib/assistantCitationNavigation.ts
+    41 apps/web/src/components/chat/WorkspaceEntryIcon.tsx
+    39 apps/web/src/lib/syntaxHighlighting.ts
+    35 apps/web/src/components/NoActiveThreadState.tsx
+    34 apps/web/src/hooks/useFileMetadata.ts
+    33 packages/client-runtime/src/work-log/scrollAnchor.ts
+    31 apps/web/src/components/chat/timelineScrollTarget.ts
+    30 apps/web/src/components/chat/ThreadStatusLine.tsx
+    29 apps/web/src/components/chat/timelineMinimapWheel.ts
+    21 apps/web/src/components/chat/assistantCitationCommentDismissal.ts
+    20 apps/web/src/components/chat/ComposerPlanFollowUpBanner.tsx
+    20 apps/web/src/components/chat/markdownFindContext.ts
+    18 apps/web/src/components/chat/ChatCanvasContext.ts
+    17 apps/web/src/components/chat/ChatGptSharingControl.tsx
+    17 apps/web/src/lib/projectPaths.ts
+    10 apps/web/src/components/chat/threadFindActionBus.ts
+## T16 — 2775 lines, 14 files
+   643 apps/web/src/components/chat/V2LifecycleRow.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   447 apps/web/src/components/chat/V2ItemInspector.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   325 apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   287 apps/web/src/components/chat/ProposedPlanCard.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   203 apps/web/src/components/chat/ThreadDetailsCard.tsx  <- ['U1-palette-git-toolbar']
+   189 apps/web/src/components/chat/ThreadDetailsPanel.tsx  <- ['U1-palette-git-toolbar']
+   180 apps/web/src/components/chat/ContextWindowMeter.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   116 apps/web/src/components/chat/ComposerPendingApprovalActions.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   106 apps/web/src/proposedPlan.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    92 apps/web/src/components/chat/ThreadDetailsControl.tsx  <- ['U1-palette-git-toolbar']
+    67 apps/web/src/components/chat/TimelineSystemDivider.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+    53 apps/web/src/components/chat/DiffStatLabel.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+    45 apps/web/src/components/chat/ThreadDetailsSection.tsx  <- ['U1-palette-git-toolbar']
+    22 apps/web/src/lib/orchestrationV2Timeline.ts  <- ['DEDUP-1', 'N1b-async-fs']

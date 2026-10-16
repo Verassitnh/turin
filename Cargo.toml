@@ -14,6 +14,7 @@ turin-persistence = { path = "crates/persistence" }
 turin-git = { path = "crates/git" }
 turin-source-control = { path = "crates/source-control" }
 turin-provider-core = { path = "crates/provider-core" }
+turin-launcher = { path = "crates/launcher" }
 turin-codex-app-server = { path = "crates/codex-app-server" }
 turin-claude-protocol = { path = "crates/claude-protocol" }
 turin-acp = { path = "crates/acp" }
@@ -25,6 +26,7 @@ turin-orchestration = { path = "crates/orchestration" }
 turin-hooks = { path = "crates/hooks" }
 turin-runtime = { path = "crates/runtime" }
 turin-projects = { path = "crates/projects" }
+turin-review = { path = "crates/review" }
 
 anyhow = "1"
 async-trait = "0.1"
@@ -38,6 +40,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 rusqlite = { version = "0.40", features = ["bundled", "serde_json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
 sha2 = "0.10"
 zip = "2.2"
 thiserror = "2"

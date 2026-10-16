@@ -22,6 +22,7 @@ pub mod separator;
 pub mod sidebar;
 pub mod skeleton;
 pub mod switch;
+pub mod table;
 pub mod text_input;
 pub mod textarea;
 pub mod toggle;

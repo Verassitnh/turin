@@ -465,6 +465,15 @@ fn dispatch_error(
     }
 }
 
+/// `canReplayCommandReceipt`: a reused command id aimed at another thread must
+/// not report the first thread's success as this thread's (v1 #5246).
+pub(super) fn can_replay_command_receipt(
+    receipt_thread_id: &ThreadId,
+    command_thread_id: &ThreadId,
+) -> bool {
+    receipt_thread_id == command_thread_id
+}
+
 /// `dispatchWithReceipt` for one command, under its thread's lock.
 pub async fn dispatch_with_receipt(
     orchestrator: &Orchestrator,
@@ -707,7 +716,7 @@ async fn replay_receipt(
     }
     // A receipt proves this exact command ran for its own thread. Replaying it
     // for another thread would report success for work that never happened.
-    if receipt.thread_id != thread_id {
+    if !can_replay_command_receipt(&receipt.thread_id, &thread_id) {
         return Err(OrchestratorError::CommandIdConflict {
             command_id,
             command_type,

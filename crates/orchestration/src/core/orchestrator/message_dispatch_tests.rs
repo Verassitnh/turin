@@ -12,7 +12,8 @@ use serde_json::json;
 use turin_contracts::{
     orchestration_v2::{
         OrchestrationV2CheckpointScope, OrchestrationV2CheckpointScopeKind,
-        OrchestrationV2ProviderCapabilities, OrchestrationV2RunStatus, OrchestrationV2TurnItem,
+        OrchestrationV2DomainEvent, OrchestrationV2ProviderCapabilities, OrchestrationV2RunStatus,
+        OrchestrationV2TurnItem,
     },
     provider_instance::ProviderInstanceId,
 };
@@ -233,6 +234,67 @@ async fn a_message_starts_a_run_and_queues_its_provider_turn_effect() {
         &effect.request,
         EffectRequest::ProviderTurnStart { run_id } if run_id == &run.id
     ));
+}
+
+#[tokio::test]
+async fn a_first_message_on_a_fresh_thread_does_not_unsnooze_it() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create", "thread:fresh", "Thread"))
+        .await
+        .expect("create commits");
+    let before = orchestrator
+        .get_thread_projection(&thread("thread:fresh"))
+        .await
+        .expect("projection reads")
+        .thread;
+    // A fresh thread holds an explicit null, which is not a snooze.
+    assert_eq!(before.snoozed_until, Some(None));
+    let result = orchestrator
+        .dispatch(message_command("command:first", "thread:fresh", json!({})))
+        .await
+        .expect("the start commits");
+    assert!(
+        result.stored_events.iter().all(|stored| !matches!(
+            stored.event,
+            OrchestrationV2DomainEvent::ThreadUnsnoozed { .. }
+        )),
+        "{:?}",
+        result
+            .stored_events
+            .iter()
+            .map(|stored| &stored.event)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_message_to_a_snoozed_thread_wakes_it() {
+    let (orchestrator, _) = harness().await;
+    orchestrator
+        .dispatch(create_command("command:create", "thread:snoozed", "Thread"))
+        .await
+        .expect("create commits");
+    orchestrator
+        .dispatch(
+            serde_json::from_value(json!({
+                "type": "thread.snooze",
+                "commandId": "command:snooze",
+                "threadId": "thread:snoozed",
+                "snoozedUntil": "2099-01-01T00:00:00.000Z",
+            }))
+            .expect("snooze decodes"),
+        )
+        .await
+        .expect("snooze commits");
+    let result = orchestrator
+        .dispatch(message_command("command:wake", "thread:snoozed", json!({})))
+        .await
+        .expect("the message commits");
+    assert!(result.stored_events.iter().any(|stored| matches!(
+        stored.event,
+        OrchestrationV2DomainEvent::ThreadUnsnoozed { .. }
+    )));
 }
 
 #[tokio::test]

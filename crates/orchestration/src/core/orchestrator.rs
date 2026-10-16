@@ -45,6 +45,8 @@ mod message_transfer;
 #[cfg(test)]
 mod message_transfer_tests;
 #[cfg(test)]
+mod migration_tests;
+#[cfg(test)]
 mod model_selection_tests;
 mod prepared_run;
 #[cfg(test)]
@@ -84,6 +86,8 @@ mod thread_pull_request;
 mod thread_pull_request_tests;
 #[cfg(test)]
 mod thread_search_tests;
+#[cfg(test)]
+mod thread_stop_tests;
 
 use std::sync::Arc;
 
@@ -132,6 +136,52 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// `readCommandProjection`: the records a command decision reads. Not the
+    /// historical assistant or tool output, and not the finished leaf nodes of
+    /// finished runs: this runs under the thread lock for every command, and
+    /// busy threads hold thousands of them. Handoff preparation reads its
+    /// history explicitly once it has chosen a strategy.
+    pub(crate) async fn read_command_projection(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<OrchestrationV2ThreadProjection, OrchestratorError> {
+        let records = self
+            .get_thread_records(
+                thread_id,
+                &[
+                    RecordField::Runs,
+                    RecordField::Attempts,
+                    RecordField::Nodes,
+                    RecordField::Subagents,
+                    RecordField::ProviderSessions,
+                    RecordField::ProviderThreads,
+                    RecordField::ProviderTurns,
+                    RecordField::RuntimeRequests,
+                    RecordField::Messages,
+                    RecordField::TurnItems,
+                    RecordField::CheckpointScopes,
+                    RecordField::ContextTransfers,
+                ],
+                &RecordFilter {
+                    turn_item_types: Some(vec!["user_message".to_owned(), "error".to_owned()]),
+                    message_roles: Some(vec![
+                        turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole::User,
+                    ]),
+                    omit_settled_leaf_nodes: true,
+                    ..RecordFilter::default()
+                },
+            )
+            .await?;
+        Ok(OrchestrationV2ThreadProjection {
+            checkpoints: Vec::new(),
+            plans: Vec::new(),
+            context_handoffs: Vec::new(),
+            visible_turn_items: Vec::new(),
+            updated_at: records.thread.updated_at,
+            ..records
+        })
+    }
+
     pub fn new(
         projection: Arc<ProjectionStore>,
         sink: EventSink,
@@ -493,5 +543,15 @@ impl OrchestratorPort for Orchestrator {
             })
             .filter_map(|item| future::ready(item.ok().map(|stored| stored.event)));
         Ok(events.boxed())
+    }
+}
+
+/// Whether a read failed because the thread does not exist.
+pub(crate) fn is_thread_not_found(error: &OrchestratorError) -> bool {
+    match error {
+        OrchestratorError::Projection { cause, .. } => cause
+            .downcast_ref::<crate::projection::error::ProjectionStoreError>()
+            .is_some_and(|cause| cause.is_thread_not_found()),
+        _ => false,
     }
 }

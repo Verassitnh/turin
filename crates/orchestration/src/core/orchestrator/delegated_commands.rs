@@ -146,11 +146,7 @@ async fn notification_accepted(
     thread_id: &ThreadId,
     message_id: &turin_contracts::MessageId,
 ) -> Result<(), OrchestratorError> {
-    let projection = orchestrator
-        .projection
-        .get_thread_projection(thread_id)
-        .await
-        .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+    let projection = orchestrator.read_command_projection(thread_id).await?;
     let message = projection.messages.iter().find(|row| &row.id == message_id);
     let ownership = message.and_then(|message| message.delegated_completion.as_ref());
     let parent_run = ownership.and_then(|ownership| {

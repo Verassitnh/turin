@@ -75,11 +75,7 @@ pub(super) async fn decide(
     let OrchestrationV2ServerCommand::Client(C::QueueResume { thread_id, .. }) = command else {
         return Ok(false);
     };
-    let projection = orchestrator
-        .projection
-        .get_thread_projection(thread_id)
-        .await
-        .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+    let projection = orchestrator.read_command_projection(thread_id).await?;
     if projection.thread.archived_at.is_some() || projection.thread.deleted_at.is_some() {
         return Err(dispatch_failure(
             command,
@@ -294,11 +290,7 @@ impl Orchestrator {
         {
             return Ok(());
         }
-        let projection = self
-            .projection
-            .get_thread_projection(thread_id)
-            .await
-            .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+        let projection = self.read_command_projection(thread_id).await?;
         if projection.thread.archived_at.is_some()
             || projection.thread.deleted_at.is_some()
             || projection.runs.iter().any(is_blocking_run)

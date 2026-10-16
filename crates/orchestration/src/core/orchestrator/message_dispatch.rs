@@ -166,17 +166,14 @@ pub(super) async fn dispatch_message(
         unreachable!("decide routes only message.dispatch here");
     };
 
-    let mut projection = match orchestrator
-        .projection
-        .get_thread_projection(thread_id)
-        .await
-    {
+    let mut projection = match orchestrator.read_command_projection(thread_id).await {
         Ok(projection) => projection,
         // A thread this command's own decision creates (a delegated child)
         // exists only as a pending event.
-        Err(cause) if cause.is_thread_not_found() => pending_thread_projection(decision, thread_id)
-            .ok_or_else(|| OrchestratorError::projection(thread_id.clone(), cause))?,
-        Err(cause) => return Err(OrchestratorError::projection(thread_id.clone(), cause)),
+        Err(error) if super::super::orchestrator::is_thread_not_found(&error) => {
+            pending_thread_projection(decision, thread_id).ok_or(error)?
+        }
+        Err(error) => return Err(error),
     };
 
     if let Some(source_id) = manual_continuation_of_run_id {
@@ -312,11 +309,12 @@ pub(super) async fn dispatch_message(
         emit_thread_event(decision, "unsettled", &thread, now);
         projection.thread = thread;
     }
-    if projection.thread.snoozed_until.is_some() {
+    // `snoozedUntil != null`: an explicit `null` (a fresh thread) is not a snooze.
+    if projection.thread.snoozed_until.flatten().is_some() {
         let now = decision.now();
         let mut thread = projection.thread.clone();
-        thread.snoozed_until = None;
-        thread.snoozed_at = None;
+        thread.snoozed_until = Some(None);
+        thread.snoozed_at = Some(None);
         thread.updated_at = now;
         emit_thread_event(decision, "unsnoozed", &thread, now);
         projection.thread = thread;
@@ -1125,13 +1123,7 @@ async fn start_run(
         })
     });
     let legacy_handoff_ids = |existing: &[turin_contracts::ContextHandoffId]| {
-        let mut ids_out = existing.to_vec();
-        if let Some(handoff) = &legacy_import_handoff
-            && !ids_out.contains(&handoff.id)
-        {
-            ids_out.push(handoff.id.clone());
-        }
-        ids_out
+        append_context_handoff_id(existing, legacy_import_handoff.as_ref().map(|h| &h.id))
     };
     let provider_thread = match active_provider_thread {
         Some(active) => OrchestrationV2ProviderThread {
@@ -1594,6 +1586,21 @@ fn pending_thread_projection(
         &decision.events,
         thread_id,
     ))
+}
+
+/// `appendContextHandoffId`: a reissued legacy handoff is recorded on the
+/// provider thread once.
+pub(super) fn append_context_handoff_id(
+    existing: &[turin_contracts::ContextHandoffId],
+    handoff_id: Option<&turin_contracts::ContextHandoffId>,
+) -> Vec<turin_contracts::ContextHandoffId> {
+    let mut ids = existing.to_vec();
+    if let Some(handoff_id) = handoff_id
+        && !ids.contains(handoff_id)
+    {
+        ids.push(handoff_id.clone());
+    }
+    ids
 }
 
 /// `nextTurnItemOrdinal` for a projection read from the store: the store's

@@ -193,6 +193,7 @@ struct FakeRuntime {
     fail_start: AtomicBool,
     closes: AtomicUsize,
     interrupts: AtomicUsize,
+    tasks_end_with_process: AtomicBool,
 }
 
 impl FakeRuntime {
@@ -205,6 +206,7 @@ impl FakeRuntime {
             fail_start: AtomicBool::new(false),
             closes: AtomicUsize::new(0),
             interrupts: AtomicUsize::new(0),
+            tasks_end_with_process: AtomicBool::new(false),
         })
     }
 
@@ -223,6 +225,10 @@ impl FakeRuntime {
 impl ProviderSessionRuntime for FakeRuntime {
     fn instance_id(&self) -> &ProviderInstanceId {
         &self.session.provider_instance_id
+    }
+
+    fn background_tasks_end_with_process(&self) -> bool {
+        self.tasks_end_with_process.load(Ordering::SeqCst)
     }
 
     fn driver(&self) -> &ProviderDriverKind {
@@ -442,6 +448,8 @@ impl ProviderSessionSink for RecordingSink {
 #[derive(Default)]
 struct FakeReads {
     turns: Mutex<Vec<RunningProviderTurn>>,
+    /// The thread lists the roster read was asked for.
+    roster_reads: Mutex<Vec<Vec<ThreadId>>>,
 }
 
 #[async_trait]
@@ -456,9 +464,10 @@ impl ProviderSessionReads for FakeReads {
 
     async fn pending_background_tasks(
         &self,
-        _thread_ids: &[ThreadId],
+        thread_ids: &[ThreadId],
         _provider_session_id: &ProviderSessionId,
     ) -> Result<Vec<ReleasedBackgroundTasks>, BoxError> {
+        self.roster_reads.lock().push(thread_ids.to_vec());
         Ok(Vec::new())
     }
 }
@@ -897,6 +906,38 @@ async fn detach_of_last_thread_releases_single_thread_session() {
             .manager
             .get(&provider_session_id("provider-session:1"))
             .is_none()
+    );
+}
+
+/// The detaching thread already left the attached set, but its background
+/// tasks end with the session's process, so its roster is read for the release.
+#[tokio::test]
+async fn a_detach_that_releases_the_session_reads_the_detached_threads_roster() {
+    let runtime = FakeRuntime::new(session("provider-session:1", false));
+    runtime.tasks_end_with_process.store(true, Ordering::SeqCst);
+    let reads = Arc::new(FakeReads::default());
+    let harness = harness_with_reads(vec![runtime], reads.clone());
+    harness
+        .manager
+        .open(open_input("thread:a", "provider-session:1"))
+        .await
+        .expect("open");
+
+    harness
+        .manager
+        .detach(
+            &provider_session_id("provider-session:1"),
+            &ThreadId::new("thread:a").expect("fixture id"),
+            None,
+        )
+        .await
+        .expect("detach");
+
+    let reads = reads.roster_reads.lock().clone();
+    assert_eq!(
+        reads,
+        vec![vec![ThreadId::new("thread:a").expect("fixture id")]],
+        "the detached thread is in the roster read"
     );
 }
 

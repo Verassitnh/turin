@@ -134,3 +134,93 @@ async fn the_port_reads_pages_snapshots_and_items_from_the_store() {
             .is_ok()
     );
 }
+
+/// `readCommandProjection`: control records only. Finished leaf nodes of
+/// finished runs and non-control turn items stay unread.
+#[tokio::test]
+async fn the_command_projection_leaves_out_history_and_settled_leaf_nodes() {
+    use crate::projection::test_support::{apply_all, event, turn_item};
+    let h = harness(false, None).await;
+    let run_id = h.running_run("thread:cmd").await;
+    let id = super::tests::thread("thread:cmd");
+    let full = h
+        .orchestrator
+        .get_thread_projection(&id)
+        .await
+        .expect("full");
+    let root = full.nodes[0].clone();
+    let mut run = serde_json::to_value(&full.runs[0]).expect("run encodes");
+    run["status"] = json!("completed");
+    run["completedAt"] = json!(super::message_steer_tests::T1);
+    let mut leaf = serde_json::to_value(&root).expect("node encodes");
+    leaf["id"] = json!("node:leaf");
+    leaf["kind"] = json!("assistant_message");
+    leaf["status"] = json!("completed");
+    leaf["parentNodeId"] = json!(root.id);
+    leaf["checkpointScopeId"] = serde_json::Value::Null;
+    let assistant = turn_item(
+        "thread:cmd",
+        "item:assistant",
+        Some(&run_id),
+        90,
+        "assistant_message",
+        "completed",
+        json!({"messageId": "message:assistant", "text": "long answer", "streaming": false}),
+    );
+    apply_all(
+        &h.projection,
+        vec![
+            event(
+                "run.updated",
+                "thread:cmd",
+                super::message_steer_tests::T1,
+                run,
+            ),
+            event(
+                "node.updated",
+                "thread:cmd",
+                super::message_steer_tests::T1,
+                leaf,
+            ),
+            event(
+                "turn-item.updated",
+                "thread:cmd",
+                super::message_steer_tests::T1,
+                assistant,
+            ),
+        ],
+    )
+    .await;
+
+    let full = h
+        .orchestrator
+        .get_thread_projection(&id)
+        .await
+        .expect("full");
+    assert!(
+        full.nodes
+            .iter()
+            .any(|node| node.id.as_str() == "node:leaf")
+    );
+    assert!(!full.visible_turn_items.is_empty());
+
+    let command = h
+        .orchestrator
+        .read_command_projection(&id)
+        .await
+        .expect("command");
+    assert!(
+        command
+            .nodes
+            .iter()
+            .all(|node| node.id.as_str() != "node:leaf"),
+        "a finished leaf of a finished run stays unread"
+    );
+    assert!(command.turn_items.iter().all(|item| matches!(
+        item,
+        turin_contracts::orchestration_v2::OrchestrationV2TurnItem::UserMessage { .. }
+    )));
+    assert!(command.visible_turn_items.is_empty());
+    assert!(command.checkpoints.is_empty() && command.plans.is_empty());
+    assert_eq!(command.runs.len(), 1);
+}

@@ -427,8 +427,9 @@ async fn hold_stopped_thread(
         if run.status == OrchestrationV2RunStatus::Cancelled
             && orchestrator
                 .recovery
-                .restart_continuation_pending(run)
+                .awaits_restart_continuation(run)
                 .await
+                .map_err(|cause| dispatch_failure(command, cause.to_string()))?
         {
             mark_stopped_run(
                 orchestrator,
@@ -518,14 +519,11 @@ async fn hold_stopped_thread(
             add(run_id.clone());
         }
     }
-    // Each disposal reads the events the ones before it wrote.
+    // Each disposal reads the events the ones before it wrote: the stored
+    // rows are read once, and the pending events are laid over them again.
+    let stored = orchestrator.read_command_projection(&thread.id).await?;
     for parent in cohorts {
-        let full = orchestrator
-            .projection
-            .get_thread_projection(&thread.id)
-            .await
-            .map_err(|cause| OrchestratorError::projection(thread.id.clone(), cause))?;
-        let pending = with_pending_events(full, &decision.events, &thread.id);
+        let pending = with_pending_events(stored.clone(), &decision.events, &thread.id);
         dispose_delegated_completion_cohort(
             decision,
             &pending,
@@ -1106,11 +1104,7 @@ async fn stop_remaining_work(
         .await;
     }
     let thread_id = &projection.thread.id;
-    let full = orchestrator
-        .projection
-        .get_thread_projection(thread_id)
-        .await
-        .map_err(|cause| OrchestratorError::projection(thread_id.clone(), cause))?;
+    let full = orchestrator.read_command_projection(thread_id).await?;
     let pending = with_pending_events(full, &decision.events, thread_id);
     dispose_delegated_completion_cohort(
         decision,

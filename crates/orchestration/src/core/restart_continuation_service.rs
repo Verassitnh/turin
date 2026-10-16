@@ -577,6 +577,13 @@ impl RestartRecovery for RestartContinuationService {
             .await
     }
 
+    async fn awaits_restart_continuation(
+        &self,
+        run: &OrchestrationV2Run,
+    ) -> Result<bool, BoxError> {
+        RestartContinuationService::awaits_restart_continuation(self, run).await
+    }
+
     async fn restart_continuation_pending(&self, run: &OrchestrationV2Run) -> bool {
         self.awaits_restart_continuation(run).await.unwrap_or(false)
     }

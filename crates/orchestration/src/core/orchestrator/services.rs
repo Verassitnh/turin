@@ -174,6 +174,16 @@ pub trait RestartRecovery: Send + Sync {
     /// Whether a restart continuation of this cut run has not started yet.
     async fn restart_continuation_pending(&self, run: &OrchestrationV2Run) -> bool;
 
+    /// [`Self::restart_continuation_pending`] that reports a failed read
+    /// instead of answering "not pending" (`awaitsRestartContinuation`). Stop
+    /// uses it: it must fail rather than skip a source it could not check.
+    async fn awaits_restart_continuation(
+        &self,
+        run: &OrchestrationV2Run,
+    ) -> Result<bool, BoxError> {
+        Ok(self.restart_continuation_pending(run).await)
+    }
+
     /// Resolves once that continuation has run or was declined.
     async fn await_restart_continuation(&self, run: &OrchestrationV2Run);
 }

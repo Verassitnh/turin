@@ -12,6 +12,7 @@ pub mod projection_applier;
 pub mod projection_reads;
 pub mod provider_continuation_service;
 pub mod provider_event_ingestor;
+pub mod provider_runtime_recovery_service;
 pub mod provider_session_manager;
 pub mod provider_session_transition_policy;
 pub mod provider_switch_service;

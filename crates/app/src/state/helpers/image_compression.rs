@@ -128,7 +128,8 @@ pub trait ImageCodec {
     /// `canRecompress`: whether this codec can decode and encode at all.
     fn can_recompress(&self) -> bool;
 
-    /// `createImageBitmap`; `apply_orientation` is `imageOrientation: "from-image"`.
+    /// `createImageBitmap`; `apply_orientation` is `imageOrientation: "from-image"`,
+    /// which is also the spec default for callers that pass no options.
     fn decode(&self, file: &ImageFile, apply_orientation: bool)
     -> Result<Self::Bitmap, CodecError>;
 
@@ -431,7 +432,7 @@ fn reencode_within_budget<C: ImageCodec>(
         return Err(TooLarge);
     }
 
-    let Ok(bitmap) = codec.decode(file, false) else {
+    let Ok(bitmap) = codec.decode(file, true) else {
         return Err(Unreadable);
     };
 
@@ -486,7 +487,7 @@ pub fn create_composer_image_thumbnail<C: ImageCodec>(
     if !codec.can_recompress() {
         return None;
     }
-    let bitmap = codec.decode(file, false).ok()?;
+    let bitmap = codec.decode(file, true).ok()?;
     let size = codec.bitmap_size(&bitmap);
     let side = size.width.min(size.height);
     if side == 0 {
@@ -1194,6 +1195,16 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_decodes_with_exif_orientation_applied() {
+        let mut codec = FakeCodec::flat(1);
+        codec.bitmap_size = size(500, 500);
+
+        let _ = create_composer_image_thumbnail(&codec, &make_file(5, IMAGE_PNG));
+
+        assert_eq!(*codec.log.decode_orientations.borrow(), [true]);
+    }
+
+    #[test]
     fn thumbnail_releases_the_decoded_image_when_encoding_fails() {
         let mut codec = FakeCodec::flat(1);
         codec.bitmap_size = size(500, 500);
@@ -1263,6 +1274,8 @@ mod tests {
             .expect("fits");
 
         assert!(image.recompressed);
+        // createImageBitmap(file) defaults to imageOrientation "from-image".
+        assert_eq!(*codec.log.decode_orientations.borrow(), [true]);
         assert_eq!(image.mime_type, IMAGE_WEBP);
         assert!(image.data_url.len() <= MAX_STASH_IMAGE_DATA_URL_CHARS);
         // sizeBytes describes the re-encoded payload, not the 4MB original.
@@ -1822,6 +1835,27 @@ mod tests {
             )
             .expect("png encodes");
         ImageFile::new("noise.png", IMAGE_PNG, encoded)
+    }
+
+    #[test]
+    fn the_image_crate_codec_decodes_gif_bmp_and_webp_so_oversized_ones_can_shrink() {
+        let source =
+            image::RgbaImage::from_fn(24, 16, |x, y| image::Rgba([x as u8, y as u8, 9, 255]));
+        for (format, name, mime) in [
+            (image::ImageFormat::Gif, "a.gif", "image/gif"),
+            (image::ImageFormat::Bmp, "a.bmp", "image/bmp"),
+            (image::ImageFormat::WebP, "a.webp", IMAGE_WEBP),
+        ] {
+            let mut encoded = Vec::new();
+            source
+                .write_to(&mut std::io::Cursor::new(&mut encoded), format)
+                .expect("encodes");
+            let file = ImageFile::new(name, mime, encoded);
+            let bitmap = ImageCrateCodec
+                .decode(&file, true)
+                .unwrap_or_else(|error| panic!("{name} decodes: {error:?}"));
+            assert_eq!(ImageCrateCodec.bitmap_size(&bitmap), size(24, 16));
+        }
     }
 
     #[test]

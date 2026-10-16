@@ -242,6 +242,50 @@ mod tests {
     }
 
     #[test]
+    fn tracks_bare_modifier_keydown_and_keyup_events_explicitly() {
+        let event = |kind, key, meta_key, shift_key| ShortcutKeyboardEvent {
+            kind,
+            key,
+            modifiers: ShortcutModifierState {
+                meta_key,
+                shift_key,
+                ..EMPTY_SHORTCUT_MODIFIER_STATE
+            },
+        };
+        let state = |meta_key, shift_key| ShortcutModifierState {
+            meta_key,
+            shift_key,
+            ..EMPTY_SHORTCUT_MODIFIER_STATE
+        };
+        let mut current = EMPTY_SHORTCUT_MODIFIER_STATE;
+
+        current = shortcut_modifier_state_after_keyboard_event(
+            current,
+            &event(KeyboardEventKind::KeyDown, "Meta", false, false),
+        );
+        assert_eq!(current, state(true, false));
+
+        current = shortcut_modifier_state_after_keyboard_event(
+            current,
+            &event(KeyboardEventKind::KeyDown, "Shift", true, false),
+        );
+        assert_eq!(current, state(true, true));
+
+        // Meta comes up while Shift stays held.
+        current = shortcut_modifier_state_after_keyboard_event(
+            current,
+            &event(KeyboardEventKind::KeyUp, "Meta", true, true),
+        );
+        assert_eq!(current, state(false, true));
+
+        current = shortcut_modifier_state_after_keyboard_event(
+            current,
+            &event(KeyboardEventKind::KeyUp, "Shift", false, true),
+        );
+        assert_eq!(current, EMPTY_SHORTCUT_MODIFIER_STATE);
+    }
+
+    #[test]
     fn a_non_modifier_key_can_only_clear_a_bit_never_set_one() {
         let meta_held = ShortcutModifierState {
             meta_key: true,

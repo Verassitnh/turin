@@ -199,8 +199,9 @@ fn autolink_inlines(inlines: &Inlines, repository_url: &str) -> Inlines {
         autolinks: inlines.autolinks.clone(),
         ..Default::default()
     };
-    // (old start, old end, new start): where each stretch of source text landed, to move images.
-    let mut segments: Vec<(usize, usize, usize)> = Vec::new();
+    // (old start, old end, new start, new length): where each stretch of source text landed, to
+    // move images.
+    let mut segments: Vec<(usize, usize, usize, usize)> = Vec::new();
     let paragraphs = root.children.unwrap_or_default();
     for ((range, marks), paragraph) in runs.iter().zip(paragraphs) {
         let children = paragraph.children.unwrap_or_default();
@@ -208,7 +209,7 @@ fn autolink_inlines(inlines: &Inlines, repository_url: &str) -> Inlines {
             || children.len() <= 1 && children.first().is_none_or(|c| c.node_type == "text")
         {
             // Unchanged: copy the run as it was.
-            segments.push((range.start, range.end, out.text.len()));
+            segments.push((range.start, range.end, out.text.len(), range.len()));
             out.text.push_str(&inlines.text[range.clone()]);
             out.runs.push(InlineRun {
                 len: range.len(),
@@ -245,7 +246,12 @@ fn autolink_inlines(inlines: &Inlines, repository_url: &str) -> Inlines {
                     (value, len, *marks)
                 }
             };
-            segments.push((old_cursor, old_cursor + old_len, out.text.len()));
+            segments.push((
+                old_cursor,
+                old_cursor + old_len,
+                out.text.len(),
+                new_text.len(),
+            ));
             out.text.push_str(&new_text);
             out.runs.push(InlineRun {
                 len: new_text.len(),
@@ -260,9 +266,14 @@ fn autolink_inlines(inlines: &Inlines, repository_url: &str) -> Inlines {
         .map(|(offset, alt, url)| {
             let moved = segments
                 .iter()
-                .find(|(start, end, _)| start <= offset && offset <= end)
-                .map_or(*offset, |(start, end, new_start)| {
-                    new_start + (offset - start).min(end - start)
+                .find(|(start, end, _, _)| start <= offset && offset <= end)
+                .map_or(*offset, |(start, end, new_start, new_len)| {
+                    // An offset at the old end lands at the new end, whatever the new length.
+                    if offset == end {
+                        new_start + new_len
+                    } else {
+                        new_start + (offset - start).min(*new_len)
+                    }
                 });
             (moved, alt.clone(), url.clone())
         })
@@ -606,5 +617,17 @@ mod tests {
         // The hash shrank from 40 to 7 characters, so the image moved left by 33 bytes.
         assert_eq!(inlines.images[0].0, before[0].0 - 33);
         assert!(inlines.text.starts_with("0123456 then"));
+    }
+
+    #[test]
+    fn an_image_directly_after_a_commit_autolink_lands_at_the_end_of_the_short_label() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let parsed = parse_chat_markdown(&format!("{sha}![](https://example.com/a.png)"), false);
+        let before = document_text(&parsed).images.clone();
+        assert_eq!(before[0].0, 40);
+        let linked = apply_pull_request_autolinks(&parsed, "https://github.com/a/b");
+        let inlines = document_text(&linked);
+        assert_eq!(inlines.text, "0123456");
+        assert_eq!(inlines.images[0].0, 7);
     }
 }

@@ -8,6 +8,10 @@
 //! `sheet`, `sidebar` and `embedded` modes the parent owns the size
 //! (`w-full`).
 //!
+//! Upstream re-exports `getPreviewPanelMaxWidth` from this file; here it lives
+//! in `hooks::use_preview_panel_inline_size::get_preview_panel_max_width`,
+//! next to its ported tests.
+//!
 //! The browser preview is cut, but the pull requests page shares this shell.
 //! `widthStorageKey` and `defaultWidth` belong to
 //! `usePreviewPanelInlineSize`, which the owner of the panel drives.

@@ -30,6 +30,7 @@ pub mod right_panel_store;
 pub mod running_thread_keep_alive;
 pub mod shell_reducer;
 pub mod shell_state;
+pub mod shortcut_modifier_state;
 pub mod sidebar_project_grouping;
 pub mod store;
 pub mod subagent_display;

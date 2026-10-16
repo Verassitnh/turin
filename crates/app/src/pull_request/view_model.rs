@@ -15,10 +15,11 @@ use std::sync::Arc;
 
 use turin_contracts::pull_request::{
     PullRequestAction, PullRequestChecks, PullRequestCommentUpdateKind, PullRequestDetailView,
-    PullRequestDiffResult, PullRequestFileViewed, PullRequestLabelCandidateList,
-    PullRequestMergeMethod, PullRequestReactionContent, PullRequestRef,
-    PullRequestReviewCommentDraft, PullRequestReviewVerdict, PullRequestReviewerCandidateList,
-    PullRequestStack, PullRequestUpdateMethod,
+    PullRequestDiffFileChangeType, PullRequestDiffFileContentsResult, PullRequestDiffResult,
+    PullRequestFileViewed, PullRequestLabelCandidateList, PullRequestMergeMethod,
+    PullRequestReactionContent, PullRequestRef, PullRequestReviewCommentDraft,
+    PullRequestReviewVerdict, PullRequestReviewerCandidateList, PullRequestStack,
+    PullRequestSummary, PullRequestUpdateMethod,
 };
 use turin_contracts::pull_request_review_guide::PullRequestReviewGuideResult;
 use turin_contracts::thread_pull_request::ThreadPullRequestLink;
@@ -30,6 +31,10 @@ use gpui_kit::{App, Context};
 
 use super::pull_request_list_logic::{EnvironmentPullRequestEntry, MergedPullRequestList};
 use super::pull_request_stack_snapshot::{PullRequestStackQuery, PullRequestStackView};
+use super::shared_summary::{
+    PullRequestSummaryObservations, SavedThreadLinks, saved_pull_request_summaries,
+    shared_pull_request_summary,
+};
 use crate::hooks::use_pull_request_stack::use_pull_request_stack;
 
 /// A read that may not have answered yet, or may have failed. `stale` data is kept on screen
@@ -129,9 +134,15 @@ pub struct PullRequestDetailSnapshot {
     /// The stack read failed; saved membership keeps navigation working (`usePullRequestStack`).
     pub stack_error: Option<String>,
     pub diffs: DiffsByCommit,
+    /// Whole old and new files behind a path, read when an excerpt's bars first open (the
+    /// whole change request's, keyed by the new path).
+    pub file_contents: HashMap<String, Loadable<PullRequestDiffFileContentsResult>>,
     pub files_viewed: Vec<PullRequestFileViewed>,
     pub linked_threads: Vec<LinkedThread>,
     pub guide: Loadable<PullRequestReviewGuideResult>,
+    /// Why the last request to write a guide did not start a run (`generateReviewGuide` failed).
+    /// The source sets it when `generate_guide` is refused and clears it when one is asked for.
+    pub guide_start_error: Option<String>,
     pub reviewer_candidates: Option<PullRequestReviewerCandidateList>,
     pub label_candidates: Option<PullRequestLabelCandidateList>,
     /// The action in flight, if any (every control is disabled while one runs).
@@ -271,6 +282,20 @@ pub trait PullRequestSource: 'static {
     ) {
         let _ = (reference, commit, cursor, cx);
     }
+    /// `pullRequestEnvironment.diffFileContents`: the file's complete old and new text, which the
+    /// Guide's excerpts open their surrounding lines from. The source publishes the answer into
+    /// `PullRequestDetailSnapshot::file_contents`; one that cannot read files leaves it unset.
+    fn load_diff_file_contents(
+        &self,
+        reference: &PullRequestRef,
+        commit: Option<String>,
+        change_type: PullRequestDiffFileChangeType,
+        old_path: &str,
+        new_path: &str,
+        cx: &mut App,
+    ) {
+        let _ = (reference, commit, change_type, old_path, new_path, cx);
+    }
     /// "Viewed" checkboxes.
     fn set_files_viewed(
         &self,
@@ -315,6 +340,8 @@ pub struct PullRequestStore {
     thread_links: HashMap<String, Vec<ThreadPullRequestLink>>,
     threads: Vec<ThreadChoice>,
     source: Option<Arc<dyn PullRequestSource>>,
+    /// What any surface last saw of each pull request (`observedPullRequestSummaryAtom`).
+    observations: PullRequestSummaryObservations,
 }
 
 impl PullRequestStore {
@@ -325,6 +352,7 @@ impl PullRequestStore {
             thread_links: HashMap::new(),
             threads: Vec::new(),
             source: None,
+            observations: PullRequestSummaryObservations::default(),
         }
     }
 
@@ -372,6 +400,32 @@ impl PullRequestStore {
         .view
     }
 
+    /// `useSharedPullRequestSummary` for one pull request: the newest of `current`, what any list
+    /// read observed, and what a linked thread saved. Saved snapshots are indexed under the
+    /// reference's own project (only the summary's `projectId` depends on it, never the order).
+    pub fn shared_summary(
+        &self,
+        environment_id: &EnvironmentId,
+        reference: &PullRequestRef,
+        current: Option<&PullRequestSummary>,
+    ) -> Option<PullRequestSummary> {
+        let saved = saved_pull_request_summaries(self.thread_links.values().map(|links| {
+            SavedThreadLinks {
+                environment_id,
+                project_id: &reference.project_id,
+                pull_requests: links,
+            }
+        }));
+        shared_pull_request_summary(
+            &self.observations,
+            &saved,
+            Some(environment_id),
+            Some(reference),
+            current,
+            None,
+        )
+    }
+
     pub fn thread_links(&self, thread_id: &ThreadId) -> &[ThreadPullRequestLink] {
         self.thread_links
             .get(thread_id.as_str())
@@ -394,6 +448,11 @@ impl PullRequestStore {
         update: impl FnOnce(&mut PullRequestListSnapshot),
     ) {
         update(&mut self.list);
+        // Every row of an answer is an observation, stamped with when it arrived.
+        if let Some(merged) = &self.list.merged {
+            self.observations
+                .observe_entries(&merged.entries, crate::timestamp_format::now_ms() as f64);
+        }
         cx.notify();
     }
 

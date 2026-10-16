@@ -627,6 +627,40 @@ index 7d1e0aa..2f33b18 100644
 "#;
 
 /// The unified diff `pullRequests.diff` answers for the demo pull request.
+/// The whole file behind a path of the demo diff: the lines the patch shows at their own numbers
+/// and a plausible unchanged line everywhere else, thirty past the last hunk.
+pub fn diff_file_contents(
+    path: &str,
+) -> Option<turin_contracts::pull_request::PullRequestDiffFileContentsResult> {
+    use super::code_tab::patch::{ParsedPatch, parse_patch};
+    let ParsedPatch::Files(files) = parse_patch(&diff_result().patch)? else {
+        return None;
+    };
+    let file = files.into_iter().find(|file| file.name == path)?;
+    let rows = file.rows();
+    let last = rows
+        .iter()
+        .filter_map(|row| row.new_line)
+        .max()
+        .unwrap_or(0)
+        + 30;
+    let text_at = |line: i64| {
+        rows.iter()
+            .find(|row| row.new_line == Some(line))
+            .map_or_else(
+                || format!("    // unchanged line {line}\n"),
+                |row| format!("{}\n", row.text.trim_end_matches('\n')),
+            )
+    };
+    let new_contents: String = (1..=last).map(text_at).collect();
+    Some(
+        turin_contracts::pull_request::PullRequestDiffFileContentsResult {
+            old_contents: new_contents.clone(),
+            new_contents,
+        },
+    )
+}
+
 pub fn diff_result() -> PullRequestDiffResult {
     decode(json!({
         "patch": PATCH,

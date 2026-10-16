@@ -5,9 +5,11 @@
 //! run every [`RUN_POLL_MS`] through the source, decides with [`evaluate_watch`], and raises a
 //! "Review guide ready / failed" toast with an "Open guide" button.
 //!
-//! Not ported: the desktop notification and the completion / input sounds (the app's
-//! notification service is not wired to this view). Upstream says nothing to a reader who is not
-//! looking and has not granted desktop notifications; here the toast waits for them instead.
+//! A reader who is not looking also gets a desktop notification, through the app's notifier
+//! (`desktop_notification.rs`; logged until the app has one). Not ported: the completion / input
+//! sounds and the `notificationMode` gate (settings are not read here). Upstream says nothing to a
+//! reader who is not looking and has not granted desktop notifications; here the toast waits for
+//! them as well.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -17,6 +19,7 @@ use gpui_kit::{App, Context, Entity, EventEmitter, Subscription};
 use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::PullRequestRef;
 
+use super::desktop_notification::{DesktopNotification, show_desktop_notification};
 use super::guide_run_store::{
     GuideRunStore, GuideRunWatch, RUN_POLL_MS, WatchDecision, evaluate_watch, guide_run_key,
 };
@@ -149,18 +152,32 @@ impl GuideRunCoordinator {
         let open_key = key.to_owned();
         let environment_id = watch.environment_id.clone();
         let reference = watch.reference.clone();
+        let open_guide: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
+            let open_key = open_key.clone();
+            let environment_id = environment_id.clone();
+            let reference = reference.clone();
+            coordinator
+                .update(cx, |this, cx| {
+                    this.open(&open_key, environment_id, reference, cx)
+                })
+                .ok();
+        });
+        // A reader who is somewhere else is told outside the app too, and the click brings the
+        // guide up (`new Notification(...)` with its `click` listener).
+        if !looking {
+            show_desktop_notification(
+                DesktopNotification {
+                    title: title.to_owned(),
+                    body: description.clone(),
+                    tag: format!("guide:{key}"),
+                    on_click: Some(open_guide.clone()),
+                },
+                cx,
+            );
+        }
         let action = ToastAction {
             label: "Open guide".into(),
-            on_click: Rc::new(move |cx: &mut App| {
-                let open_key = open_key.clone();
-                let environment_id = environment_id.clone();
-                let reference = reference.clone();
-                coordinator
-                    .update(cx, |this, cx| {
-                        this.open(&open_key, environment_id, reference, cx)
-                    })
-                    .ok();
-            }),
+            on_click: open_guide,
         };
         let id = self.toasts.push_with_action(
             cx,

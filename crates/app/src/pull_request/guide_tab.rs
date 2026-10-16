@@ -8,9 +8,11 @@
 //! [`GuideRunCoordinator`](super::guide_run_coordinator) polls and announces, so the reader can
 //! leave; the tab also says which guide is on screen, which needs no announcement.
 //!
+//! A write the source refuses is the snapshot's `guide_start_error`: the tab stops waiting and the
+//! panel says "Could not start a review guide".
+//!
 //! Not ported: the header menu's rewrite entry (the panel header, S1) — [`GuideTab::write`] is its
-//! seam — and the "Could not start a review guide" toast (the source has no start-failure
-//! channel; a run that fails to start arrives as a failed run).
+//! seam.
 
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render,
@@ -220,7 +222,11 @@ impl Render for GuideTab {
             matches!(result.run, Some(PullRequestReviewGuideRun::Running { .. }))
         });
         // The source has taken the run over once the snapshot says anything new about it.
-        if self.starting && self.baseline != run_signature(result) {
+        let start_refused = self
+            .ctx
+            .snapshot(cx)
+            .is_some_and(|snapshot| snapshot.guide_start_error.is_some());
+        if self.starting && (start_refused || self.baseline != run_signature(result)) {
             self.starting = false;
         }
         let running = self.starting || running_in_snapshot;

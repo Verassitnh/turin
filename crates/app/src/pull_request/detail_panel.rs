@@ -423,6 +423,7 @@ pub struct PullRequestDetailPanel {
     title_saving: bool,
     toasts: ToastQueue,
     seen_error: Option<String>,
+    seen_guide_error: Option<String>,
     /// The action last sent, so a failure can be said in its own words.
     last_action: Option<(PullRequestAction, Option<PullRequestUpdateMethod>)>,
     _subscriptions: Vec<Subscription>,
@@ -507,6 +508,7 @@ impl PullRequestDetailPanel {
             title_saving: false,
             toasts: ToastQueue::default(),
             seen_error: None,
+            seen_guide_error: None,
             last_action: None,
             _subscriptions: subscriptions,
         }
@@ -590,6 +592,32 @@ impl PullRequestDetailPanel {
                     ToastKind::Error,
                     title,
                     Some(readable_failure(Some(&error), hint)),
+                    cx,
+                );
+            }
+        }
+        // A guide that could not be started says why, once, and nothing is left to wait for
+        // (`useReviewGuideWriter`'s failure branch).
+        let guide_error = self
+            .ctx
+            .snapshot(cx)
+            .and_then(|snapshot| snapshot.guide_start_error.clone());
+        if guide_error != self.seen_guide_error {
+            self.seen_guide_error = guide_error.clone();
+            if let Some(error) = guide_error {
+                let key = super::guide_run_store::guide_run_key(
+                    &self.ctx.environment_id,
+                    &self.ctx.reference,
+                );
+                super::guide_run_store::GuideRunStore::global(cx)
+                    .update(cx, |runs, cx| runs.settle(&key, cx));
+                self.push_toast(
+                    ToastKind::Error,
+                    "Could not start a review guide",
+                    Some(readable_failure(
+                        Some(&error),
+                        "Check the review guide model in Settings → Source Control.",
+                    )),
                     cx,
                 );
             }

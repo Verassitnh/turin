@@ -26,7 +26,8 @@ use gpui_kit::{
     div, point, px, relative, rems,
 };
 use turin_contracts::pull_request::{
-    PullRequestDiffSide, PullRequestReviewCommentDraft, PullRequestReviewPosition,
+    PullRequestDiffFileChangeType, PullRequestDiffSide, PullRequestReviewCommentDraft,
+    PullRequestReviewPosition,
 };
 use turin_contracts::pull_request_review_guide::{
     PullRequestReviewGuide, PullRequestReviewGuideAttentionKind, PullRequestReviewGuideExcerpt,
@@ -34,10 +35,13 @@ use turin_contracts::pull_request_review_guide::{
 };
 
 use super::code_tab::items::FileView;
-use super::code_tab::patch::{ParsedPatch, parse_patch, resolve_diff_review_position};
+use super::code_tab::patch::{
+    FileChange, ParsedPatch, PatchFile, parse_patch, resolve_diff_review_position,
+};
 use super::code_tab::{LineTokens, Palette, code_text, row_tokens};
 use super::comment_body::pull_request_markdown;
 use super::detail_context::DetailContext;
+use super::guide_excerpt_expansion::{Expansion, hidden_above, plan_excerpt_expansion};
 use super::presentation_view::PullRequestDiffStat;
 use super::pull_request_review_store::{
     PendingReviewComment, PullRequestReviewStore, pull_request_review_key,
@@ -209,6 +213,10 @@ pub struct GuideTour {
     focus: FocusHandle,
     draft: Option<Draft>,
     open_files: HashSet<String>,
+    /// How far each excerpt's bars have opened, by stop and excerpt.
+    expansions: HashMap<(usize, usize), Expansion>,
+    /// Paths whose whole file has been asked for.
+    requested_contents: HashSet<String>,
     on_finish: Option<FinishHandler>,
     /// Parsed diff by the patch it came from.
     parsed: Option<(usize, usize, Vec<Rc<FileView>>)>,
@@ -246,6 +254,8 @@ impl GuideTour {
             focus: cx.focus_handle(),
             draft: None,
             open_files: HashSet::new(),
+            expansions: HashMap::new(),
+            requested_contents: HashSet::new(),
             on_finish: None,
             parsed: None,
             requested_diff: false,
@@ -278,6 +288,9 @@ impl GuideTour {
         if *self.guide != *guide {
             self.guide = Arc::new(guide.clone());
             self.draft = None;
+            // A new head reads a new diff: what was opened belonged to the old one.
+            self.expansions.clear();
+            self.requested_contents.clear();
             changed = true;
         }
         if self.banner != banner {
@@ -420,6 +433,40 @@ impl GuideTour {
         out
     }
 
+    /// A press on a bar around an excerpt: opens one more page of unchanged lines on that side,
+    /// and reads the whole file the first time (`loadDiffFiles`).
+    fn open_excerpt(
+        &mut self,
+        key: (usize, usize),
+        up: bool,
+        hidden: usize,
+        file: &PatchFile,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.expansions.get(&key).copied().unwrap_or_default();
+        self.expansions.insert(
+            key,
+            if up {
+                current.open_up(hidden)
+            } else {
+                current.open_down(hidden)
+            },
+        );
+        if self.requested_contents.insert(file.name.clone())
+            && let Some(source) = self.ctx.source(cx)
+        {
+            source.load_diff_file_contents(
+                &self.ctx.reference,
+                None,
+                diff_file_change_type(file.change),
+                file.prev_name.as_deref().unwrap_or(&file.name),
+                &file.name,
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
     fn tokens_for(&self, view: &FileView, dark: bool) -> Rc<Vec<LineTokens>> {
         if let Some(tokens) = self.tokens.borrow().get(&view.key) {
             return tokens.clone();
@@ -511,6 +558,17 @@ impl GuideTour {
 // ── Pieces ──────────────────────────────────────────────────────────────────
 
 /// `GuideNoteMarker`: the letter that ties a note to its line in an excerpt.
+/// The contract's name for how a file changed.
+fn diff_file_change_type(change: FileChange) -> PullRequestDiffFileChangeType {
+    match change {
+        FileChange::Change => PullRequestDiffFileChangeType::Change,
+        FileChange::RenamePure => PullRequestDiffFileChangeType::RenamePure,
+        FileChange::RenameChanged => PullRequestDiffFileChangeType::RenameChanged,
+        FileChange::New => PullRequestDiffFileChangeType::New,
+        FileChange::Deleted => PullRequestDiffFileChangeType::Deleted,
+    }
+}
+
 fn note_marker(marker: &str, theme: &AppTheme) -> AnyElement {
     div()
         .flex()
@@ -913,6 +971,43 @@ impl GuideTour {
             .into_any_element()
     }
 
+    /// A bar between an excerpt and the lines it can open (`hunkSeparators: "line-info"`): the
+    /// count of unmodified lines behind it, and a press opens a page of them.
+    fn expand_bar(
+        &self,
+        id: SharedString,
+        label: String,
+        icon: IconName,
+        busy: bool,
+        on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut App) + 'static,
+        theme: &AppTheme,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .flex()
+            .w_full()
+            .h(px(24.))
+            .items_center()
+            .gap_2()
+            .px_3()
+            .bg(with_alpha(theme.muted_foreground, 0.08))
+            .font_family(SharedString::from(theme.fonts.sans.clone()))
+            .text_size(px(11.))
+            .text_color(theme.muted_foreground)
+            .when(!busy, |this| {
+                this.cursor(gpui_kit::CursorStyle::PointingHand)
+                    .hover(|style| style.bg(with_alpha(theme.muted_foreground, 0.16)))
+                    .on_click(on_click)
+            })
+            .child(Icon::new(icon).size(rems(0.75)))
+            .child(SharedString::from(if busy {
+                "Loading...".to_owned()
+            } else {
+                label
+            }))
+            .into_any_element()
+    }
+
     /// `GuideExcerpt`.
     #[allow(clippy::too_many_arguments)]
     fn excerpt_view(
@@ -947,7 +1042,34 @@ impl GuideTour {
                             && row.new_line == shown[0].new_line
                     })
                     .unwrap_or(0);
-                let gutter = Self::gutter_width(&shown, &metrics);
+                // The unchanged lines the bars have opened around the slice, when it is one
+                // hunk's: the file's own text, once the file has been read.
+                let stop_position = self.position(cx);
+                let key = (stop_position, index);
+                let expansion = self.expansions.get(&key).copied().unwrap_or_default();
+                let contents = self
+                    .ctx
+                    .snapshot(cx)
+                    .and_then(|snapshot| snapshot.file_contents.get(&path))
+                    .cloned();
+                let plan = contents
+                    .as_ref()
+                    .and_then(Loadable::ready)
+                    .and_then(|file| plan_excerpt_expansion(&shown, &file.new_contents, expansion));
+                let hidden_up = hidden_above(&shown, expansion);
+                let hidden_down = plan.as_ref().map(|plan| plan.hidden_below);
+                let (opened_above, opened_below) = plan
+                    .as_ref()
+                    .map(|plan| (plan.above.clone(), plan.below.clone()))
+                    .unwrap_or_default();
+                let all_rows: Vec<DiffRow> = opened_above
+                    .iter()
+                    .chain(&shown)
+                    .chain(&opened_below)
+                    .cloned()
+                    .collect();
+                let gutter = Self::gutter_width(&all_rows, &metrics);
+                let loading_contents = matches!(contents, Some(Loadable::Pending));
                 let pending: Vec<PendingReviewComment> = self
                     .review
                     .read(cx)
@@ -962,6 +1084,32 @@ impl GuideTour {
                     .filter(|draft| draft.excerpt == index)
                     .map(|draft| review_position_anchor(&draft.position));
                 let mut rows = div().flex().flex_col().w_full();
+                if let Some(hidden) = hidden_up.filter(|hidden| *hidden > 0) {
+                    let file = view.file.clone();
+                    rows = rows.child(self.expand_bar(
+                        SharedString::from(format!("guide-expand-up-{index}")),
+                        format!("{hidden} unmodified lines"),
+                        IconName::ChevronUp,
+                        loading_contents,
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_excerpt(key, true, hidden, &file, cx)
+                        }),
+                        theme,
+                    ));
+                }
+                for (offset, row) in opened_above.iter().enumerate() {
+                    rows = rows.child(self.diff_line(
+                        SharedString::from(format!("guide-{index}-above-{offset}")),
+                        row,
+                        &[],
+                        gutter,
+                        None,
+                        &metrics,
+                        palette,
+                        theme,
+                        cx,
+                    ));
+                }
                 for (offset, row) in shown.iter().enumerate() {
                     let tokens_for_row = tokens.get(first + offset).map_or(&[][..], Vec::as_slice);
                     rows = rows.child(
@@ -1059,6 +1207,43 @@ impl GuideTour {
                                 .child(draft.card.clone()),
                         );
                     }
+                }
+                for (offset, row) in opened_below.iter().enumerate() {
+                    rows = rows.child(self.diff_line(
+                        SharedString::from(format!("guide-{index}-below-{offset}")),
+                        row,
+                        &[],
+                        gutter,
+                        None,
+                        &metrics,
+                        palette,
+                        theme,
+                        cx,
+                    ));
+                }
+                // One hunk's slice can open downward; how far is known once the file is read.
+                if hidden_up.is_some() && hidden_down != Some(0) {
+                    let file = view.file.clone();
+                    let label = match hidden_down {
+                        Some(hidden) => format!("{hidden} unmodified lines"),
+                        None => "Show more lines".to_owned(),
+                    };
+                    rows = rows.child(self.expand_bar(
+                        SharedString::from(format!("guide-expand-down-{index}")),
+                        label,
+                        IconName::ChevronDown,
+                        loading_contents,
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_excerpt(
+                                key,
+                                false,
+                                hidden_down.unwrap_or(usize::MAX),
+                                &file,
+                                cx,
+                            )
+                        }),
+                        theme,
+                    ));
                 }
                 let stat = format!(
                     "{}showing {} of {} diff lines",

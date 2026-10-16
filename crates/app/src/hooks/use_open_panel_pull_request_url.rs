@@ -11,6 +11,10 @@
 use turin_contracts::ProjectId;
 use turin_contracts::environment::RepositoryIdentity;
 use turin_contracts::pull_request::{PullRequestDetail, PullRequestRef};
+use turin_contracts::thread_pull_request::ThreadPullRequestLink;
+use turin_shared::thread_reference::{
+    ThreadReferenceCopyTarget, resolve_thread_reference_copy_target,
+};
 
 use crate::state::right_panel_store::{PullRequestTarget, RightPanelSurface};
 use crate::state::support::change_request_url::github_pull_request_browser_url;
@@ -77,7 +81,9 @@ pub fn open_panel_pull_request_reference(
     ))
 }
 
-/// `useOpenPanelPullRequestUrl`'s result: the URL the host reported, else the one the surface was
+/// `useOpenPanelPullRequestUrl`'s result, in the three states upstream gives it: `None` when the
+/// active surface is no pull request (`undefined`), `Some(None)` when it is one whose URL is
+/// unknown (`null`), and `Some(Some(url))`: the URL the host reported, else the one the surface was
 /// opened with, else a GitHub URL built from the project's remote.
 pub fn open_panel_pull_request_url(
     surface: Option<&RightPanelSurface>,
@@ -85,7 +91,7 @@ pub fn open_panel_pull_request_url(
     project_identity: Option<&RepositoryIdentity>,
     live: impl Fn(&PullRequestRef) -> Option<PullRequestDetail>,
     cached: impl Fn(&PullRequestRef) -> Option<PullRequestDetail>,
-) -> Option<String> {
+) -> Option<Option<String>> {
     let reference = open_panel_pull_request_reference(
         surface,
         supports_multiple_pull_requests,
@@ -95,7 +101,7 @@ pub fn open_panel_pull_request_url(
         Some(RightPanelSurface::PullRequest(surface)) => surface.target.url.as_deref(),
         _ => None,
     };
-    resolve_open_panel_pull_request_url(
+    Some(resolve_open_panel_pull_request_url(
         live(&reference).as_ref(),
         cached(&reference).as_ref(),
         &reference,
@@ -105,7 +111,53 @@ pub fn open_panel_pull_request_url(
             reference.repository.as_str(),
             reference.number.get(),
         ),
+    ))
+}
+
+/// The copy-reference target of the command palette (`CommandPalette.tsx`): the pull requests
+/// page has no routed thread, so the reference is the open panel's pull request or nothing; a
+/// thread route copies the open panel's pull request, else the thread's own, else its id.
+pub fn palette_reference_copy_target(
+    on_pull_requests_page: bool,
+    reference_thread_id: Option<&str>,
+    open_panel_url: Option<&Option<String>>,
+    pull_requests: &[ThreadPullRequestLink],
+    linked_pull_request_url: Option<&str>,
+) -> Option<ThreadReferenceCopyTarget> {
+    let thread_id = reference_thread_id?;
+    let open_url = open_panel_url.map(Option::as_deref);
+    if on_pull_requests_page && open_url.flatten().is_none() {
+        return None;
+    }
+    resolve_thread_reference_copy_target(
+        thread_id,
+        open_url,
+        pull_requests,
+        linked_pull_request_url,
     )
+}
+
+/// The copy-reference target of the chat view (`ChatView.tsx`): only a server thread has one.
+pub fn chat_reference_copy_target(
+    thread_id: Option<&str>,
+    is_server_thread: bool,
+    open_panel_url: Option<&Option<String>>,
+    pull_requests: &[ThreadPullRequestLink],
+    linked_pull_request_url: Option<&str>,
+) -> Option<ThreadReferenceCopyTarget> {
+    let thread_id = thread_id.filter(|_| is_server_thread)?;
+    resolve_thread_reference_copy_target(
+        thread_id,
+        open_panel_url.map(Option::as_deref),
+        pull_requests,
+        linked_pull_request_url,
+    )
+}
+
+/// The pull requests route's copy shortcut (`copyPullRequestFromShortcut`): the link of the open
+/// panel's pull request, when it has one.
+pub fn pull_request_link_for_shortcut(open_panel_url: Option<&Option<String>>) -> Option<&str> {
+    open_panel_url?.as_deref()
 }
 
 /// The project id a surface names, for the caller's project lookup (`useProject`).
@@ -167,10 +219,73 @@ mod tests {
             |_| None,
             |_| None,
         );
-        assert_eq!(url.as_deref(), Some("https://github.com/acme/turin/pull/7"));
+        assert_eq!(
+            url,
+            Some(Some("https://github.com/acme/turin/pull/7".to_owned()))
+        );
+        // Open, but nothing says where it lives: known to be a pull request, URL unknown.
         assert_eq!(
             open_panel_pull_request_url(Some(&surface(None)), true, None, |_| None, |_| None),
+            Some(None)
+        );
+        // No pull request surface at all.
+        assert_eq!(
+            open_panel_pull_request_url(None, true, None, |_| None, |_| None),
             None
         );
+    }
+
+    const URL: &str = "https://github.com/acme/turin/pull/7";
+
+    #[test]
+    fn the_palette_copies_the_open_panels_link_and_never_a_thread_id_on_the_pull_requests_page() {
+        let open = Some(URL.to_owned());
+        let target =
+            palette_reference_copy_target(true, Some("pr-panel"), Some(&open), &[], None).unwrap();
+        assert_eq!(target.value, URL);
+        // On the page with no URL to copy, there is no entry at all.
+        assert_eq!(
+            palette_reference_copy_target(true, Some("pr-panel"), Some(&None), &[], None),
+            None
+        );
+        assert_eq!(
+            palette_reference_copy_target(true, Some("pr-panel"), None, &[], None),
+            None
+        );
+        assert_eq!(
+            palette_reference_copy_target(false, None, None, &[], None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_thread_route_falls_back_to_the_linked_link_then_the_thread_id() {
+        let linked =
+            palette_reference_copy_target(false, Some("t1"), None, &[], Some(URL)).unwrap();
+        assert_eq!(linked.value, URL);
+        let id = palette_reference_copy_target(false, Some("t1"), None, &[], None).unwrap();
+        assert_eq!(id.value, "t1");
+    }
+
+    #[test]
+    fn only_a_server_thread_has_a_chat_reference() {
+        assert_eq!(
+            chat_reference_copy_target(Some("t1"), false, None, &[], None),
+            None
+        );
+        assert_eq!(
+            chat_reference_copy_target(None, true, None, &[], None),
+            None
+        );
+        let target = chat_reference_copy_target(Some("t1"), true, None, &[], None).unwrap();
+        assert_eq!(target.value, "t1");
+    }
+
+    #[test]
+    fn the_route_shortcut_copies_only_a_known_link() {
+        let open = Some(URL.to_owned());
+        assert_eq!(pull_request_link_for_shortcut(Some(&open)), Some(URL));
+        assert_eq!(pull_request_link_for_shortcut(Some(&None)), None);
+        assert_eq!(pull_request_link_for_shortcut(None), None);
     }
 }

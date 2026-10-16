@@ -125,6 +125,18 @@ impl ProjectFaviconStorage for NoProjectFaviconStorage {
 
 // ── Fetch ───────────────────────────────────────────────────────────────────
 
+/// Clients draw project icons from a 96 px thumbnail at most (`PROJECT_FAVICON_ICNS_MIN_SIZE`).
+const ICNS_MIN_SIZE: u32 = PROJECT_FAVICON_THUMBNAIL_SIZE;
+
+/// The PNG inside an `.icns` icon file (`AssetAccess.projectFaviconAsset`), `None` for anything
+/// else or an `.icns` with no PNG in it.
+pub fn icns_as_png(path: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    if !path.to_ascii_lowercase().ends_with(".icns") {
+        return None;
+    }
+    turin_launcher::icns::extract_icns_png(bytes, ICNS_MIN_SIZE)
+}
+
 /// http(s) through reqwest, `file://` off disk, and the `turin-asset://` URLs
 /// (`project_favicon_images`) that name an icon file the resolver found.
 pub struct HttpProjectFaviconFetch {
@@ -167,10 +179,15 @@ impl ProjectFaviconFetch for HttpProjectFaviconFetch {
             let bytes = tokio::fs::read(&path)
                 .await
                 .map_err(|error| error.to_string())?;
+            // An `.icns` is served as its embedded PNG, which is what can be drawn.
+            let (bytes, content_type) = match icns_as_png(&path, &bytes) {
+                Some(png) => (png, Some("image/png".to_owned())),
+                None => (bytes, content_type),
+            };
             return Ok(FetchResponse {
                 status: 200,
                 content_type,
-                content_length,
+                content_length: Some(bytes.len() as u64),
                 body: futures::stream::iter(vec![Ok(bytes)]).boxed(),
             });
         }
@@ -407,5 +424,63 @@ mod tests {
     #[test]
     fn bytes_that_are_not_an_image_do_not_downscale() {
         assert!(downscale_blocking(b"not an image").is_err());
+    }
+
+    /// An `.icns` holding one PNG element (`ic07`, 128 px).
+    fn icns_with(png: &[u8]) -> Vec<u8> {
+        let element_len = (8 + png.len()) as u32;
+        let mut bytes = b"icns".to_vec();
+        bytes.extend_from_slice(&(8 + element_len).to_be_bytes());
+        bytes.extend_from_slice(b"ic07");
+        bytes.extend_from_slice(&element_len.to_be_bytes());
+        bytes.extend_from_slice(png);
+        bytes
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        let mut png = Vec::new();
+        PngEncoder::new(Cursor::new(&mut png))
+            .write_image(
+                &image::RgbaImage::new(128, 128),
+                128,
+                128,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        png
+    }
+
+    #[test]
+    fn an_icns_icon_is_served_as_its_embedded_png() {
+        let png = tiny_png();
+        assert_eq!(
+            icns_as_png("/app/Icon.ICNS", &icns_with(&png)),
+            Some(png.clone())
+        );
+        // Only `.icns` files are opened, and only real ones have a PNG.
+        assert_eq!(icns_as_png("/app/icon.png", &icns_with(&png)), None);
+        assert_eq!(icns_as_png("/app/icon.icns", b"not an icns"), None);
+    }
+
+    #[tokio::test]
+    async fn the_fetch_reads_an_icns_asset_url_as_a_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("icon.icns");
+        let png = tiny_png();
+        std::fs::write(&path, icns_with(&png)).unwrap();
+        let url =
+            crate::project_favicon_images::project_favicon_asset_url(path.to_str().unwrap(), 1, 2)
+                .unwrap();
+        let response = HttpProjectFaviconFetch::new()
+            .fetch(&url, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(response.content_type.as_deref(), Some("image/png"));
+        let mut body = response.body;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            bytes.extend(chunk.unwrap());
+        }
+        assert_eq!(bytes, png);
     }
 }

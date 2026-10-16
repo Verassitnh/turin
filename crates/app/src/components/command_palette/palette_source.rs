@@ -55,6 +55,17 @@ pub struct ReferenceCopyTarget {
     pub failure_title: String,
 }
 
+impl From<turin_shared::thread_reference::ThreadReferenceCopyTarget> for ReferenceCopyTarget {
+    fn from(target: turin_shared::thread_reference::ThreadReferenceCopyTarget) -> Self {
+        Self {
+            kind: target.kind,
+            value: target.value,
+            success_title: target.success_title.to_owned(),
+            failure_title: target.failure_title.to_owned(),
+        }
+    }
+}
+
 /// Where the user is, as the palette's contextual items read it
 /// (`useParams`, `useHandleNewThread`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

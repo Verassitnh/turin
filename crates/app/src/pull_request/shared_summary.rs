@@ -10,7 +10,9 @@
 
 use std::collections::HashMap;
 
-use turin_contracts::pull_request::{PullRequestListEntry, PullRequestRef, PullRequestSummary};
+use turin_contracts::pull_request::{
+    PullRequestDetail, PullRequestListEntry, PullRequestRef, PullRequestSummary,
+};
 use turin_contracts::thread_pull_request::{ThreadPullRequestLink, ThreadPullRequestSnapshot};
 use turin_contracts::{EnvironmentId, ProjectId};
 
@@ -96,6 +98,35 @@ pub fn pull_request_list_entry_to_summary(entry: &PullRequestListEntry) -> PullR
         review_decision: entry.review_decision.map(Some),
         checks_state: entry.checks_state.map(Some),
         mergeability: Some(entry.mergeability),
+        stack: None,
+    }
+}
+
+/// A detail read as a summary (upstream passes the detail itself where a summary is wanted: it has
+/// every summary field, and none of the list's deferred placeholders).
+pub fn pull_request_detail_to_summary(detail: &PullRequestDetail) -> PullRequestSummary {
+    PullRequestSummary {
+        provider: detail.provider.clone(),
+        project_id: detail.project_id.clone(),
+        repository: detail.repository.clone(),
+        number: detail.number,
+        title: detail.title.clone(),
+        url: detail.url.clone(),
+        state: detail.state,
+        is_draft: Some(detail.is_draft),
+        head_branch: detail.head_branch.clone(),
+        base_branch: detail.base_branch.clone(),
+        closed_at: Some(detail.closed_at.clone()),
+        merged_at: Some(detail.merged_at.clone()),
+        updated_at: detail.updated_at.clone(),
+        observed_at: detail.observed_at,
+        author: Some(detail.author.clone()),
+        additions: Some(detail.additions),
+        deletions: Some(detail.deletions),
+        changed_files: Some(detail.changed_files),
+        review_decision: None,
+        checks_state: None,
+        mergeability: Some(detail.mergeability),
         stack: None,
     }
 }
@@ -190,6 +221,21 @@ impl PullRequestSummaryObservations {
             self.by_key.insert(key, next);
         }
         true
+    }
+
+    /// Rows of a merged listing, each observed under its own environment.
+    pub fn observe_entries(
+        &mut self,
+        entries: &[super::pull_request_list_logic::EnvironmentPullRequestEntry],
+        observed_at: f64,
+    ) {
+        for entry in entries {
+            self.observe_list(
+                &entry.environment_id,
+                std::slice::from_ref(&entry.entry),
+                observed_at,
+            );
+        }
     }
 
     /// The listing's own rows, observed with when the answer arrived (`usePullRequestList`'s

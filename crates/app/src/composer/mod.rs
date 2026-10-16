@@ -36,6 +36,7 @@ pub mod model_picker_keys;
 pub mod model_picker_search;
 pub mod primary_actions;
 pub mod prompt_history;
+pub mod prompt_stash_store;
 pub mod provider_options;
 pub mod provider_state;
 pub mod queued_edit;

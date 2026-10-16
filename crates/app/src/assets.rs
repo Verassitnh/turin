@@ -166,6 +166,7 @@ icon_assets!(
         CloudUpload,
         Computer,
         CornerLeftUp,
+        Unplug,
         FileSearch,
         FolderGit,
         GitBranchPlus,

@@ -42,7 +42,10 @@ fn window_options(cx: &App) -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
             size(
-                px(1100.),
+                px(std::env::var("TURIN_WINDOW_WIDTH")
+                    .ok()
+                    .and_then(|width| width.parse().ok())
+                    .unwrap_or(1100.)),
                 px(std::env::var("TURIN_WINDOW_HEIGHT")
                     .ok()
                     .and_then(|height| height.parse().ok())

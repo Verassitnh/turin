@@ -1,11 +1,17 @@
 //! Port of upstream/apps/web/src/components/chat/ThreadRelationshipIcon.tsx
+//!
+//! Shared by lineage and timeline links, including the provider glyph and
+//! status badge.
 
 use gpui_kit::{
-    App, Hsla, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div, px,
+    App, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div,
+    px,
 };
 
 use super::thread_details_panel_styles::THREAD_DETAILS_ICON_SIZE;
+use crate::assets::provider_icon_path;
 use crate::theme::ActiveAppTheme;
+use crate::theme::color::with_alpha;
 use crate::ui::{Icon, IconName};
 
 /// Human-readable status for lineage and timeline relationship badges.
@@ -50,12 +56,15 @@ fn badge_color(tone: ThreadRelationshipBadgeTone, theme: &crate::theme::AppTheme
         ThreadRelationshipBadgeTone::Info => theme.info,
         ThreadRelationshipBadgeTone::Destructive => theme.destructive,
         ThreadRelationshipBadgeTone::Success => theme.success,
-        ThreadRelationshipBadgeTone::Muted => theme.muted_foreground,
+        // `bg-muted-foreground/45`.
+        ThreadRelationshipBadgeTone::Muted => with_alpha(theme.muted_foreground, 0.45).into(),
     }
 }
 
 #[derive(IntoElement)]
 pub struct ThreadRelationshipIcon {
+    /// The provider driver kind whose glyph replaces the fallback.
+    pub driver: Option<SharedString>,
     pub status: Option<String>,
     pub fallback: IconName,
 }
@@ -72,9 +81,12 @@ impl RenderOnce for ThreadRelationshipIcon {
             .size(THREAD_DETAILS_ICON_SIZE)
             .flex_shrink_0()
             .child(
-                Icon::new(self.fallback)
-                    .size(THREAD_DETAILS_ICON_SIZE)
-                    .color(theme.muted_foreground),
+                match self.driver.as_deref().and_then(provider_icon_path) {
+                    Some(path) => Icon::path(path),
+                    None => Icon::new(self.fallback),
+                }
+                .size(THREAD_DETAILS_ICON_SIZE)
+                .color(theme.muted_foreground),
             )
             .child(
                 div()

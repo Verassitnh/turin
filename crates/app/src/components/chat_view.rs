@@ -11,6 +11,7 @@ use gpui_kit::{
 };
 
 use super::chat::chat_canvas::{ChatCanvas, ChatCanvasMeasurements};
+use super::chat::chat_canvas_layout::ChatCanvasDetailsCard;
 use super::chat::chat_git_host::ChatGitHost;
 use super::chat::chat_header::ChatHeader;
 use super::chat::chat_overlay_banners::{ProviderStatusBanner, ThreadErrorBanner};
@@ -21,8 +22,8 @@ use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::should_show_provider_status_banner;
 use super::chat::thread_details_card::ThreadDetailsCard;
 use super::chat::thread_details_card_layout::{
-    ThreadDetailsCardContainer, ThreadDetailsCardLane, ThreadDetailsCardLayoutInput,
-    resolve_thread_details_card_layout,
+    ThreadDetailsCardContainer, ThreadDetailsCardLane, ThreadDetailsCardLayout,
+    ThreadDetailsCardLayoutInput, resolve_thread_details_card_layout,
 };
 use super::chat::thread_details_panel::ThreadDetailsPanel;
 use super::chat::thread_error_banner::should_show_thread_error_banner;
@@ -97,7 +98,26 @@ impl RenderOnce for ChatView {
         let overlay_banners = chat_overlay_banners();
         let composer_strip = self.git_host.read(cx).composer_strip();
         // `TURIN_CHAT_DEMO=thread-details` swaps in the lineage demo card.
-        let details_card = thread_details_card(window, cx).or_else(|| {
+        // `ChatCanvas` measures its container (ResizeObserver upstream); the
+        // size feeds the lane and the details card layout on the next frame.
+        let canvas_size =
+            window.use_keyed_state("chat-canvas-size", cx, |_, _| CanvasSize::default());
+        let measured = canvas_size.read(cx).0;
+        let (canvas_width, canvas_height) = if f32::from(measured.width) > 0. {
+            (
+                f32::from(measured.width) as f64,
+                f32::from(measured.height) as f64,
+            )
+        } else {
+            (1200.0, 800.0)
+        };
+        let demo_card = thread_details_card(window, cx, canvas_width, canvas_height);
+        let demo_lane_card = demo_card.as_ref().map(|(layout, _)| ChatCanvasDetailsCard {
+            left: layout.x,
+            right: layout.x + layout.width,
+            bottom: layout.y + layout.height,
+        });
+        let details_card = demo_card.map(|(_, card)| card).or_else(|| {
             self.thread_details_open
                 .then(|| self.git_host.read(cx).details_card(cx))
                 .flatten()
@@ -131,14 +151,18 @@ impl RenderOnce for ChatView {
             .child(
                 div()
                     .relative()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
+                    .child(measure_canvas(canvas_size))
                     .child(ChatCanvas::from_measurements(
                         ChatCanvasMeasurements {
-                            width: 1200.0,
+                            width: canvas_width,
+                            height: canvas_height,
                             ..Default::default()
                         },
-                        None,
+                        demo_lane_card,
                         div()
                             .flex()
                             .flex_col()
@@ -172,26 +196,50 @@ impl RenderOnce for ChatView {
     }
 }
 
-fn thread_details_card(window: &mut Window, cx: &mut App) -> Option<gpui_kit::AnyElement> {
+/// The canvas's measured size; a change re-renders the column.
+#[derive(Default)]
+struct CanvasSize(gpui_kit::Size<gpui_kit::Pixels>);
+
+/// An invisible element that records the size of the box it is placed in.
+fn measure_canvas(state: Entity<CanvasSize>) -> impl IntoElement {
+    gpui_kit::canvas(
+        move |bounds, _, cx| {
+            if state.read(cx).0 != bounds.size {
+                state.update(cx, |state, cx| {
+                    state.0 = bounds.size;
+                    cx.notify();
+                });
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+}
+
+fn thread_details_card(
+    window: &mut Window,
+    cx: &mut App,
+    width: f64,
+    height: f64,
+) -> Option<(ThreadDetailsCardLayout, gpui_kit::AnyElement)> {
     let panel = ThreadDetailsPanel::from_demo(window, cx)?;
     let layout = resolve_thread_details_card_layout(ThreadDetailsCardLayoutInput {
-        container: ThreadDetailsCardContainer {
-            width: 1200.0,
-            height: 800.0,
-        },
+        container: ThreadDetailsCardContainer { width, height },
         lane: ThreadDetailsCardLane {
             padding: 48.0,
             min_chat_width: 640.0,
         },
         top_inset: 0.0,
     })?;
-    Some(
+    Some((
+        layout,
         ThreadDetailsCard {
             layout,
             children: panel.into_any_element(),
         }
         .into_any_element(),
-    )
+    ))
 }
 
 fn chat_overlay_banners() -> Vec<gpui_kit::AnyElement> {

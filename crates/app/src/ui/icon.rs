@@ -5,7 +5,7 @@
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, Hsla, InteractiveElement as _, IntoElement, Rems, RenderOnce, SharedString, Styled,
-    Window, rems, svg,
+    Transformation, Window, percentage, rems, svg,
 };
 
 pub use gpui_kit::assets::IconName;
@@ -23,6 +23,7 @@ pub struct Icon {
     size: Rems,
     color: Option<Hsla>,
     group_hover: Option<(SharedString, Hsla)>,
+    rotated_half: bool,
 }
 
 impl Icon {
@@ -33,6 +34,7 @@ impl Icon {
             size: rems(1.),
             color: None,
             group_hover: None,
+            rotated_half: false,
         }
     }
 
@@ -55,6 +57,12 @@ impl Icon {
         self
     }
 
+    /// `rotate-180`.
+    pub fn rotate_180(mut self, rotated: bool) -> Self {
+        self.rotated_half = rotated;
+        self
+    }
+
     /// `group-hover:text-*`: recolor while the named group is hovered.
     pub fn group_hover_color(mut self, group: impl Into<SharedString>, color: Hsla) -> Self {
         self.group_hover = Some((group.into(), color));
@@ -74,6 +82,9 @@ impl RenderOnce for Icon {
             .flex_shrink_0()
             .size(self.size)
             .text_color(color)
+            .when(self.rotated_half, |this| {
+                this.with_transformation(Transformation::rotate(percentage(0.5)))
+            })
             .when_some(self.group_hover, |this, (group, hover)| {
                 this.group_hover(group, move |style| style.text_color(hover))
             })

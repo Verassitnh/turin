@@ -21,6 +21,26 @@ pub struct LineagePanelSnapshot {
     pub rows: Vec<ThreadRelationshipWalkRow>,
     pub workflow_groups: Vec<SubagentWorkflowGroup>,
     pub subagents_by_child_thread: std::collections::HashMap<String, RuntimeSubagent>,
+    /// The provider driver kind behind subagent glyphs and tooltips.
+    pub driver: Option<String>,
+    /// `resolveMergeBackTargetThreadId(projection)`.
+    pub merge_target_thread_id: Option<ThreadId>,
+    /// `latestMergeBackRun !== null`.
+    pub has_merge_back_run: bool,
+    /// `canDetachThreadProviderSession(projection)`.
+    pub can_detach: bool,
+    /// `orchestrationEnvironment.stopWorkflow.permissionAtom`.
+    pub can_operate_workflow: bool,
+    /// Agents `canStop` holds for (app-owned, or a strong provider-native task).
+    pub stoppable_agent_ids: std::collections::HashSet<String>,
+    /// Subagents without a child thread yet have no row, so they count apart.
+    pub running_without_thread: usize,
+}
+
+/// `TURIN_CHAT_DEMO=thread-details,lineage-expanded` opens the workflow tree
+/// and the previous-agents group, for screenshots.
+pub fn lineage_demo_expanded() -> bool {
+    std::env::var("TURIN_CHAT_DEMO").is_ok_and(|demo| demo.contains("lineage-expanded"))
 }
 
 pub fn parse_thread_details_demo() -> Option<LineagePanelSnapshot> {
@@ -34,15 +54,16 @@ fn id(value: &str) -> ThreadId {
     ThreadId::new(value).unwrap()
 }
 
-fn lineage_demo_snapshot() -> LineagePanelSnapshot {
+pub(crate) fn lineage_demo_snapshot() -> LineagePanelSnapshot {
     let current = id("thread-current");
+    let merge_target = id("thread-parent");
     let shells = demo_shells();
     let graph = derive_thread_relationship_graph(&shells, None);
     let rows = order_web_thread_lineage_rows(
         &graph,
         &immediate_thread_relationships(&graph, &current),
         &current,
-        None,
+        Some(&merge_target),
     );
     let runtime = projected_subagents_to_runtime(&demo_subagents());
     let workflow_groups = derive_workflow_groups(&runtime);
@@ -61,6 +82,18 @@ fn lineage_demo_snapshot() -> LineagePanelSnapshot {
         rows,
         workflow_groups,
         subagents_by_child_thread,
+        driver: Some("codex".to_owned()),
+        merge_target_thread_id: Some(merge_target),
+        has_merge_back_run: true,
+        can_detach: true,
+        can_operate_workflow: true,
+        stoppable_agent_ids: [
+            "plain-subagent".to_owned(),
+            "workflow-coordinator".to_owned(),
+        ]
+        .into_iter()
+        .collect(),
+        running_without_thread: 0,
     }
 }
 
@@ -110,8 +143,21 @@ fn demo_shell(thread_id: &str, patch: serde_json::Value) -> Arc<OrchestrationV2T
 fn demo_shells() -> Vec<Arc<OrchestrationV2ThreadShell>> {
     vec![
         demo_shell(
+            "thread-parent",
+            json!({ "title": "Checkout redesign", "createdAt": "2026-05-30T00:00:00.000Z" }),
+        ),
+        demo_shell(
             "thread-current",
-            json!({ "title": "Checkout review", "createdAt": "2026-06-01T00:00:00.000Z" }),
+            json!({
+                "title": "Checkout review",
+                "createdAt": "2026-06-01T00:00:00.000Z",
+                "forkedFrom": { "type": "run", "threadId": "thread-parent", "runId": "run-p" },
+                "lineage": {
+                    "rootThreadId": "thread-parent",
+                    "parentThreadId": "thread-parent",
+                    "relationshipToParent": "fork"
+                }
+            }),
         ),
         demo_shell(
             "thread-fork-a",
@@ -140,6 +186,44 @@ fn demo_shells() -> Vec<Arc<OrchestrationV2ThreadShell>> {
             }),
         ),
         demo_shell(
+            "thread-prev-a",
+            json!({
+                "title": "Subagent: /root/lint_agent",
+                "status": "completed",
+                "createdAt": "2026-05-31T00:00:00.000Z",
+                "lineage": {
+                    "rootThreadId": "thread-current",
+                    "parentThreadId": "thread-current",
+                    "relationshipToParent": "subagent"
+                }
+            }),
+        ),
+        demo_shell(
+            "thread-prev-b",
+            json!({
+                "title": "Subagent: /root/test_agent",
+                "status": "failed",
+                "createdAt": "2026-05-31T01:00:00.000Z",
+                "lineage": {
+                    "rootThreadId": "thread-current",
+                    "parentThreadId": "thread-current",
+                    "relationshipToParent": "subagent"
+                }
+            }),
+        ),
+        demo_shell(
+            "member-a",
+            json!({ "title": "Checker", "status": "running",
+                "lineage": { "rootThreadId": "thread-current", "parentThreadId": "workflow-chat",
+                    "relationshipToParent": "subagent" } }),
+        ),
+        demo_shell(
+            "member-b",
+            json!({ "title": "Writer", "status": "completed",
+                "lineage": { "rootThreadId": "thread-current", "parentThreadId": "workflow-chat",
+                    "relationshipToParent": "subagent" } }),
+        ),
+        demo_shell(
             "workflow-chat",
             json!({
                 "title": "Workflow coordinator",
@@ -162,7 +246,13 @@ fn demo_subagents() -> Vec<ProjectedSubagent> {
         OrchestrationV2WorkflowPhase, TrimmedNonEmptyString, UtcDateTime,
     };
     let text = |s: &str| TrimmedNonEmptyString::new(s).unwrap();
-    let at = |s: &str| -> UtcDateTime { s.parse().unwrap() };
+    // Relative to now, so the elapsed labels read like a live thread.
+    let at = |minutes_ago: i64| -> UtcDateTime {
+        (chrono::Utc::now() - chrono::Duration::minutes(minutes_ago))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            .parse()
+            .unwrap()
+    };
     let workflow = OrchestrationV2SubagentWorkflow {
         name: Some(text("Checkout review")),
         run_handles: None,
@@ -191,7 +281,7 @@ fn demo_subagents() -> Vec<ProjectedSubagent> {
                 tool_calls: None,
                 duration_ms: None,
                 queued_at: None,
-                started_at: None,
+                started_at: Some((chrono::Utc::now().timestamp_millis() - 150_000) as u64),
                 prompt: None,
                 result: None,
             },
@@ -207,9 +297,9 @@ fn demo_subagents() -> Vec<ProjectedSubagent> {
                 attempt: None,
                 total_tokens: None,
                 tool_calls: None,
-                duration_ms: None,
+                duration_ms: Some(95_000),
                 queued_at: None,
-                started_at: None,
+                started_at: Some((chrono::Utc::now().timestamp_millis() - 200_000) as u64),
                 prompt: None,
                 result: None,
             },
@@ -229,9 +319,37 @@ fn demo_subagents() -> Vec<ProjectedSubagent> {
             child_thread_id: Some("workflow-chat".into()),
             workflow: Some(workflow),
             result: None,
-            started_at: Some(at("2026-06-04T10:00:00.000Z")),
+            started_at: Some(at(4)),
             completed_at: None,
-            updated_at: at("2026-06-04T10:00:05.000Z"),
+            updated_at: at(0),
+        },
+        ProjectedSubagent {
+            id: "prev-a".into(),
+            title: Some("Lint".into()),
+            prompt: "Run lint".into(),
+            model: Some("composer".into()),
+            status: OrchestrationV2SubagentStatus::Completed,
+            progress: None,
+            child_thread_id: Some("thread-prev-a".into()),
+            workflow: None,
+            result: Some("No lint errors".into()),
+            started_at: Some(at(95)),
+            completed_at: Some(at(92)),
+            updated_at: at(92),
+        },
+        ProjectedSubagent {
+            id: "prev-b".into(),
+            title: Some("Tests".into()),
+            prompt: "Run tests".into(),
+            model: Some("composer".into()),
+            status: OrchestrationV2SubagentStatus::Failed,
+            progress: None,
+            child_thread_id: Some("thread-prev-b".into()),
+            workflow: None,
+            result: None,
+            started_at: Some(at(70)),
+            completed_at: Some(at(61)),
+            updated_at: at(61),
         },
         ProjectedSubagent {
             id: "plain-subagent".into(),
@@ -243,9 +361,9 @@ fn demo_subagents() -> Vec<ProjectedSubagent> {
             child_thread_id: Some("thread-subagent".into()),
             workflow: None,
             result: None,
-            started_at: Some(at("2026-06-03T10:00:00.000Z")),
+            started_at: Some(at(12)),
             completed_at: None,
-            updated_at: at("2026-06-03T10:00:05.000Z"),
+            updated_at: at(0),
         },
     ]
 }

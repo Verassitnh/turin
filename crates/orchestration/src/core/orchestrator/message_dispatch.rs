@@ -60,7 +60,7 @@ use crate::pipeline::notification_mailbox::is_undelivered_mailbox_steer;
 use crate::pipeline::orchestrator_port::OrchestratorError;
 use crate::pipeline::runtime_policy::{self, RuntimePolicyOverride};
 use crate::projection::shared::thread_error::{
-    latest_executed_run, latest_root_provider_failure, usage_limit_blocked_run,
+    latest_executed_run, latest_root_provider_failure, run_ran_after, usage_limit_blocked_run,
 };
 
 use super::Orchestrator;
@@ -69,8 +69,10 @@ use super::message_steer::{SteerInput, steer_into_run};
 use super::message_transfer::{
     read_handoff_items, should_prepare_legacy_import_handoff, start_run_with_transfers,
 };
+use super::run_stop::stop_reached_run;
 use super::services::PrepareRootRunScope;
 use crate::core::context_handoff_service::{ContextHandoffService, LegacyImportInput};
+use crate::core::restart_background_note::{ProviderTurnState, is_restart_continuation_source};
 
 /// The workspace-preparation placeholder, upstream `WORKSPACE_PREPARATION_INPUT`.
 pub(super) const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
@@ -193,6 +195,9 @@ pub(super) async fn dispatch_message(
             })
             || recovery.as_ref().is_none_or(|recovery| {
                 !recovery.auto_resume
+                    || Some(&recovery.run_id) != run.map(|run| &run.id)
+                    || chrono::DateTime::parse_from_rfc3339(recovery.reset_at.as_str())
+                        .is_ok_and(|reset| reset.timestamp_millis() > millis(now))
                     || recovery.request_id.as_ref() != usage_limit_recovery_request_id.as_ref()
                     || failure
                         .and_then(|failure| failure.reset_at.as_ref())
@@ -231,11 +236,33 @@ pub(super) async fn dispatch_message(
         }
     }
 
-    if restart_continuation_of_run_id.is_some() {
-        return Err(dispatch_failure(
-            command,
-            "Restart continuation is not ported yet (T13e).",
-        ));
+    if let Some(source_id) = restart_continuation_of_run_id {
+        let turn_states: Vec<ProviderTurnState> =
+            projection.provider_turns.iter().map(Into::into).collect();
+        let source = projection.runs.iter().find(|run| &run.id == source_id);
+        // Held queued runs never started; they wait behind the continuation.
+        let stale = match source {
+            None => true,
+            Some(source) => {
+                !is_restart_continuation_source(source, &turn_states)
+                    || projection.thread.archived_at.is_some()
+                    || projection.thread.deleted_at.is_some()
+                    || projection.thread.provider_instance_id != source.provider_instance_id
+                    || projection.runs.iter().any(|run| {
+                        run.id != source.id
+                            && run.status != OrchestrationV2RunStatus::Queued
+                            && run_ran_after(run, source)
+                    })
+                    || stop_reached_run(orchestrator, command, thread_id, &source.id).await?
+            }
+        };
+        if stale {
+            // Preserve the current row so stale automatic deliveries receive an
+            // accepted receipt without changing work or repeatedly retrying.
+            let now = decision.now();
+            emit_thread_event(decision, "metadata-updated", &projection.thread, now);
+            return Ok(());
+        }
     }
 
     // A new turn settles and un-snoozes the thread first, as upstream does.
@@ -343,6 +370,10 @@ pub(super) async fn dispatch_message(
         None => text.clone(),
     };
     let resolved = Resolved {
+        continued_task_id: restart_continuation_of_run_id
+            .as_ref()
+            .and_then(|source_id| projection.runs.iter().find(|run| &run.id == source_id))
+            .and_then(|source| source.delegated_task_id.clone()),
         text,
         delegated_completion: delegated,
         source_plan: resolve_source_plan(orchestrator, command, client, &projection).await?,
@@ -447,6 +478,9 @@ pub(super) async fn dispatch_message(
 /// dispatch: the message text (a delegated completion replaces it with a wake
 /// detail), the delivery it carries, and the plan it completes.
 pub(super) struct Resolved {
+    /// The delegated task a restart continuation carries on
+    /// (`continuedTaskId`).
+    pub(super) continued_task_id: Option<NodeId>,
     text: String,
     delegated_completion: Option<OrchestrationV2MessageDelegatedCompletion>,
     source_plan: Option<OrchestrationV2PlanArtifact>,
@@ -1148,8 +1182,8 @@ async fn start_run(
         context_handoff_id: legacy_import_handoff
             .as_ref()
             .map(|handoff| handoff.id.clone()),
-        restart_continuation_of_run_id: None,
-        delegated_task_id: None,
+        restart_continuation_of_run_id: restart_of(client),
+        delegated_task_id: resolved.continued_task_id.clone(),
         work_started_at: wake_work_started_at(&projection.runs, is_wake(client)),
         restart_cancelled_background_work: None,
         source_plan_ref: source_plan_ref_of(client),
@@ -1711,7 +1745,7 @@ async fn queue_run(
         checkpoint_id: None,
         context_handoff_id: None,
         restart_continuation_of_run_id: restart_continuation_of_run_id.clone(),
-        delegated_task_id: None,
+        delegated_task_id: input.resolved.continued_task_id.clone(),
         work_started_at: wake_work_started_at(&projection.runs, is_wake(input.client)),
         restart_cancelled_background_work: None,
         source_plan_ref: source_plan_ref_of(input.client),

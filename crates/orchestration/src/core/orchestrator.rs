@@ -22,6 +22,8 @@ mod message_dispatch;
 mod message_dispatch_tests;
 #[cfg(test)]
 mod message_plan_tests;
+#[cfg(test)]
+mod message_restart_tests;
 mod message_steer;
 #[cfg(test)]
 mod message_steer_tests;

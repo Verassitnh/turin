@@ -801,7 +801,7 @@ pub(super) async fn start_run_with_transfers(
             .or(legacy_import_recovery_handoff.as_ref())
             .map(|handoff| handoff.id.clone()),
         restart_continuation_of_run_id: super::message_dispatch::restart_of(client),
-        delegated_task_id: None,
+        delegated_task_id: resolved.continued_task_id.clone(),
         work_started_at: wake_work_started_at(
             &projection.runs,
             super::message_dispatch::is_wake(client),

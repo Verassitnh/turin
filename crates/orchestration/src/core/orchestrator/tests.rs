@@ -967,28 +967,6 @@ async fn a_manual_continuation_of_an_unknown_run_is_refused_and_replays() {
 }
 
 #[tokio::test]
-async fn a_restart_continuation_is_refused_until_the_restart_port_lands() {
-    let (orchestrator, _) = harness().await;
-    orchestrator
-        .dispatch(create_command("command:create", "thread:restart", "Thread"))
-        .await
-        .expect("create commits");
-
-    let error = orchestrator
-        .dispatch(message_command(
-            "command:restart",
-            "thread:restart",
-            json!({ "restartContinuationOfRunId": "run:interrupted" }),
-        ))
-        .await
-        .expect_err("restart continuation is not ported");
-    assert!(
-        refusal_text(&error).contains("Restart continuation is not ported yet (T13e)."),
-        "{error:?}"
-    );
-}
-
-#[tokio::test]
 async fn a_new_turn_without_a_provider_adapter_is_refused_before_any_event() {
     let (orchestrator, _) = harness().await;
     orchestrator

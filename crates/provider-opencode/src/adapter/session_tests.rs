@@ -1842,6 +1842,42 @@ async fn v2_background_subagent_stays_running_until_its_report_settles_it() {
     session.close().await;
 }
 
+/// A turn that ends while its compaction runs closes the compaction item: interrupted when the
+/// execution is stopped, failed when it fails.
+#[tokio::test]
+async fn v2_a_turn_ending_mid_compaction_closes_its_item() {
+    for (end, status, title) in [
+        (
+            "session.execution.interrupted",
+            "interrupted",
+            "Compaction interrupted",
+        ),
+        ("session.execution.failed", "failed", "Compaction failed"),
+    ] {
+        let (script, session, mut events, _offers, thread) = v2_idle_session_with_offers().await;
+        session.start_turn(turn(thread, "compact")).await.unwrap();
+        for frame in [
+            json!({"id":"c1","type":"session.compaction.started","data":{"sessionID":"ses_1"}}),
+            json!({"id":"c2","type":end,"data":{"sessionID":"ses_1","error":{"message":"boom"}}}),
+        ] {
+            script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+        }
+        let seen = events_until(&mut events, |value| {
+            value["type"] == "provider_turn.updated"
+                && value["provider_turn"]["status"] != "running"
+        })
+        .await;
+        let item = of_type(&seen, "turn_item.updated")
+            .into_iter()
+            .rev()
+            .find(|event| event["turn_item"]["type"] == "compaction")
+            .unwrap_or_else(|| panic!("no compaction item in {seen:#?}"));
+        assert_eq!(item["turn_item"]["status"], status);
+        assert_eq!(item["turn_item"]["title"], title);
+        session.close().await;
+    }
+}
+
 /// A v2 session on a queue of continuation offers, with its thread ensured and idle.
 async fn v2_idle_session_with_offers() -> (
     Script,

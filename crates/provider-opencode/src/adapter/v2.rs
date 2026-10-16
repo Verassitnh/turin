@@ -1846,8 +1846,6 @@ impl OpenCodeV2Session {
         });
     }
 
-    /// Sends the answer to OpenCode. Returns whether the request ends cancelled rather than
-    /// resolved; the caller settles the request once the reply has landed.
     /// Answers a request. Returns whether it was cancelled and whether the answer reached OpenCode.
     async fn answer(
         &self,
@@ -2119,6 +2117,42 @@ impl OpenCodeV2Session {
             turn.usage
                 .to_turn_usage(status == ProviderAdapterV2TurnTerminalStatus::Completed),
         );
+        // `finishTurn`: a compaction still running ends with its turn, failed or interrupted.
+        if let Some((native, started)) = turn.compaction.take() {
+            let failed = status == ProviderAdapterV2TurnTerminalStatus::Failed;
+            let now = UtcDateTime::now();
+            let ordinal = item_ordinal(&mut turn, &native);
+            let item = compaction_turn_item(
+                &self.driver,
+                Compaction {
+                    thread_id: &turn.thread_id,
+                    root_node_id: &turn.provider_turn.node_id,
+                    provider_thread_id: &turn.provider_turn.provider_thread_id,
+                    provider_turn_id: &turn.provider_turn.id,
+                    native_item_id: &native,
+                    ordinal,
+                    title: if failed {
+                        "Compaction failed"
+                    } else {
+                        "Compaction interrupted"
+                    },
+                    status: if failed {
+                        OrchestrationV2TurnItemStatus::Failed
+                    } else {
+                        OrchestrationV2TurnItemStatus::Interrupted
+                    },
+                    started_at: Some(started),
+                    completed_at: Some(now),
+                    now,
+                    summary: None,
+                    weak_ref: false,
+                },
+            );
+            self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+                driver: self.driver.clone(),
+                turn_item: item,
+            });
+        }
         let provider_turn = turn.provider_turn.clone();
         let thread_id = turn.thread_id.clone();
         let run_ordinal = turn.run_ordinal.max(1) as u64;

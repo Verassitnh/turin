@@ -374,6 +374,10 @@ impl AcpRequestError {
         error
     }
 
+    pub fn method_unavailable(message: impl Into<String>) -> Self {
+        Self::new(-32601, message)
+    }
+
     fn new(code: i64, message: impl Into<String>) -> Self {
         Self {
             code,

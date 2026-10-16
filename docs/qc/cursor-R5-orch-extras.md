@@ -1,0 +1,3 @@
+# QC (Cursor, grok-4.7) — R5 orchestration extras + storage cleanup — FAIL → reviewer fixing
+- [high] storage_cleanup.rs:1287 fetches `git fetch <remote> <branch>` (updates FETCH_HEAD only) then checks refs/remotes/<remote>/<branch> → stale tracking ref can make an unintegrated worktree look integrated and get removed (data loss). Upstream: `git fetch --quiet --no-tags <remote> +refs/heads/<b>:refs/remotes/<remote>/<b>` (GitVcsDriverCore.ts:3835, storageCleanup.ts:503).
+- Verified safe: removal stays inside named dirs; symlink leaves skipped; unlink doesn't follow swapped links; symlinked worktree refused.

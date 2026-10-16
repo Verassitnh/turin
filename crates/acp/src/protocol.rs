@@ -208,16 +208,42 @@ impl Connection {
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
+        self.write_notification(method, params, false).await
+    }
+
+    /// Writes a notification and waits until the bytes are flushed. A broken
+    /// pipe comes back as an error instead of being reported only later.
+    pub async fn notify_flushed(&self, method: &str, params: Value) -> Result<(), AcpError> {
+        self.write_notification(method, params, true).await
+    }
+
+    async fn write_notification(
+        &self,
+        method: &str,
+        params: Value,
+        flush: bool,
+    ) -> Result<(), AcpError> {
         self.inner.ensure_active()?;
         let frame = json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
         });
+        let bytes = format!("{frame}\n");
+        if !flush {
+            return self.inner.enqueue(WriteJob { bytes, ack: None });
+        }
+        let (tx, rx) = oneshot::channel();
         self.inner.enqueue(WriteJob {
-            bytes: format!("{frame}\n"),
-            ack: None,
-        })
+            bytes,
+            ack: Some(tx),
+        })?;
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => self.inner.ensure_active().and(Err(AcpError::transport(
+                "The ACP output queue closed before the notification was written",
+            ))),
+        }
     }
 
     pub async fn next_notification(&self) -> Option<IncomingNotification> {

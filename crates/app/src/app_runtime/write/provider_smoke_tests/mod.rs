@@ -15,6 +15,7 @@
 #![cfg(unix)]
 
 mod cursor;
+mod opencode;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};

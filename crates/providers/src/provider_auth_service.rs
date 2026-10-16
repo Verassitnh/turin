@@ -356,6 +356,9 @@ fn auth_callback_mode(mode: WireMode) -> ProviderAuthCallbackMode {
 
 pub struct ProviderAuthService {
     inner: Arc<Inner>,
+    /// Composition-root policy. A desktop owns its local callback listener;
+    /// a browser client must not select Client mode without a redirect receiver.
+    callback_mode: Option<ProviderAuthCallbackMode>,
 }
 
 impl ProviderAuthService {
@@ -371,7 +374,17 @@ impl ProviderAuthService {
                 provider_sessions,
                 credential_changes: Mutex::new(()),
             }),
+            callback_mode: None,
         }
+    }
+
+    /// Set the callback transport owned by this host. Native desktop roots use
+    /// Server so the provider binds a loopback socket before publishing its
+    /// browser interaction, even if an older UI adapter still asks for Client.
+    /// Other callers keep the wire-specified mode by leaving this unset.
+    pub fn with_callback_mode(mut self, mode: ProviderAuthCallbackMode) -> Self {
+        self.callback_mode = Some(mode);
+        self
     }
 
     pub async fn reconnect_profile(
@@ -433,7 +446,8 @@ impl ProviderAuthService {
             )),
             input.method_id.as_ref().map(|id| id.as_str().to_owned()),
             input.return_url.clone(),
-            input.callback_mode.map(auth_callback_mode),
+            self.callback_mode
+                .or_else(|| input.callback_mode.map(auth_callback_mode)),
         )
         .await
     }

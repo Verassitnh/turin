@@ -151,6 +151,8 @@ pub struct OpenCodeV1Session {
         Option<mpsc::UnboundedReceiver<Result<ProviderAdapterV2Event, ProviderAdapterV2Error>>>,
     >,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The run of the latest `start_turn`; stamped on every emitted record (`stamp_run`).
+    run: Mutex<Option<turin_contracts::RunId>>,
 }
 
 impl OpenCodeV1Session {
@@ -223,6 +225,7 @@ impl OpenCodeV1Session {
             tx,
             rx: Mutex::new(Some(rx)),
             reader: Mutex::new(None),
+            run: Mutex::new(None),
         });
         // The reader holds the session weakly: a strong reference would keep the session, and so
         // its `Drop` that ends the stream, alive for as long as the stream is open.
@@ -331,7 +334,10 @@ impl OpenCodeV1Session {
         }
     }
 
-    fn emit(&self, event: ProviderAdapterV2Event) {
+    fn emit(&self, mut event: ProviderAdapterV2Event) {
+        if let Some(run_id) = self.run.lock().as_ref() {
+            crate::adapter::records::stamp_run(&mut event, run_id);
+        }
         let _ = self.tx.send(Ok(event));
     }
 
@@ -1740,6 +1746,7 @@ impl ProviderSessionRuntime for OpenCodeV1Session {
         &self,
         input: ProviderAdapterV2TurnInput,
     ) -> Result<(), ProviderAdapterV2Error> {
+        *self.run.lock() = Some(input.run_id.clone());
         let session_id = {
             let guard = self.inner.lock();
             if guard.stream_dead.is_some() {

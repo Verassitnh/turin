@@ -165,6 +165,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_quotes_are_a_token() {
+        assert_eq!(tokenize_cli_args(Some(r#"a "" b"#)), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn double_quote_escapes_only_special_characters() {
+        assert_eq!(tokenize_cli_args(Some(r#""a\"b""#)), vec![r#"a"b"#]);
+        assert_eq!(tokenize_cli_args(Some(r#""a\nb""#)), vec![r"a\nb"]);
+        assert_eq!(tokenize_cli_args(Some(r#""a\$b""#)), vec!["a$b"]);
+    }
+
+    #[test]
+    fn collapses_extra_whitespace() {
+        assert_eq!(
+            tokenize_cli_args(Some("  --strict-config   --enable  foo  ")),
+            vec!["--strict-config", "--enable", "foo"]
+        );
+    }
+
+    #[test]
     fn preserves_quoted_values_and_escaped_spaces() {
         assert_eq!(
             tokenize_cli_args(Some(

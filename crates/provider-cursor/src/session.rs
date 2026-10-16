@@ -706,12 +706,18 @@ impl CursorSession {
     /// One prompt as a turn: open the turn, stream its items, and close it with a
     /// terminal status. Dropping this future mid-prompt closes the turn as
     /// interrupted and cancels the agent's work.
+    #[cfg(test)]
     async fn run_turn(
         &self,
         context: TurnContext,
         text: &str,
     ) -> Result<PromptOutcome, CursorError> {
         begin_turn(&self.inner, &context)?;
+        self.drive_turn(text).await
+    }
+
+    /// The prompt of a turn `begin_turn` already opened, through its terminal event.
+    async fn drive_turn(&self, text: &str) -> Result<PromptOutcome, CursorError> {
         let mut guard = TurnGuard {
             inner: Arc::clone(&self.inner),
             armed: true,
@@ -1426,10 +1432,18 @@ impl ProviderSessionRuntime for CursorSession {
             provider_turn_ordinal: input.provider_turn_ordinal,
             attempt_id: input.attempt_id.clone(),
         };
-        self.run_turn(context, &input.message.text)
-            .await
-            .map(|_| ())
-            .map_err(|error| map_error(kind, error))
+        // The prompt runs for the whole turn. `start_turn` returns once it is
+        // underway, like the other adapters': the effect worker runs one effect
+        // per thread at a time, so a start effect that waited for the turn would
+        // starve the `runtime-request.respond` and interrupt effects behind it.
+        // The turn's outcome is the terminal event `finish_turn` emits.
+        begin_turn(&self.inner, &context).map_err(|error| map_error(kind, error))?;
+        let session = self.clone();
+        let text = input.message.text.clone();
+        tokio::spawn(async move {
+            let _ = session.drive_turn(&text).await;
+        });
+        Ok(())
     }
 
     async fn steer_turn(

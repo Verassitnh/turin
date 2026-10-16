@@ -4,7 +4,10 @@ pub mod commands;
 #[cfg(test)]
 mod e2e_tests;
 pub mod effects;
+pub mod opencode_driver;
 pub mod path_search;
+#[cfg(test)]
+mod provider_smoke_tests;
 pub mod providers;
 pub mod runtime;
 pub mod settings;

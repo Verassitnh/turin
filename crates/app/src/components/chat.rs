@@ -21,6 +21,9 @@ pub mod context_window;
 // Chat-lane geometry for the canvas.
 pub mod chat_canvas_layout;
 pub mod provider_status_banner;
+// The plan card's export helpers; the follow-up helpers wait for the plan composer.
+#[allow(dead_code)]
+pub mod proposed_plan;
 // Plain command text; the timeline's command rows do not use it until the highlighter lands.
 #[allow(dead_code)]
 pub mod shell_command_block;

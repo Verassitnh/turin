@@ -5,6 +5,8 @@
 //! with pending approvals / questions attached above it. Find and the thread
 //! details panel are not ported yet; the terminal drawer is cut.
 
+use std::rc::Rc;
+
 use gpui_kit::{
     App, Entity, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, px, rems,
@@ -22,7 +24,7 @@ use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::{
     get_provider_status_banner_key, should_show_provider_status_banner,
 };
-use super::chat::thread_details_card::ThreadDetailsCard;
+use super::chat::thread_details_card::{ThreadDetailsCard, ThreadDetailsCardMeasurements};
 use super::chat::thread_details_card_layout::{
     ThreadDetailsCardContainer, ThreadDetailsCardLane, ThreadDetailsCardLayout,
     ThreadDetailsCardLayoutInput, resolve_thread_details_card_layout,
@@ -117,13 +119,16 @@ impl RenderOnce for ChatView {
             (1200.0, 800.0)
         };
         let demo_card = thread_details_card(window, cx, canvas_width, canvas_height);
-        let demo_lane_card = demo_card.as_ref().map(|(layout, _)| ChatCanvasDetailsCard {
-            left: layout.x,
-            right: layout.x + layout.width,
-            bottom: layout.y + layout.height,
-        });
+        // `reportDetailsCard`: the card's left edge and, once measured, where its content ends.
+        let demo_lane_card = demo_card
+            .as_ref()
+            .map(|(layout, bottom, _)| ChatCanvasDetailsCard {
+                left: layout.x,
+                right: layout.x + layout.width,
+                bottom: bottom.unwrap_or(layout.y + layout.height),
+            });
         let selection_toolbar = selection_toolbar_demo();
-        let details_card = demo_card.map(|(_, card)| card).or_else(|| {
+        let details_card = demo_card.map(|(_, _, card)| card).or_else(|| {
             self.thread_details_open
                 .then(|| self.git_host.read(cx).details_card(cx))
                 .flatten()
@@ -229,8 +234,8 @@ fn thread_details_card(
     cx: &mut App,
     width: f64,
     height: f64,
-) -> Option<(ThreadDetailsCardLayout, gpui_kit::AnyElement)> {
-    let panel = ThreadDetailsPanel::from_demo(window, cx)?;
+) -> Option<(ThreadDetailsCardLayout, Option<f64>, gpui_kit::AnyElement)> {
+    let panel = Rc::new(ThreadDetailsPanel::from_demo(window, cx)?);
     let layout = resolve_thread_details_card_layout(ThreadDetailsCardLayoutInput {
         container: ThreadDetailsCardContainer { width, height },
         lane: ThreadDetailsCardLane {
@@ -239,11 +244,19 @@ fn thread_details_card(
         },
         top_inset: 0.0,
     })?;
+    let measurements = window.use_keyed_state("thread-details-card-measurements", cx, |_, _| {
+        ThreadDetailsCardMeasurements::default()
+    });
+    let measurement_key = format!("demo:thread:{}", layout.width);
+    let bottom = measurements.read(cx).card_bottom(&measurement_key, &layout);
     Some((
         layout,
+        bottom,
         ThreadDetailsCard {
             layout,
-            children: panel.into_any_element(),
+            measurement_key,
+            measurements,
+            content: Rc::new(move |density, window, cx| panel.render_density(density, window, cx)),
         }
         .into_any_element(),
     ))

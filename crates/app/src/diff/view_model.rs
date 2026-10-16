@@ -17,7 +17,7 @@ use gpui_kit::App;
 
 use super::base_ref_choices::VcsRef;
 use super::diff_panel_store::ScopedThreadRef;
-use super::pierre::types::{ChangeType, FileContents};
+use super::pierre::types::ChangeType;
 use crate::components::chat::timeline::types::TurnDiffSummary;
 
 /// `AsyncResult` as the panel needs it: `isPending` / data / `error`.
@@ -174,37 +174,4 @@ pub trait DiffSource: 'static {
 
     /// Installed by the panel; call it when data changes.
     fn set_notifier(&self, notify: Arc<dyn Fn(&mut App) + Send + Sync>);
-}
-
-/// `FileDiffContentsLoader` over [`DiffSource::diff_file_contents`]
-/// (`createGitDiffFileContentsLoader`): `(oldFile, newFile)` for a file.
-#[allow(clippy::type_complexity)]
-pub fn load_diff_files(
-    source: &dyn DiffSource,
-    kind: GitSourceKind,
-    base_ref: Option<&str>,
-    head_ref: Option<&str>,
-    cache_key: &str,
-    file: &super::pierre::types::FileDiffMetadata,
-) -> Result<(Option<FileContents>, FileContents), String> {
-    let new_path = super::diff_rendering::resolve_file_diff_path(file);
-    let old_path = file.prev_name.clone().unwrap_or_else(|| new_path.clone());
-    let contents =
-        source.diff_file_contents(kind, base_ref, head_ref, &old_path, &new_path, file.r#type)?;
-    let new_file = FileContents {
-        name: new_path.clone(),
-        contents: contents.new_contents,
-        cache_key: Some(format!("{cache_key}:new:{new_path}")),
-    };
-    if file.r#type == ChangeType::RenamePure {
-        return Ok((None, new_file));
-    }
-    Ok((
-        Some(FileContents {
-            name: old_path.clone(),
-            contents: contents.old_contents,
-            cache_key: Some(format!("{cache_key}:old:{old_path}")),
-        }),
-        new_file,
-    ))
 }

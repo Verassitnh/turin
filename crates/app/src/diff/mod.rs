@@ -5,14 +5,22 @@
 // sources, the composer, settings persistence); unused pieces are intentional.
 #![allow(dead_code)]
 
+pub mod annotatable_code_view;
 pub mod annotation;
 pub mod base_ref_choices;
+pub mod code_view_file_reveal;
+pub mod code_view_search;
 pub mod comment_submit_shortcut;
 pub mod diff_collapse;
 pub mod diff_file_actions;
+pub mod diff_file_contents;
+pub mod diff_file_path_copy_button;
+pub mod diff_file_status;
 pub mod diff_file_tree_logic;
+pub mod diff_panel_persistence;
 pub mod diff_panel_store;
 pub mod diff_rendering;
+pub mod diff_worker_pool;
 pub mod file_tree;
 pub mod highlight;
 pub mod menu;
@@ -29,6 +37,20 @@ pub mod theme;
 pub mod view_model;
 
 use gpui_kit::{App, Global};
+
+/// Latest encoded diff panel store (`t3code:diff-panel-state:v1`) for settings persistence.
+#[derive(Default)]
+pub struct DiffPanelPersistedSnapshot {
+    pub value: Option<serde_json::Value>,
+}
+
+impl Global for DiffPanelPersistedSnapshot {}
+
+pub fn take_diff_panel_persisted_snapshot(cx: &mut App) -> Option<serde_json::Value> {
+    cx.default_global::<DiffPanelPersistedSnapshot>()
+        .value
+        .take()
+}
 
 /// "Open diff" requests from elsewhere in the app (the changed-files card of
 /// a turn): the panel selects the turn, the shell opens the right panel.

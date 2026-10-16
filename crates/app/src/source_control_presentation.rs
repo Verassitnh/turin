@@ -1,11 +1,14 @@
 //! Port of upstream/apps/web/src/sourceControlPresentation.ts
 
+#![allow(dead_code)]
+
 use crate::state::helpers::source_control_clients::{
     ChangeRequestTerminology, SOURCE_CONTROL_CLIENTS, SourceControlClientDefinition,
 };
 use crate::ui::IconName;
 use turin_contracts::source_control::SourceControlProviderInfo;
 
+#[allow(unused_imports)]
 pub use crate::state::helpers::source_control_clients::ChangeRequestTerminology as ChangeRequestTerminologyExport;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

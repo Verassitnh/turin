@@ -1,5 +1,8 @@
 //! Port of upstream/apps/web/src/projectIconOptions.ts (+ test).
 
+#![allow(dead_code)]
+
+#[allow(unused_imports)]
 pub use crate::project_icon_colors::{PROJECT_ICON_COLORS, project_icon_color};
 
 use crate::state::models::ProjectIconColor;

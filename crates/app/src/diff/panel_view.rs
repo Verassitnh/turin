@@ -14,6 +14,8 @@ use gpui_kit::{
 };
 
 use super::annotation::CommentInput;
+use super::diff_file_path_copy_button::{COPIED_PATH_TOOLTIP, COPY_PATH_TOOLTIP};
+use super::diff_file_status::diff_file_status_labels;
 use super::diff_rendering::{DiffCollapseIconTone, get_diff_collapse_icon_tone};
 use super::highlight::LineTokens;
 use super::menu::{menu_radio_item, menu_sub_trigger, menu_surface};
@@ -1038,33 +1040,34 @@ impl DiffPanel {
                 })
                 .into_any_element()
         };
-        let status_button = (entry.stat.is_some() && (entry.error || entry.truncated)).then(|| {
-            let retry_panel = panel.clone();
-            let error = entry.error;
-            Button::new(ElementId::Name(
-                format!("diff-status-{}-{sticky}", file_index).into(),
-            ))
-            .variant(ButtonVariant::GhostMuted)
-            .size(ButtonSize::IconMicro)
-            .tooltip(if error {
-                "Retry loading diff"
-            } else {
-                "This file is too large to show in full. Counts include all changes."
-            })
-            .child(
-                Icon::new(if error {
-                    IconName::RotateCw
-                } else {
-                    IconName::Info
+        let status_button = entry
+            .stat
+            .is_some()
+            .then(|| diff_file_status_labels(entry.error, entry.truncated))
+            .flatten()
+            .map(|labels| {
+                let retry_panel = panel.clone();
+                let retry_on_click = labels.retry_on_click;
+                Button::new(ElementId::Name(
+                    format!("diff-status-{}-{sticky}", file_index).into(),
+                ))
+                .variant(ButtonVariant::GhostMuted)
+                .size(ButtonSize::IconMicro)
+                .tooltip(labels.tooltip)
+                .child(
+                    Icon::new(if retry_on_click {
+                        IconName::RotateCw
+                    } else {
+                        IconName::Info
+                    })
+                    .size(rems(0.75)),
+                )
+                .on_click(move |_, _, cx| {
+                    if retry_on_click {
+                        retry_panel.update(cx, |panel, cx| panel.reload(cx));
+                    }
                 })
-                .size(rems(0.75)),
-            )
-            .on_click(move |_, _, cx| {
-                if error {
-                    retry_panel.update(cx, |panel, cx| panel.reload(cx));
-                }
-            })
-        });
+            });
         div()
             .id(ElementId::Name(
                 format!("diff-header-{}-{sticky}", file_index).into(),
@@ -1172,7 +1175,11 @@ impl DiffPanel {
                         ))
                         .variant(ButtonVariant::GhostMuted)
                         .size(ButtonSize::IconMicro)
-                        .tooltip(if copied { "Copied" } else { "Copy path" })
+                        .tooltip(if copied {
+                            COPIED_PATH_TOOLTIP
+                        } else {
+                            COPY_PATH_TOOLTIP
+                        })
                         .child(
                             Icon::new(if copied {
                                 IconName::Check

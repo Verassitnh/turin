@@ -1,5 +1,7 @@
 //! Port of upstream/apps/web/src/settleAndAdvance.ts (+ test).
 
+#![allow(dead_code)]
+
 use std::sync::{Arc, Mutex};
 
 use turin_contracts::environment::ScopedThreadRef;
@@ -43,16 +45,16 @@ mod tests {
 
     fn thread_ref() -> ScopedThreadRef {
         ScopedThreadRef {
-            environment_id: EnvironmentId::new("environment-local"),
-            thread_id: ThreadId::new("thread-1"),
+            environment_id: EnvironmentId::new("environment-local").unwrap(),
+            thread_id: ThreadId::new("thread-1").unwrap(),
         }
     }
 
     #[test]
     fn hands_open_thread_to_mounted_sidebar() {
-        let settled = Mutex::new(Vec::<ScopedThreadRef>::new());
+        let settled = Arc::new(Mutex::new(Vec::<ScopedThreadRef>::new()));
         let unregister = register_settle_and_advance({
-            let settled = &settled;
+            let settled = Arc::clone(&settled);
             move |thread| settled.lock().unwrap().push(thread)
         });
         assert!(settle_and_advance(thread_ref()));
@@ -68,18 +70,18 @@ mod tests {
 
     #[test]
     fn keeps_remounted_handler_when_old_unmounts_late() {
-        let settled_by = Mutex::new(Vec::<String>::new());
+        let settled_by = Arc::new(Mutex::new(Vec::<String>::new()));
         let unregister_old = register_settle_and_advance({
-            let settled_by = &settled_by;
+            let settled_by = Arc::clone(&settled_by);
             move |_| settled_by.lock().unwrap().push("old".into())
         });
         let unregister_new = register_settle_and_advance({
-            let settled_by = &settled_by;
+            let settled_by = Arc::clone(&settled_by);
             move |_| settled_by.lock().unwrap().push("new".into())
         });
         unregister_old();
         assert!(settle_and_advance(thread_ref()));
-        assert_eq!(settled_by.lock().unwrap(), vec!["new"]);
+        assert_eq!(&*settled_by.lock().unwrap(), &["new".to_string()]);
         unregister_new();
         assert!(!settle_and_advance(thread_ref()));
     }

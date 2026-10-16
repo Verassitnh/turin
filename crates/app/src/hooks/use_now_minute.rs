@@ -4,6 +4,8 @@
 //! value and listener list (`useSyncExternalStore` → [`subscribe_now_minute`] +
 //! [`tick_now_minute`] on a GPUI timer aligned to UTC minute boundaries).
 
+#![allow(dead_code)]
+
 use std::sync::{Mutex, OnceLock};
 
 type Listener = Box<dyn Fn() + Send + Sync>;

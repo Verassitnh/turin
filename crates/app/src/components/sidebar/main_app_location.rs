@@ -1,5 +1,7 @@
 //! Port of upstream/apps/web/src/components/sidebar/mainAppLocation.ts
 
+#![allow(dead_code)]
+
 use std::sync::Mutex;
 
 /// Settings, Usage, and Pull Requests replace the sidebar utility row with a

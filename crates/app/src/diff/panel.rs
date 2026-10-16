@@ -12,12 +12,15 @@ use std::sync::Arc;
 
 use gpui_kit::{App, Context, FocusHandle, ListAlignment, ListState, Subscription, Window, px};
 
+use super::DiffPanelPersistedSnapshot;
 use super::base_ref_choices::{BaseRefChoice, build_base_ref_choices, filter_base_ref_choices};
 use super::diff_collapse::{are_all_diff_files_collapsed, toggle_all_diff_files};
 use super::diff_file_actions::{
     DiffFileTargets, OpenDiffFilePrimaryActionInput, open_diff_file_primary_action,
 };
+use super::diff_file_contents::load_diff_file_contents as load_diff_files;
 use super::diff_file_tree_logic::{DiffFileTreeEntry, diff_file_tree_entries};
+use super::diff_panel_persistence::{decode_diff_panel_store_json, encode_diff_panel_store};
 use super::diff_panel_store::{DiffPanelSelection, DiffPanelStore, GitScope, ScopedThreadRef};
 use super::diff_rendering::{
     DiffLineStat, RenderablePatch, RenderablePatchOptions, build_file_diff_content_version,
@@ -38,7 +41,7 @@ use super::review_comment_context::{
 use super::rows::{DiffRow, LineKind, build_rows};
 use super::view_model::{
     DiffContext, DiffSource, GitDiffFileStat, GitDiffPreview, GitDiffSource, GitSourceKind,
-    Loadable, load_diff_files,
+    Loadable,
 };
 use crate::components::chat::timeline::types::TurnDiffSummary;
 use crate::theme::ActiveAppTheme;
@@ -287,9 +290,13 @@ impl DiffPanel {
         if env("TURIN_DIFF_WRAP").as_deref() == Some("0") {
             settings.word_wrap = false;
         }
+        let store = std::env::var("TURIN_DIFF_PANEL_STATE_JSON")
+            .ok()
+            .and_then(|json| decode_diff_panel_store_json(&json))
+            .unwrap_or_default();
         let mut panel = Self {
             source,
-            store: DiffPanelStore::default(),
+            store,
             settings,
             derived: Derived::empty(),
             collapsed_scope: None,
@@ -341,6 +348,7 @@ impl DiffPanel {
             }
             _ => {}
         }
+        panel.sync_persisted_store(cx);
         panel.reload(cx);
         // Dev switches: open a menu, or a comment draft / saved comment on the
         // first changed line of the first expanded file.
@@ -445,6 +453,7 @@ impl DiffPanel {
             return;
         };
         self.store.select_turn(&thread, run_id, file_path);
+        self.sync_persisted_store(cx);
         self.reload(cx);
         cx.notify();
     }
@@ -476,6 +485,11 @@ impl DiffPanel {
     // ── derivation ──────────────────────────────────────────────────────
 
     /// Recomputes everything derived from the source and panel state, and
+    fn sync_persisted_store(&self, cx: &mut Context<Self>) {
+        cx.default_global::<DiffPanelPersistedSnapshot>().value =
+            Some(encode_diff_panel_store(&self.store));
+    }
+
     /// splices the list.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let started = std::time::Instant::now();
@@ -494,6 +508,7 @@ impl DiffPanel {
         if let Some(thread) = &thread {
             let ids: Vec<String> = turns.iter().map(|t| t.run_id.clone()).collect();
             self.store.reconcile_turn_selection(thread, &ids);
+            self.sync_persisted_store(cx);
         }
         let selection = self.store.selection(thread.as_ref());
         let selected_run_id = match &selection {
@@ -1102,6 +1117,7 @@ impl DiffPanel {
             }
         }
         self.menu = None;
+        self.sync_persisted_store(cx);
         self.reload(cx);
     }
 
@@ -1110,6 +1126,7 @@ impl DiffPanel {
             return;
         };
         self.store.select_branch_base_ref(&thread, base_ref);
+        self.sync_persisted_store(cx);
         self.menu = None;
         self.base_ref_query.clear();
         self.reload(cx);

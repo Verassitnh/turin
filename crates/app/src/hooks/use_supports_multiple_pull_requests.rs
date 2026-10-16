@@ -1,5 +1,7 @@
 //! Port of upstream/apps/web/src/hooks/useSupportsMultiplePullRequests.ts
 
+#![allow(dead_code)]
+
 use turin_contracts::EnvironmentId;
 use turin_contracts::environment::ExecutionEnvironmentCapabilities;
 
@@ -18,7 +20,7 @@ mod tests {
 
     #[test]
     fn reads_thread_pull_requests_capability() {
-        let id = EnvironmentId::new("env");
+        let id = EnvironmentId::new("env").unwrap();
         let caps = ExecutionEnvironmentCapabilities {
             thread_pull_requests: Some(true),
             ..Default::default()

@@ -1,5 +1,7 @@
 //! Port of upstream/apps/web/src/sidebarPendingFileDropStore.ts (+ test).
 
+#![allow(dead_code)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use turin_contracts::environment::ScopedThreadRef;
@@ -86,8 +88,8 @@ mod tests {
 
     fn ref_of(environment_id: &str, thread_id: &str) -> ScopedThreadRef {
         ScopedThreadRef {
-            environment_id: EnvironmentId::new(environment_id),
-            thread_id: ThreadId::new(thread_id),
+            environment_id: EnvironmentId::new(environment_id).unwrap(),
+            thread_id: ThreadId::new(thread_id).unwrap(),
         }
     }
 

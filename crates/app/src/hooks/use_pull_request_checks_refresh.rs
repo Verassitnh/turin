@@ -1,5 +1,7 @@
 //! Port of upstream/apps/web/src/hooks/usePullRequestChecksRefresh.ts
 
+#![allow(dead_code)]
+
 use turin_contracts::pull_request::{PullRequestCheck, PullRequestCheckStatus};
 
 /// Interval for live refresh while checks are pending (ms).

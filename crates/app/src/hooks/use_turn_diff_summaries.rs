@@ -1,5 +1,7 @@
 //! Port of upstream/apps/web/src/hooks/useTurnDiffSummaries.ts
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use crate::components::chat::timeline::session_logic::infer_checkpoint_turn_count_by_run_id;

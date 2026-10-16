@@ -1,6 +1,8 @@
 //! Port of upstream/apps/web/src/logicalProject.ts (re-exports from client-runtime
 //! `state/project-grouping`).
 
+#![allow(unused_imports)]
+
 pub use crate::state::project_grouping::{
     BuildProjectGroupsInput, DeriveLogicalProjectKeyOptions, GroupableProject, ProjectGroup,
     ProjectGroupMember, ProjectGroupingMode, ProjectGroupingSettings, build_project_groups,

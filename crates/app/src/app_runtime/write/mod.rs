@@ -5,9 +5,9 @@ pub mod commands;
 mod e2e_tests;
 pub mod effects;
 pub mod opencode_driver;
-pub mod providers;
 #[cfg(test)]
 mod provider_smoke_tests;
+pub mod providers;
 pub mod runtime;
 pub mod settings;
 pub mod smoke;

@@ -776,7 +776,10 @@ mod tests {
 /// executor routes a node, message, item or plan to a run only when its
 /// `runId` is that run's, so without this an OpenCode turn completes with
 /// none of its content in the thread. Records that already carry a run keep it.
-pub fn stamp_run(event: &mut turin_provider_core::provider_adapter::ProviderAdapterV2Event, run_id: &turin_contracts::RunId) {
+pub fn stamp_run(
+    event: &mut turin_provider_core::provider_adapter::ProviderAdapterV2Event,
+    run_id: &turin_contracts::RunId,
+) {
     use turin_provider_core::provider_adapter::ProviderAdapterV2Event as E;
     match event {
         E::NodeUpdated { node, .. } => {

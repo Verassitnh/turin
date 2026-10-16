@@ -3,7 +3,10 @@
 
 use serde_json::json;
 
-use super::{Smoke, assert_approval_round_trip, assert_reply_lands, assert_stop_interrupts, install_script, model, smoke};
+use super::{
+    Smoke, assert_approval_round_trip, assert_reply_lands, assert_stop_interrupts, install_script,
+    model, smoke,
+};
 
 async fn codex_smoke() -> Smoke {
     let cli = tempfile::tempdir().expect("cli dir");
@@ -27,7 +30,12 @@ async fn codex_streams_a_fake_app_server_reply_into_the_store() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn codex_stop_interrupts_the_running_turn() {
-    assert_stop_interrupts(&codex_smoke().await, "Please hang until interrupted").await;
+    assert_stop_interrupts(
+        &codex_smoke().await,
+        "Please hang until interrupted",
+        "turn/interrupt",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

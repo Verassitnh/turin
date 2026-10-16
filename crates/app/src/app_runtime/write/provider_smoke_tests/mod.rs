@@ -14,6 +14,7 @@
 
 #![cfg(unix)]
 
+mod codex;
 mod cursor;
 mod opencode;
 
@@ -27,7 +28,8 @@ use serde_json::{Value, json};
 use turin_contracts::ThreadId;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ConversationMessageRole, OrchestrationV2DomainEvent,
-    OrchestrationV2RuntimeRequestStatus, OrchestrationV2RunStatus,
+    OrchestrationV2ProviderTurnStatus, OrchestrationV2RunStatus,
+    OrchestrationV2RuntimeRequestStatus,
 };
 use turin_contracts::settings::ServerSettings;
 use turin_orchestration::pipeline::event_sink::StreamOptions;
@@ -70,6 +72,8 @@ pub(super) struct Smoke {
     pub workspace: PathBuf,
     /// The model selection a thread of this provider is created with.
     pub model_selection: Value,
+    /// The fake provider's own dir; it logs every frame it receives to `argv.log.rpc`.
+    cli_dir: Option<PathBuf>,
     client: ClientStateHandle,
     _dirs: Vec<tempfile::TempDir>,
 }
@@ -90,8 +94,10 @@ pub(super) async fn smoke(
         .await
         .expect("write runtime");
     let workspace_path = workspace.path().to_path_buf();
+    let cli_dir = dirs.first().map(|dir| dir.path().to_path_buf());
     dirs.extend([data, workspace]);
     Smoke {
+        cli_dir,
         commands: Commands::new(runtime),
         client: start(stores.clone()),
         stores,
@@ -102,6 +108,12 @@ pub(super) async fn smoke(
 }
 
 impl Smoke {
+    /// Every frame or request the fake provider received.
+    pub fn provider_log(&self) -> String {
+        let dir = self.cli_dir.as_ref().expect("a fake provider dir");
+        std::fs::read_to_string(dir.join("argv.log.rpc")).unwrap_or_default()
+    }
+
     /// Project + thread, with the thread open in the client store.
     pub async fn thread(&self, title: &str, runtime_mode: &str) -> ThreadId {
         let project_id = self
@@ -181,18 +193,25 @@ impl Smoke {
         let status = tokio::time::timeout(Duration::from_secs(60), async {
             while let Some(item) = events.next().await {
                 match item.expect("event").event {
-                    OrchestrationV2DomainEvent::RunUpdated { payload, .. } => match payload.status
+                    // Stop once the provider has the turn, so the provider's own
+                    // interrupt is what ends it (the run is `running` earlier).
+                    OrchestrationV2DomainEvent::ProviderTurnUpdated { payload, .. }
+                        if stop_when_running
+                            && !stopped
+                            && payload.status == OrchestrationV2ProviderTurnStatus::Running =>
                     {
-                        OrchestrationV2RunStatus::Running if stop_when_running && !stopped => {
-                            stopped = true;
-                            self.commands.stop_thread(thread).await.expect("stop");
+                        stopped = true;
+                        self.commands.stop_thread(thread).await.expect("stop");
+                    }
+                    OrchestrationV2DomainEvent::RunUpdated { payload, .. } => {
+                        match payload.status {
+                            OrchestrationV2RunStatus::Completed
+                            | OrchestrationV2RunStatus::Failed
+                            | OrchestrationV2RunStatus::Interrupted
+                            | OrchestrationV2RunStatus::Cancelled => return payload.status,
+                            _ => {}
                         }
-                        OrchestrationV2RunStatus::Completed
-                        | OrchestrationV2RunStatus::Failed
-                        | OrchestrationV2RunStatus::Interrupted
-                        | OrchestrationV2RunStatus::Cancelled => return payload.status,
-                        _ => {}
-                    },
+                    }
                     OrchestrationV2DomainEvent::RuntimeRequestUpdated { .. } if !answered => {
                         let Some(decision) = approve else { continue };
                         let records = orchestrator
@@ -275,7 +294,10 @@ impl Smoke {
                 };
                 view.threads.iter().all(|row| {
                     !row.latest_run.as_ref().is_some_and(|run| live(run.status))
-                        && !row.runtime.as_ref().is_some_and(|runtime| live(runtime.status))
+                        && !row
+                            .runtime
+                            .as_ref()
+                            .is_some_and(|runtime| live(runtime.status))
                 })
             });
             run_settled && row_idle
@@ -303,8 +325,9 @@ pub(super) async fn assert_reply_lands(smoke: &Smoke, reply: &str) {
         .await;
 }
 
-/// The shared Stop check: the turn never ends by itself; Stop interrupts it.
-pub(super) async fn assert_stop_interrupts(smoke: &Smoke, hang_prompt: &str) {
+/// The shared Stop check: the turn never ends by itself; Stop interrupts it, and
+/// the fake provider saw its native cancel (`wire`) rather than just losing the turn.
+pub(super) async fn assert_stop_interrupts(smoke: &Smoke, hang_prompt: &str, wire: &str) {
     let thread = smoke.thread("Stop me", "auto").await;
     let outcome = smoke.run_turn(&thread, hang_prompt, true, None).await;
     assert!(outcome.stopped, "the run reached running before it settled");
@@ -312,6 +335,11 @@ pub(super) async fn assert_stop_interrupts(smoke: &Smoke, hang_prompt: &str) {
     smoke
         .settled_in_store(&thread, OrchestrationV2RunStatus::Interrupted)
         .await;
+    let log = smoke.provider_log();
+    assert!(
+        log.contains(wire),
+        "the provider never received {wire}: {log}"
+    );
 }
 
 /// The shared approval check: the provider asks, the command answers, the turn finishes.

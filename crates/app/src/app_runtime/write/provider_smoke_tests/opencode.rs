@@ -5,7 +5,10 @@
 
 use serde_json::json;
 
-use super::{Smoke, assert_approval_round_trip, assert_reply_lands, assert_stop_interrupts, install_script, model, smoke};
+use super::{
+    Smoke, assert_approval_round_trip, assert_reply_lands, assert_stop_interrupts, install_script,
+    model, smoke,
+};
 
 async fn opencode_smoke() -> Smoke {
     let cli = tempfile::tempdir().expect("cli dir");
@@ -29,7 +32,12 @@ async fn opencode_streams_a_fake_server_reply_into_the_store() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opencode_stop_aborts_the_running_session() {
-    assert_stop_interrupts(&opencode_smoke().await, "Please hang until aborted").await;
+    assert_stop_interrupts(
+        &opencode_smoke().await,
+        "Please hang until aborted",
+        "/abort",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

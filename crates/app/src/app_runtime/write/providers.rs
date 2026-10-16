@@ -13,13 +13,6 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use turin_contracts::settings::ServerSettings;
-use turin_provider_core::model_manifest::ModelManifest;
-use turin_provider_core::provider_host::ProviderHost;
-use turin_provider_core::provider_host_live::{
-    DesktopProviderHost, DesktopSettingsHandle, ShouldRunBackgroundWork,
-};
-use turin_provider_core::provider_instance_registry::ProviderInstanceRegistry;
-use turin_provider_core::provider_instance_registry_hydration::ProviderInstanceRegistryHydration;
 use turin_provider_codex::CodexDriver;
 use turin_provider_codex::codex_installation::{
     CodexInstallation, CodexInstallationOptions, CommandRuntimeValidator, HttpReleaseDownloader,
@@ -27,6 +20,13 @@ use turin_provider_codex::codex_installation::{
 };
 use turin_provider_codex::codex_managed_runtime::CodexManagedHost;
 use turin_provider_core::credential_store::{FileSecretStore, SecretStore};
+use turin_provider_core::model_manifest::ModelManifest;
+use turin_provider_core::provider_host::ProviderHost;
+use turin_provider_core::provider_host_live::{
+    DesktopProviderHost, DesktopSettingsHandle, ShouldRunBackgroundWork,
+};
+use turin_provider_core::provider_instance_registry::ProviderInstanceRegistry;
+use turin_provider_core::provider_instance_registry_hydration::ProviderInstanceRegistryHydration;
 use turin_providers::built_in_drivers::{BuiltInDriverSlots, built_in_drivers};
 
 use super::opencode_driver::OpenCodeDriver;

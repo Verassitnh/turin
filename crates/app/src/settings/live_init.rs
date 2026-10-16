@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 pub use crate::settings_logic::use_settings::{
-    ClientSettingsHydrationError, ClientSettingsPersistence, client_settings_hydrated,
-    ensure_client_settings_hydrated, set_client_settings_persistence,
+    ClientSettingsHydrationError, ClientSettingsPersistence, ensure_client_settings_hydrated,
+    set_client_settings_persistence,
 };
 
 /// Installs the desktop persistence backend. Call once during app startup,

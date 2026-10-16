@@ -18,7 +18,8 @@ pub async fn update_server_settings(
     patch: ServerSettingsPatch,
 ) -> Result<ServerSettings, CommandError> {
     let commands = bus.commands()?;
-    commands.update_server_settings(patch).await
+    commands.update_server_settings(patch).await?;
+    commands.server_settings().await
 }
 
 pub async fn update_provider_instance(
@@ -26,5 +27,6 @@ pub async fn update_provider_instance(
     mutation: ProviderInstanceMutation,
 ) -> Result<ServerSettings, CommandError> {
     let commands = bus.commands()?;
-    commands.update_provider_instance(mutation).await
+    commands.update_provider_instance(mutation).await?;
+    commands.server_settings().await
 }

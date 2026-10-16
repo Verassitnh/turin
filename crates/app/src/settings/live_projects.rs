@@ -23,17 +23,17 @@ fn command_id() -> CommandId {
 
 pub fn project_icon_override(icon: &ProjectIcon) -> ProjectIconOverride {
     use crate::state::contracts::ProjectIconOverride as O;
+    use turin_contracts::project::{ProjectEmoji, ProjectLucideIconName, ProjectMonogramText};
     match icon {
         ProjectIcon::Monogram { text, color } => O::Monogram {
-            text: turin_contracts::TrimmedNonEmptyString::new(text.as_str())
-                .expect("monogram text"),
+            text: ProjectMonogramText::new(text.as_str()).expect("monogram text"),
             color: *color,
         },
         ProjectIcon::Emoji(emoji) => O::Emoji {
-            emoji: turin_contracts::TrimmedNonEmptyString::new(emoji.as_str()).expect("emoji"),
+            emoji: ProjectEmoji::new(emoji.as_str()).expect("emoji"),
         },
         ProjectIcon::Lucide { name, color } => O::Lucide {
-            name: turin_contracts::TrimmedNonEmptyString::new(name.as_str()).expect("lucide name"),
+            name: ProjectLucideIconName::new(name.as_str()).expect("lucide name"),
             color: *color,
         },
     }

@@ -96,19 +96,37 @@ fn keybindings_vm(state: &KeybindingsConfigState, config_path: String) -> Keybin
 }
 
 fn resolved_keybinding_rule(rule: &ResolvedKeybinding) -> ResolvedKeybindingRule {
+    let shortcut = runtime_shortcut_expression(&rule.shortcut);
+    let shortcut = turin_shared::keybindings::parse_keybinding_shortcut(&shortcut)
+        .unwrap_or_else(|| panic!("runtime keybinding should round-trip: {shortcut}"));
     ResolvedKeybindingRule {
         command: rule.command.clone(),
-        shortcut: turin_shared::keybindings::ParsedShortcut {
-            key: rule.shortcut.key.clone(),
-            code: rule.shortcut.code.clone(),
-            meta_key: rule.shortcut.meta_key,
-            ctrl_key: rule.shortcut.ctrl_key,
-            shift_key: rule.shortcut.shift_key,
-            alt_key: rule.shortcut.alt_key,
-            mod_key: rule.shortcut.mod_key,
-        },
+        shortcut,
         when_ast: rule.when_ast.clone(),
     }
+}
+
+fn runtime_shortcut_expression(
+    shortcut: &turin_runtime::shared_keybindings::ParsedShortcut,
+) -> String {
+    let mut parts = Vec::new();
+    if shortcut.meta_key {
+        parts.push("meta");
+    }
+    if shortcut.ctrl_key {
+        parts.push("ctrl");
+    }
+    if shortcut.shift_key {
+        parts.push("shift");
+    }
+    if shortcut.alt_key {
+        parts.push("alt");
+    }
+    if shortcut.mod_key {
+        parts.push("mod");
+    }
+    parts.push(shortcut.key.as_str());
+    parts.join("+")
 }
 
 fn shell_projects_and_threads(

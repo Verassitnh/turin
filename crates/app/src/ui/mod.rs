@@ -10,6 +10,7 @@ pub mod dialog;
 pub mod empty;
 pub mod icon;
 pub mod kbd;
+pub mod label;
 pub mod menu;
 pub mod popover;
 pub mod scroll_area;

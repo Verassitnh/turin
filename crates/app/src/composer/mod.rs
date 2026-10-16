@@ -7,6 +7,7 @@
 //! user intent through [`view_model::ComposerCallbacks`].
 
 pub mod attachment_files;
+pub mod attachment_upload_state;
 pub mod banner_stack;
 pub mod catalog;
 pub mod code_block;

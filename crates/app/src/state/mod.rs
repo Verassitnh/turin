@@ -25,6 +25,7 @@ pub mod orchestration_v2_projection;
 pub mod panel_animations;
 pub mod project_grouping;
 pub mod projects;
+pub mod question_attachments;
 pub mod right_panel_store;
 pub mod shell_reducer;
 pub mod shell_state;

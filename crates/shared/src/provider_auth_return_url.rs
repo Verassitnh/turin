@@ -6,7 +6,7 @@
 use url::Url;
 
 /// Exact host strings from upstream `preview.ts` `LOOPBACK_HOSTS`, plus `[::1]`.
-fn is_loopback_host(host: &str) -> bool {
+pub fn is_loopback_host(host: &str) -> bool {
     matches!(
         host,
         "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]"

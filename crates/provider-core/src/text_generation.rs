@@ -4,9 +4,15 @@
 //! the driver reports `supportsTextGeneration: false`.
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use turin_contracts::{
-    chat_attachment::ChatAttachment, git::TextGenerationError, model_selection::ModelSelection,
-    pull_request_review_guide::PullRequestReviewGuideStop, settings::BranchNamingOptions,
+    chat_attachment::ChatAttachment,
+    git::TextGenerationError,
+    model_selection::ModelSelection,
+    pull_request_review_guide::{
+        PullRequestReviewGuideAttentionKind, PullRequestReviewGuideExcerptSide,
+    },
+    settings::BranchNamingOptions,
 };
 
 #[derive(Debug, Clone)]
@@ -113,12 +119,58 @@ pub struct ReviewGuideGenerationInput {
     pub model_selection: ModelSelection,
 }
 
-/// A guide as the model wrote it, before the server holds it to the change.
+/// A guide as the model wrote it, before the server holds it to the change. The stops are raw:
+/// the review guide normalizer checks and clamps them, so nothing here is contract-valid yet.
 ///
 /// Upstream `Omit<PullRequestReviewGuide, "headSha" | "generatedAt" | "modelSelection">`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReviewGuideGenerationResult {
-    pub stops: Vec<PullRequestReviewGuideStop>,
+    pub stops: Vec<ReviewGuideStopOutput>,
+}
+
+/// One review guide stop as the model wrote it. Titles, notes, and questions may be empty and
+/// lines may be zero or negative: the review guide normalizer drops or clamps those.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewGuideStopOutput {
+    pub title: String,
+    pub summary: String,
+    pub attention: Option<ReviewGuideAttentionOutput>,
+    pub excerpts: Vec<ReviewGuideExcerptOutput>,
+    pub files: Vec<ReviewGuideFileOutput>,
+    pub notes: Vec<ReviewGuideNoteOutput>,
+    pub questions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewGuideAttentionOutput {
+    pub kind: PullRequestReviewGuideAttentionKind,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewGuideExcerptOutput {
+    pub path: String,
+    pub side: PullRequestReviewGuideExcerptSide,
+    pub start: i64,
+    pub end: i64,
+    pub caption: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ReviewGuideFileOutput {
+    pub path: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ReviewGuideNoteOutput {
+    pub path: String,
+    pub line: i64,
+    pub title: String,
+    pub body: String,
 }
 
 #[async_trait]

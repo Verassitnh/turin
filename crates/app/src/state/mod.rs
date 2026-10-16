@@ -16,6 +16,7 @@ pub mod contracts;
 pub mod entities;
 pub mod events;
 pub mod file_context_menu;
+pub mod file_metadata;
 pub mod first_run;
 pub mod helpers;
 pub mod item_support;
@@ -24,6 +25,7 @@ pub mod models;
 pub mod orchestration_v2_projection;
 pub mod project_grouping;
 pub mod projects;
+pub mod right_panel_store;
 pub mod shell_reducer;
 pub mod shell_state;
 pub mod sidebar_project_grouping;
@@ -50,6 +52,7 @@ pub mod thread_workflows;
 pub mod time;
 pub mod turn_item_presentation;
 pub mod ui_state_store;
+pub mod worktree_cleanup;
 
 /// The one environment a single-process Turin has: this machine.
 pub fn local_environment_id() -> contracts::EnvironmentId {

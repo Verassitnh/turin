@@ -47,8 +47,9 @@ use crate::agent_session_scanner::{
     AgentSessionTranscriptMetadata, MAX_IMPORT_RECORDS, TranscriptRecord, parse_records,
 };
 use crate::codex_home_layout::{lexical_resolve, resolve_codex_home_layout};
-use crate::project_path::{expand_home_path, normalize_project_path_for_comparison};
+use crate::project_path::expand_home_path;
 use crate::project_ports::{PortError, ProjectStoreReads};
+use turin_shared::path::normalize_project_path_for_comparison;
 
 /// Chunk size for full transcript reads.
 const TRANSCRIPT_PREFIX_BYTES: usize = 32 * 1024;

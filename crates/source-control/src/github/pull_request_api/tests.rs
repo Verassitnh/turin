@@ -1,0 +1,9 @@
+mod actions;
+mod activity;
+mod detail;
+mod diff;
+mod files_viewed;
+mod identity;
+mod list;
+mod stack;
+mod summary;

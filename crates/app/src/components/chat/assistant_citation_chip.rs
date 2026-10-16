@@ -9,7 +9,7 @@ use std::rc::Rc;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px, rems,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, rems,
 };
 
 use super::assistant_citation_comment_dismissal::{
@@ -20,7 +20,7 @@ use super::timeline::assistant_citations::{
     AssistantCitation, assistant_citation_label, serialize_assistant_citation,
 };
 use crate::theme::color::{MixSpace, color, color_mix, with_alpha};
-use crate::theme::tokens::{RADIUS_LG, TEXT_SM, TEXT_XS};
+use crate::theme::tokens::{RADIUS_LG, TEXT_SM};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
@@ -140,7 +140,7 @@ pub fn replace_citation_comment(
     prompt.replacen(&marker, &serialize_assistant_citation(&next), 1)
 }
 
-type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+pub(crate) type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// `AssistantCitationChip`.
 #[derive(IntoElement)]
@@ -210,31 +210,41 @@ impl AssistantCitationChip {
     }
 }
 
-fn chip_shell(theme: &AppTheme, label: SharedString) -> gpui_kit::Div {
+/// `ContextChip` sizes are ems of `text-[0.86em]`, so they track the parent font.
+fn chip_em(window: &Window) -> f32 {
+    gpui_kit::Rems::from_pixels(
+        window.text_style().font_size.to_pixels(window.rem_size()),
+        window,
+    )
+    .0 * 0.86
+}
+
+fn chip_shell(theme: &AppTheme, label: SharedString, window: &Window) -> gpui_kit::Div {
     let accent = citation_accent();
     let foreground: gpui_kit::Hsla =
         color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
     let border: gpui_kit::Hsla = color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into();
+    let em = chip_em(window);
     div()
         .flex()
         .items_center()
-        .gap(rems(0.25))
-        .h(rems(1.41))
+        .gap(rems(em * 0.33))
+        .h(rems(em * 1.41))
         .max_w(rems(18.))
-        .px(rems(0.4))
-        .rounded(px(6.))
+        .px(rems(em * 0.5))
+        .rounded(rems(em * 0.5))
         .border_1()
         .border_color(border)
         .bg(with_alpha(accent, 0.11))
-        .text_size(TEXT_XS.size)
+        .text_size(rems(em))
         .font_weight(gpui_kit::FontWeight::MEDIUM)
         .text_color(foreground)
-        .child(Icon::new(IconName::Quote).size(rems(0.75)))
+        .child(Icon::new(IconName::Quote).size(rems(em * 1.17)))
         .child(div().min_w_0().truncate().child(label))
 }
 
 impl RenderOnce for AssistantCitationChip {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme().clone();
         let label: SharedString = assistant_citation_label(&self.citation).into();
         let quote = self.citation.text.clone();
@@ -247,7 +257,7 @@ impl RenderOnce for AssistantCitationChip {
                 .flex_col()
                 .gap(rems(0.5))
                 .child({
-                    let mut chip = chip_shell(&theme, label.clone())
+                    let mut chip = chip_shell(&theme, label.clone(), window)
                         .id("assistant-citation-chip")
                         .cursor_pointer();
                     if let Some(open) = open {
@@ -274,7 +284,7 @@ impl RenderOnce for AssistantCitationChip {
                 div()
                     .flex()
                     .items_center()
-                    .child(chip_shell(&theme, label))
+                    .child(chip_shell(&theme, label, window))
                     .when(edit.is_some(), |this| {
                         let edit = edit.clone();
                         this.child(
@@ -311,7 +321,7 @@ impl RenderOnce for AssistantCitationChip {
     }
 }
 
-fn quote_panel(
+pub(crate) fn quote_panel(
     theme: &AppTheme,
     quote: &str,
     comment: Option<&str>,
@@ -327,13 +337,24 @@ fn quote_panel(
         .text_size(TEXT_SM.size)
         .child(
             div()
-                .border_l_2()
-                .border_color(theme.border)
-                .pl(rems(0.75))
-                .text_color(theme.muted_foreground)
-                .child(quote.to_owned()),
+                .id("citation-quote-body")
+                .w_full()
+                .min_h_0()
+                .max_h(rems(16.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(rems(0.75))
+                .child(
+                    div()
+                        .border_l_2()
+                        .border_color(theme.border)
+                        .pl(rems(0.75))
+                        .text_color(theme.muted_foreground)
+                        .child(quote.to_owned()),
+                )
+                .when_some(comment, |this, comment| this.child(comment.to_owned())),
         )
-        .when_some(comment, |this, comment| this.child(comment.to_owned()))
         .child({
             let mut button = Button::new("citation-go-to-source")
                 .variant(ButtonVariant::Outline)

@@ -3,8 +3,9 @@
 //!
 //! `with_embedded_scripts` recolors a span with another grammar. The unbash
 //! parser that finds those spans (`embeddedScripts.ts`) belongs to U3c, so
-//! these tests pass the spans in. Offsets are bytes; the upstream cases are
-//! ASCII, where a byte is one UTF-16 code unit.
+//! these tests pass the spans in. `starts` and `ends` are indexed by UTF-16
+//! code units of the decoded script, matching JavaScript `token.content.length`.
+//! The stored values are byte ranges into the outer source.
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SyntaxToken {
@@ -14,8 +15,8 @@ pub struct SyntaxToken {
     pub font_style: u8,
 }
 
-/// One embedded script. `starts[i]` / `ends[i]` map decoded character `i`
-/// onto a half-open byte range of the outer source.
+/// One embedded script. `starts[i]` / `ends[i]` map UTF-16 code unit `i` of
+/// the decoded script onto a half-open byte range of the outer source.
 #[derive(Clone, Debug)]
 pub struct EmbeddedScript {
     pub text: String,
@@ -165,6 +166,11 @@ fn split_keeping_whitespace(text: &str) -> Vec<&str> {
     parts
 }
 
+/// UTF-16 length of `text[..byte_offset]`. `None` when the offset splits a character.
+fn utf16_units(text: &str, byte_offset: usize) -> Option<usize> {
+    Some(text.get(..byte_offset)?.encode_utf16().count())
+}
+
 /// `withEmbeddedScripts`. A grammar that throws keeps the colors around it.
 pub fn with_embedded_scripts(
     code: &str,
@@ -190,11 +196,19 @@ pub fn with_embedded_scripts(
             if token.content.is_empty() {
                 continue;
             }
-            let last = token.offset + token.content.len() - 1;
-            let Some(&start) = script.starts.get(token.offset) else {
+            let Some(start_at) = utf16_units(&script.text, token.offset) else {
                 continue;
             };
-            let Some(&end) = script.ends.get(last) else {
+            let Some(end_at) = utf16_units(&script.text, token.offset + token.content.len()) else {
+                continue;
+            };
+            if end_at == 0 {
+                continue;
+            }
+            let Some(&start) = script.starts.get(start_at) else {
+                continue;
+            };
+            let Some(&end) = script.ends.get(end_at - 1) else {
                 continue;
             };
             if start < end && end <= styles.len() {
@@ -498,6 +512,30 @@ mod tests {
                 ("'\"".into(), Some("shellscript".into())),
             ]
         );
+    }
+
+    #[test]
+    fn indexes_a_non_ascii_script_in_utf16_units() {
+        let code = "éé";
+        assert_eq!(code.len(), 4);
+        assert_eq!(code.encode_utf16().count(), 2);
+        let outer = vec![vec![token(code, 0, "shellscript")]];
+        let script = EmbeddedScript {
+            text: code.into(),
+            language: "python".into(),
+            starts: vec![0, 2],
+            ends: vec![2, 4],
+        };
+        let lines = with_embedded_scripts(code, &outer, &[script], |text, language| {
+            Ok(vec![vec![token(text, 0, language)]])
+        });
+        let painted: String = lines
+            .iter()
+            .flatten()
+            .map(|token| token.content.as_str())
+            .collect();
+        assert_eq!(painted, code);
+        assert_eq!(lines[0][0].color.as_deref(), Some("python"));
     }
 
     #[test]

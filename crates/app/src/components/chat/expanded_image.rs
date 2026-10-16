@@ -9,9 +9,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Image, ImageFormat, InteractiveElement as _, IntoElement, MouseButton,
-    ParentElement as _, ScrollDelta, ScrollWheelEvent, StatefulInteractiveElement as _,
-    Styled as _, Window, div, img, px, rems,
+    AnyElement, App, Entity, Global, Image, ImageFormat, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, ScrollDelta, ScrollWheelEvent,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, img, px, rems,
 };
 
 use crate::composer::attachment_files::is_video_attachment;
@@ -310,12 +310,87 @@ pub fn attach_video_thumbnail(video: &mut VideoElement, bytes: &[u8]) -> impl Fn
     move || revoke_object_url(&url)
 }
 
+/// Width and height caps for the image stage (`92vw` minus the dialog gutter, `86vh` / `100vh - 10rem`).
+pub fn stage_limits(column_w: f64, column_h: f64) -> (f64, f64) {
+    let cap_h = (column_h * 0.86).min(column_h - 160.0).max(1.0);
+    let cap_w = (column_w * 0.92 - if column_w >= 640.0 { 96.0 } else { 0.0 }).max(1.0);
+    (cap_w, cap_h)
+}
+
 pub fn fit_scale(window_w: f64, window_h: f64, natural_w: f64, natural_h: f64) -> f64 {
-    let max_height = (window_h * 0.86).min(window_h - 160.0).max(1.0);
-    let width_budget = window_w * 0.92 - if window_w >= 640.0 { 96.0 } else { 0.0 };
+    let (cap_w, cap_h) = stage_limits(window_w, window_h);
     1.0_f64
-        .min(width_budget / natural_w.max(1.0))
-        .min(max_height / natural_h.max(1.0))
+        .min(cap_w / natural_w.max(1.0))
+        .min(cap_h / natural_h.max(1.0))
+}
+
+/// The stage is the fitted image, then capped by the column. At zoom 1 the view
+/// matches the image so a centered frame pins the close button to that image.
+pub struct StageBox {
+    pub view_w: f64,
+    pub view_h: f64,
+    pub content_w: f64,
+    pub content_h: f64,
+    pub fit: f64,
+    pub cap_w: f64,
+    pub cap_h: f64,
+}
+
+pub fn stage_box(
+    column_w: f64,
+    column_h: f64,
+    natural_w: f64,
+    natural_h: f64,
+    zoom: f64,
+) -> StageBox {
+    let (cap_w, cap_h) = stage_limits(column_w, column_h);
+    let fit = fit_scale(column_w, column_h, natural_w, natural_h);
+    let zoom = clamp_zoom(zoom);
+    let content_w = natural_w * fit * zoom;
+    let content_h = natural_h * fit * zoom;
+    StageBox {
+        view_w: content_w.min(cap_w).max(1.0),
+        view_h: content_h.min(cap_h).max(1.0),
+        content_w,
+        content_h,
+        fit,
+        cap_w,
+        cap_h,
+    }
+}
+
+/// Scroll that keeps one image point under a window coordinate when the stage recenters.
+pub fn anchored_scroll(
+    scroll: f64,
+    cursor: f64,
+    origin: f64,
+    previous_zoom: f64,
+    next_zoom: f64,
+    new_origin: f64,
+    max_scroll: f64,
+) -> f64 {
+    let local = cursor - origin;
+    let image = (scroll + local) / previous_zoom.max(f64::EPSILON);
+    let next_local = cursor - new_origin;
+    (image * next_zoom - next_local).clamp(0.0, max_scroll.max(0.0))
+}
+
+/// Arrow keys pan when the axis overflows. Otherwise a horizontal key steps a gallery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrowAction {
+    Pan,
+    Step,
+    Pass,
+}
+
+pub fn arrow_action(can_pan: bool, image_count: usize, horizontal: bool) -> ArrowAction {
+    if can_pan {
+        ArrowAction::Pan
+    } else if horizontal && image_count > 1 {
+        ArrowAction::Step
+    } else {
+        ArrowAction::Pass
+    }
 }
 
 pub fn clamp_zoom(next: f64) -> f64 {
@@ -359,10 +434,169 @@ pub fn png_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 24 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
         return None;
     }
-    Some((
+    positive_size(
         u32::from_be_bytes(bytes[16..20].try_into().ok()?),
         u32::from_be_bytes(bytes[20..24].try_into().ok()?),
-    ))
+    )
+}
+
+fn positive_size(width: u32, height: u32) -> Option<(u32, u32)> {
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+/// Intrinsic pixel size from the image header. PNG, JPEG, GIF, WebP, and SVG.
+pub fn image_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    png_pixel_size(bytes)
+        .or_else(|| gif_pixel_size(bytes))
+        .or_else(|| jpeg_pixel_size(bytes))
+        .or_else(|| webp_pixel_size(bytes))
+        .or_else(|| svg_pixel_size(bytes))
+}
+
+fn gif_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 10 || !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) {
+        return None;
+    }
+    positive_size(
+        u16::from_le_bytes([bytes[6], bytes[7]]) as u32,
+        u16::from_le_bytes([bytes[8], bytes[9]]) as u32,
+    )
+}
+
+fn jpeg_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut index = 2usize;
+    while index + 1 < bytes.len() {
+        if bytes[index] != 0xFF {
+            return None;
+        }
+        while index < bytes.len() && bytes[index] == 0xFF {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[index];
+        index += 1;
+        // Standalone markers: SOI, EOI, RSTn.
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+            continue;
+        }
+        if index + 1 >= bytes.len() {
+            return None;
+        }
+        let len = u16::from_be_bytes([bytes[index], bytes[index + 1]]) as usize;
+        if len < 2 || index + len > bytes.len() {
+            return None;
+        }
+        let sof = matches!(
+            marker,
+            0xC0 | 0xC1
+                | 0xC2
+                | 0xC3
+                | 0xC5
+                | 0xC6
+                | 0xC7
+                | 0xC9
+                | 0xCA
+                | 0xCB
+                | 0xCD
+                | 0xCE
+                | 0xCF
+        );
+        if sof && len >= 7 {
+            return positive_size(
+                u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]) as u32,
+                u16::from_be_bytes([bytes[index + 3], bytes[index + 4]]) as u32,
+            );
+        }
+        if marker == 0xDA {
+            return None;
+        }
+        index += len;
+    }
+    None
+}
+
+fn webp_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 16 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    let chunk = &bytes[12..16];
+    if chunk == b"VP8X" && bytes.len() >= 30 {
+        let width =
+            1 + u32::from(bytes[24]) + (u32::from(bytes[25]) << 8) + (u32::from(bytes[26]) << 16);
+        let height =
+            1 + u32::from(bytes[27]) + (u32::from(bytes[28]) << 8) + (u32::from(bytes[29]) << 16);
+        return positive_size(width, height);
+    }
+    if chunk == b"VP8 " && bytes.len() >= 30 && &bytes[23..26] == b"\x9d\x01\x2a" {
+        let width = u16::from_le_bytes([bytes[26], bytes[27]]) as u32 & 0x3fff;
+        let height = u16::from_le_bytes([bytes[28], bytes[29]]) as u32 & 0x3fff;
+        return positive_size(width, height);
+    }
+    if chunk == b"VP8L" && bytes.len() >= 25 && bytes[20] == 0x2f {
+        let bits = u32::from_le_bytes([bytes[21], bytes[22], bytes[23], bytes[24]]);
+        return positive_size((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1);
+    }
+    None
+}
+
+fn svg_pixel_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let text = std::str::from_utf8(bytes).ok()?.to_ascii_lowercase();
+    if !text.contains("<svg") {
+        return None;
+    }
+    if let Some(size) = svg_view_box(&text) {
+        return Some(size);
+    }
+    let width = svg_attr(&text, "width").and_then(svg_number)?;
+    let height = svg_attr(&text, "height").and_then(svg_number)?;
+    positive_size(width, height)
+}
+
+fn svg_view_box(text: &str) -> Option<(u32, u32)> {
+    let (start, quote) = text
+        .find("viewbox=\"")
+        .map(|index| (index + "viewbox=\"".len(), '"'))
+        .or_else(|| {
+            text.find("viewbox='")
+                .map(|index| (index + "viewbox='".len(), '\''))
+        })?;
+    let end = start + text[start..].find(quote)?;
+    let mut parts = text[start..end].split_whitespace();
+    let _x = parts.next()?;
+    let _y = parts.next()?;
+    positive_size(svg_number(parts.next()?)?, svg_number(parts.next()?)?)
+}
+
+fn svg_attr<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let pattern = format!("{name}=\"");
+    let mut rest = text;
+    while let Some(index) = rest.find(&pattern) {
+        let boundary = index == 0 || rest.as_bytes()[index - 1].is_ascii_whitespace();
+        if boundary {
+            let value = &rest[index + pattern.len()..];
+            let end = value.find('"')?;
+            return Some(&value[..end]);
+        }
+        rest = &rest[index + pattern.len()..];
+    }
+    None
+}
+
+fn svg_number(value: &str) -> Option<u32> {
+    let number = value.trim_end_matches("px");
+    if number.contains('%') {
+        return None;
+    }
+    let parsed: f64 = number.parse().ok()?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return None;
+    }
+    Some(parsed.round() as u32)
 }
 
 fn image_format(mime: &str) -> Option<ImageFormat> {
@@ -382,6 +616,17 @@ struct ZoomState {
     scroll_y: f64,
     drag: Option<(f64, f64, f64, f64)>,
     moved: f64,
+    image_index: Option<usize>,
+    origin_x: f64,
+    origin_y: f64,
+    base_w: f64,
+    base_h: f64,
+    cap_w: f64,
+    cap_h: f64,
+    content_w: f64,
+    content_h: f64,
+    view_w: f64,
+    view_h: f64,
 }
 
 impl Default for ZoomState {
@@ -392,38 +637,189 @@ impl Default for ZoomState {
             scroll_y: 0.0,
             drag: None,
             moved: 0.0,
+            image_index: None,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            base_w: 1.0,
+            base_h: 1.0,
+            cap_w: 1.0,
+            cap_h: 1.0,
+            content_w: 1.0,
+            content_h: 1.0,
+            view_w: 1.0,
+            view_h: 1.0,
         }
     }
 }
 
-/// `ZoomableImage`.
+#[derive(Clone)]
+pub struct ZoomHandle {
+    state: Entity<ZoomState>,
+}
+
+impl ZoomHandle {
+    pub fn pan(&self, key: &str, cx: &mut App) -> bool {
+        let mut panned = false;
+        self.state.update(cx, |state, cx| {
+            let vertical = key == "up" || key == "down";
+            let backward = key == "left" || key == "up";
+            let (content, view, scroll) = if vertical {
+                (state.content_h, state.view_h, state.scroll_y)
+            } else {
+                (state.content_w, state.view_w, state.scroll_x)
+            };
+            if let Some(next) = pan_arrow(state.zoom, content, view, scroll, backward) {
+                if vertical {
+                    state.scroll_y = next;
+                } else {
+                    state.scroll_x = next;
+                }
+                panned = true;
+                cx.notify();
+            }
+        });
+        panned
+    }
+}
+
+#[derive(Default)]
+struct ImageOverlayState {
+    column: Option<(f64, f64)>,
+    zoom: Option<ZoomHandle>,
+}
+
+impl Global for ImageOverlayState {}
+
+pub fn pan_open_zoom(key: &str, cx: &mut App) -> bool {
+    let Some(handle) = cx.default_global::<ImageOverlayState>().zoom.clone() else {
+        return false;
+    };
+    handle.pan(key, cx)
+}
+
+pub fn clear_open_zoom(cx: &mut App) {
+    cx.default_global::<ImageOverlayState>().zoom = None;
+}
+
+fn column_size(window: &Window, cx: &mut App) -> (f64, f64) {
+    if let Some(size) = cx.default_global::<ImageOverlayState>().column {
+        return size;
+    }
+    let viewport = window.viewport_size();
+    (f64::from(viewport.width), f64::from(viewport.height))
+}
+
+fn remember_column(bounds: gpui_kit::Bounds<gpui_kit::Pixels>, cx: &mut App) {
+    let next = (f64::from(bounds.size.width), f64::from(bounds.size.height));
+    if next.0 < 1.0 || next.1 < 1.0 {
+        return;
+    }
+    let changed = cx
+        .default_global::<ImageOverlayState>()
+        .column
+        .map(|current| (current.0 - next.0).abs() > 0.5 || (current.1 - next.1).abs() > 0.5)
+        .unwrap_or(true);
+    if changed {
+        cx.default_global::<ImageOverlayState>().column = Some(next);
+        cx.refresh_windows();
+    }
+}
+
+fn apply_anchored_zoom(state: &mut ZoomState, next: f64, cursor: Option<(f64, f64)>) {
+    let previous = state.zoom.max(f64::EPSILON);
+    let next = clamp_zoom(next);
+    if (previous - next).abs() < 1e-12 {
+        return;
+    }
+    let (cursor_x, cursor_y) = cursor.unwrap_or((
+        state.origin_x + state.view_w / 2.0,
+        state.origin_y + state.view_h / 2.0,
+    ));
+    let new_view_w = (state.base_w * next).min(state.cap_w).max(1.0);
+    let new_view_h = (state.base_h * next).min(state.cap_h).max(1.0);
+    let new_origin_x = state.origin_x + (state.view_w - new_view_w) / 2.0;
+    let new_origin_y = state.origin_y + (state.view_h - new_view_h) / 2.0;
+    let max_x = (state.base_w * next - new_view_w).max(0.0);
+    let max_y = (state.base_h * next - new_view_h).max(0.0);
+    state.scroll_x = anchored_scroll(
+        state.scroll_x,
+        cursor_x,
+        state.origin_x,
+        previous,
+        next,
+        new_origin_x,
+        max_x,
+    );
+    state.scroll_y = anchored_scroll(
+        state.scroll_y,
+        cursor_y,
+        state.origin_y,
+        previous,
+        next,
+        new_origin_y,
+        max_y,
+    );
+    state.zoom = next;
+    state.view_w = new_view_w;
+    state.view_h = new_view_h;
+    state.content_w = state.base_w * next;
+    state.content_h = state.base_h * next;
+    state.origin_x = new_origin_x;
+    state.origin_y = new_origin_y;
+}
+
+/// `ZoomableImage`. Returns the stage element and the view box the frame should match.
 pub fn zoomable_image(
     id: impl Into<gpui_kit::ElementId>,
     item: &ExpandedImageItem,
+    index: usize,
     window: &mut Window,
     cx: &mut App,
-) -> AnyElement {
+) -> (AnyElement, f64, f64) {
     let id = id.into();
     let state = window.use_keyed_state(id.clone(), cx, |_, _| ZoomState::default());
     let theme = cx.app_theme().clone();
-    let viewport = window.viewport_size();
-    let window_w = f64::from(viewport.width);
-    let window_h = f64::from(viewport.height);
+    let (column_w, column_h) = column_size(window, cx);
     let (natural_w, natural_h) = item
         .bytes
         .as_ref()
-        .and_then(|bytes| png_pixel_size(bytes))
+        .and_then(|bytes| image_pixel_size(bytes))
         .map(|(w, h)| (w as f64, h as f64))
         .unwrap_or((640.0, 480.0));
-    let fit = fit_scale(window_w, window_h, natural_w, natural_h);
-    let zoom = state.read(cx).zoom;
-    let width = natural_w * fit * zoom;
-    let height = natural_h * fit * zoom;
-    let max_height = (window_h * 0.86).min(window_h - 160.0).max(1.0);
-    let view_w = (window_w * 0.92 - if window_w >= 640.0 { 96.0 } else { 0.0 }).max(1.0);
-    let view_h = max_height.min(height).max(1.0);
-    let scroll_x = state.read(cx).scroll_x;
-    let scroll_y = state.read(cx).scroll_y;
+    let mut zoom = state.read(cx).zoom;
+    let mut scroll_x = state.read(cx).scroll_x;
+    let mut scroll_y = state.read(cx).scroll_y;
+    if state.read(cx).image_index != Some(index) {
+        zoom = 1.0;
+        scroll_x = 0.0;
+        scroll_y = 0.0;
+    }
+    let stage = stage_box(column_w, column_h, natural_w, natural_h, zoom);
+    state.update(cx, |state, _| {
+        if state.image_index != Some(index) {
+            state.drag = None;
+            state.moved = 0.0;
+        }
+        state.image_index = Some(index);
+        state.zoom = zoom;
+        state.scroll_x = scroll_x;
+        state.scroll_y = scroll_y;
+        state.base_w = natural_w * stage.fit;
+        state.base_h = natural_h * stage.fit;
+        state.cap_w = stage.cap_w;
+        state.cap_h = stage.cap_h;
+        state.content_w = stage.content_w;
+        state.content_h = stage.content_h;
+        state.view_w = stage.view_w;
+        state.view_h = stage.view_h;
+    });
+    cx.default_global::<ImageOverlayState>().zoom = Some(ZoomHandle {
+        state: state.clone(),
+    });
+    let view_w = stage.view_w;
+    let view_h = stage.view_h;
+    let width = stage.content_w;
+    let height = stage.content_h;
     let dragging = state.read(cx).drag.is_some();
     let picture = item.bytes.as_ref().and_then(|bytes| {
         image_format(item.mime_type.as_deref().unwrap_or("image/png"))
@@ -435,8 +831,10 @@ pub fn zoomable_image(
     let state_move = state.clone();
     let state_up = state.clone();
     let state_key = state.clone();
-    div()
+    let state_bounds = state.clone();
+    let element = div()
         .id(id)
+        .relative()
         .w(px(view_w as f32))
         .h(px(view_h as f32))
         .overflow_hidden()
@@ -453,15 +851,34 @@ pub fn zoomable_image(
         } else {
             gpui_kit::CursorStyle::PointingHand
         })
+        .child(
+            canvas(
+                move |bounds, _, cx| {
+                    state_bounds.update(cx, |state, _| {
+                        state.origin_x = f64::from(bounds.origin.x);
+                        state.origin_y = f64::from(bounds.origin.y);
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
         .on_scroll_wheel(move |event: &ScrollWheelEvent, _, cx| {
             let (delta_y, mode) = match event.delta {
                 ScrollDelta::Pixels(point) => (f64::from(point.y), 0u8),
                 ScrollDelta::Lines(point) => (f64::from(point.y), 1u8),
             };
+            let cursor = (f64::from(event.position.x), f64::from(event.position.y));
+            let ctrl = event.modifiers.control;
             state_wheel.update(cx, |state, cx| {
-                state.zoom = wheel_zoom(state.zoom, delta_y, mode, view_h, event.control);
+                let next = wheel_zoom(state.zoom, delta_y, mode, state.view_h, ctrl);
+                apply_anchored_zoom(state, next, Some(cursor));
                 cx.notify();
             });
+            cx.stop_propagation();
         })
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
             state_down.update(cx, |state, _| {
@@ -485,21 +902,18 @@ pub fn zoomable_image(
                 let dx = f64::from(event.position.x) - x;
                 let dy = f64::from(event.position.y) - y;
                 state.moved = state.moved.max((dx * dx + dy * dy).sqrt());
-                state.scroll_x = (left - dx).clamp(0.0, (width - view_w).max(0.0));
-                state.scroll_y = (top - dy).clamp(0.0, (height - view_h).max(0.0));
+                state.scroll_x = (left - dx).clamp(0.0, (state.content_w - state.view_w).max(0.0));
+                state.scroll_y = (top - dy).clamp(0.0, (state.content_h - state.view_h).max(0.0));
                 cx.notify();
             });
         })
-        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+        .on_mouse_up(MouseButton::Left, move |event, _, cx| {
+            let cursor = (f64::from(event.position.x), f64::from(event.position.y));
             state_up.update(cx, |state, cx| {
                 let suppress = state.moved > 4.0;
                 state.drag = None;
                 if !suppress {
-                    state.zoom = toggle_zoom(state.zoom);
-                    if state.zoom == 1.0 {
-                        state.scroll_x = 0.0;
-                        state.scroll_y = 0.0;
-                    }
+                    apply_anchored_zoom(state, toggle_zoom(state.zoom), Some(cursor));
                 }
                 state.moved = 0.0;
                 cx.notify();
@@ -519,28 +933,12 @@ pub fn zoomable_image(
             let key = event.keystroke.key.as_str();
             state_key.update(cx, |state, cx| {
                 match key {
-                    "enter" | "space" => state.zoom = toggle_zoom(state.zoom),
-                    "+" | "=" => state.zoom = clamp_zoom(state.zoom * 1.5),
-                    "-" => state.zoom = clamp_zoom(state.zoom / 1.5),
-                    "0" => {
-                        state.zoom = 1.0;
-                        state.scroll_x = 0.0;
-                        state.scroll_y = 0.0;
+                    "enter" | "space" => {
+                        apply_anchored_zoom(state, toggle_zoom(state.zoom), None);
                     }
-                    "left" | "right" => {
-                        if let Some(next) =
-                            pan_arrow(state.zoom, width, view_w, state.scroll_x, key == "left")
-                        {
-                            state.scroll_x = next;
-                        }
-                    }
-                    "up" | "down" => {
-                        if let Some(next) =
-                            pan_arrow(state.zoom, height, view_h, state.scroll_y, key == "up")
-                        {
-                            state.scroll_y = next;
-                        }
-                    }
+                    "+" | "=" => apply_anchored_zoom(state, state.zoom * 1.5, None),
+                    "-" => apply_anchored_zoom(state, state.zoom / 1.5, None),
+                    "0" => apply_anchored_zoom(state, 1.0, None),
                     _ => return,
                 }
                 cx.notify();
@@ -567,7 +965,8 @@ pub fn zoomable_image(
                         .into_any_element(),
                 }),
         )
-        .into_any_element()
+        .into_any_element();
+    (element, view_w, view_h)
 }
 
 /// `ExpandedImageDialog`. The media-close and media-navigation buttons are
@@ -598,8 +997,15 @@ pub fn expanded_image_dialog(
     let dismiss = on_close.clone();
     let step = std::rc::Rc::new(on_step);
     let step_back = step.clone();
+    let (body, frame_w, frame_h) = if item.video {
+        clear_open_zoom(cx);
+        (video_unavailable(&theme, &item.name), 480.0, 270.0)
+    } else {
+        zoomable_image("expanded-zoom", &item, preview.index, window, cx)
+    };
     div()
         .id("expanded-image-dialog")
+        .relative()
         .size_full()
         .flex()
         .items_center()
@@ -610,26 +1016,21 @@ pub fn expanded_image_dialog(
         ))
         .occlude()
         .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss(window, cx))
-        .on_key_down({
-            let close = on_close.clone();
-            let step = step.clone();
-            move |event: &gpui_kit::KeyDownEvent, window, cx| match event.keystroke.key.as_str() {
-                "escape" => close(window, cx),
-                "left" => step(-1, window, cx),
-                "right" => step(1, window, cx),
-                _ => {}
-            }
-        })
+        .child(
+            canvas(|bounds, _, cx| remember_column(bounds, cx), |_, _, _, _| {})
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+        )
         .child(
             div()
                 .id("expanded-image-frame")
                 .relative()
+                .w(px(frame_w as f32))
+                .h(px(frame_h as f32))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(if item.video {
-                    video_unavailable(&theme, &item.name)
-                } else {
-                    zoomable_image("expanded-zoom", &item, window, cx)
-                })
+                .child(body)
                 .child(media_close(on_close))
                 .when(count > 1, |this| {
                     this.child(media_nav("expanded-prev", true, move |window, cx| {
@@ -682,8 +1083,8 @@ fn media_close(on_close: MediaAction) -> AnyElement {
     div()
         .id("expanded-image-close")
         .absolute()
-        .top(rems(0.5))
-        .right(rems(0.5))
+        .top_0()
+        .right_0()
         .flex()
         .size(rems(1.5))
         .items_center()
@@ -872,5 +1273,72 @@ mod tests {
         assert!(pan_arrow(1.0, 800.0, 400.0, 0.0, false).is_none());
         assert_eq!(pan_arrow(2.0, 800.0, 400.0, 0.0, false), Some(40.0));
         assert!(pan_arrow(2.0, 400.0, 400.0, 0.0, false).is_none());
+    }
+
+    #[test]
+    fn stage_matches_the_fitted_image_inside_the_column() {
+        let stage = stage_box(844.0, 700.0, 640.0, 360.0, 1.0);
+        assert!((stage.view_w - 640.0).abs() < 1e-6);
+        assert!((stage.view_h - 360.0).abs() < 1e-6);
+        assert!(stage.view_w < 844.0);
+        let zoomed = stage_box(844.0, 700.0, 640.0, 360.0, 4.0);
+        assert!(zoomed.content_w > zoomed.view_w);
+        assert!(zoomed.view_w <= zoomed.cap_w + 1e-6);
+        assert!(zoomed.view_h <= zoomed.cap_h + 1e-6);
+    }
+
+    #[test]
+    fn zoom_keeps_the_point_under_the_pointer() {
+        let scroll = anchored_scroll(0.0, 180.0, 100.0, 1.0, 2.0, 50.0, 10_000.0);
+        let before = (0.0 + (180.0 - 100.0)) / 1.0;
+        let after = (scroll + (180.0 - 50.0)) / 2.0;
+        assert!((before - after).abs() < 1e-9);
+        assert!((scroll - 30.0).abs() < 1e-9);
+        let unchanged = anchored_scroll(10.0, 40.0, 0.0, 2.0, 2.0, 0.0, 100.0);
+        assert!((unchanged - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn arrow_keys_pan_before_they_step_the_gallery() {
+        assert_eq!(arrow_action(true, 3, true), ArrowAction::Pan);
+        assert_eq!(arrow_action(false, 3, true), ArrowAction::Step);
+        assert_eq!(arrow_action(false, 1, true), ArrowAction::Pass);
+        assert_eq!(arrow_action(false, 3, false), ArrowAction::Pass);
+    }
+
+    #[test]
+    fn intrinsic_size_comes_from_png_jpeg_gif_webp_and_svg() {
+        let mut png = vec![0u8; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&640u32.to_be_bytes());
+        png[20..24].copy_from_slice(&360u32.to_be_bytes());
+        assert_eq!(image_pixel_size(&png), Some((640, 360)));
+
+        let mut jpeg = vec![0u8; 21];
+        jpeg[..4].copy_from_slice(&[0xFF, 0xD8, 0xFF, 0xC0]);
+        jpeg[4..7].copy_from_slice(&[0x00, 0x11, 0x08]);
+        jpeg[7..11].copy_from_slice(&[0x01, 0x2C, 0x02, 0x80]);
+        assert_eq!(image_pixel_size(&jpeg), Some((640, 300)));
+
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&320u16.to_le_bytes());
+        gif.extend_from_slice(&200u16.to_le_bytes());
+        assert_eq!(image_pixel_size(&gif), Some((320, 200)));
+
+        let mut webp = vec![0u8; 30];
+        webp[..4].copy_from_slice(b"RIFF");
+        webp[8..12].copy_from_slice(b"WEBP");
+        webp[12..16].copy_from_slice(b"VP8X");
+        webp[24] = 0x7F;
+        webp[25] = 0x02;
+        webp[27] = 0x67;
+        webp[28] = 0x01;
+        assert_eq!(image_pixel_size(&webp), Some((640, 360)));
+
+        let svg = br#"<svg viewBox="0 0 640 360"></svg>"#;
+        assert_eq!(image_pixel_size(svg), Some((640, 360)));
+        let sized = br#"<svg width="320px" height="180"></svg>"#;
+        assert_eq!(image_pixel_size(sized), Some((320, 180)));
+        assert_eq!(image_pixel_size(b"not an image"), None);
     }
 }

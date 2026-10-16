@@ -9,12 +9,13 @@ use std::sync::Arc;
 
 use gpui_kit::{
     AnyElement, App, ClickEvent, Entity, Global, IntoElement, ParentElement as _, Styled as _,
-    Window, div, rems,
+    Subscription, Window, div, rems,
 };
 
-use super::assistant_citation_chip::{AssistantCitationChip, CitationPopupSide};
+use super::assistant_citation_chip::{AssistantCitationChip, CitationPopupSide, quote_panel};
 use super::expanded_image::{
-    ExpandedImageItem, ExpandedImagePreview, expanded_image_dialog, wrap_expanded_image_index,
+    ArrowAction, ExpandedImageItem, ExpandedImagePreview, arrow_action, clear_open_zoom,
+    expanded_image_dialog, pan_open_zoom, wrap_expanded_image_index,
 };
 use super::messages_timeline::MessagesTimeline;
 use super::timeline::assistant_citations::{AssistantCitation, serialize_assistant_citation};
@@ -25,6 +26,7 @@ use crate::theme::tokens::{RADIUS_LG, TEXT_SM};
 pub struct ChatMediaSession {
     pub preview: Option<ExpandedImagePreview>,
     pub quote: Option<AssistantCitation>,
+    keys: Option<Subscription>,
 }
 
 impl Global for ChatMediaSession {}
@@ -46,7 +48,54 @@ pub fn open_preview(preview: ExpandedImagePreview, cx: &mut App) {
 
 pub fn close_preview(cx: &mut App) {
     cx.default_global::<ChatMediaSession>().preview = None;
+    clear_open_zoom(cx);
     cx.refresh_windows();
+}
+
+fn ensure_preview_keys(cx: &mut App) {
+    if cx.default_global::<ChatMediaSession>().keys.is_some() {
+        return;
+    }
+    let keys = cx.intercept_keystrokes(|event, window, cx| {
+        handle_preview_key(event, window, cx);
+    });
+    cx.default_global::<ChatMediaSession>().keys = Some(keys);
+}
+
+fn handle_preview_key(event: &gpui_kit::KeystrokeEvent, _: &mut Window, cx: &mut App) {
+    if cx.default_global::<ChatMediaSession>().preview.is_none() {
+        return;
+    }
+    let keystroke = &event.keystroke;
+    if keystroke.modifiers.control || keystroke.modifiers.platform || keystroke.modifiers.alt {
+        return;
+    }
+    let key = keystroke.key.as_str();
+    if key == "escape" {
+        close_preview(cx);
+        cx.stop_propagation();
+        return;
+    }
+    let horizontal = key == "left" || key == "right";
+    let vertical = key == "up" || key == "down";
+    if !horizontal && !vertical {
+        return;
+    }
+    let can_pan = pan_open_zoom(key, cx);
+    let count = cx
+        .default_global::<ChatMediaSession>()
+        .preview
+        .as_ref()
+        .map(|preview| preview.images.len())
+        .unwrap_or(0);
+    match arrow_action(can_pan, count, horizontal) {
+        ArrowAction::Pan => cx.stop_propagation(),
+        ArrowAction::Step => {
+            step_preview(if key == "left" { -1 } else { 1 }, cx);
+            cx.stop_propagation();
+        }
+        ArrowAction::Pass => {}
+    }
 }
 
 fn step_preview(delta: i64, cx: &mut App) {
@@ -66,6 +115,7 @@ pub fn chat_media_layer(
     cx: &mut App,
 ) -> gpui_kit::AnyElement {
     ensure_demo(cx);
+    ensure_preview_keys(cx);
     let session = cx.default_global::<ChatMediaSession>().clone_view();
     let theme = cx.app_theme().clone();
     let mut layer = div().absolute().top_0().left_0().size_full();
@@ -98,20 +148,18 @@ pub fn chat_media_layer(
                         .bg(theme.popover)
                         .p(rems(0.75))
                         .text_size(TEXT_SM.size)
-                        .child(
-                            AssistantCitationChip::new(citation)
-                                .comment_open(
-                                    true,
-                                    super::assistant_citation_chip::CitationPopupSide::Bottom,
-                                )
-                                .on_go_to_source(move |_, window, cx| {
-                                    let citation = go.clone();
-                                    timeline_go.update(cx, |timeline, cx| {
-                                        timeline.reveal_citation(citation, window, cx);
-                                    });
-                                    close_quote(cx);
-                                }),
-                        ),
+                        .child(quote_panel(
+                            &theme,
+                            &citation.text,
+                            citation.comment.as_deref(),
+                            Some(std::rc::Rc::new(move |_, window, cx| {
+                                let citation = go.clone();
+                                timeline_go.update(cx, |timeline, cx| {
+                                    timeline.reveal_citation(citation, window, cx);
+                                });
+                                close_quote(cx);
+                            })),
+                        )),
                 ),
         );
     }

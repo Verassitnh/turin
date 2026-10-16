@@ -863,11 +863,13 @@ impl Md<'_> {
         let mut hasher = DefaultHasher::new();
         code_text.hash(&mut hasher);
         let code_hash = hasher.finish();
-        let ready = wrapped_state
-            .read(cx)
-            .highlighted
-            .clone()
-            .filter(|_| wrapped_state.read(cx).pending == Some(code_hash));
+        let ready = {
+            let state = wrapped_state.read(cx);
+            state.highlighted.as_ref().and_then(|(hash, code)| {
+                (*hash == code_hash && accept_highlight(state.pending, code_hash))
+                    .then(|| code.clone())
+            })
+        };
         let highlighted =
             if let Some(hit) = ready.or_else(|| cached_highlight(code_text, &language, dark)) {
                 hit
@@ -884,8 +886,10 @@ impl Md<'_> {
                         .spawn(async move { highlight_code(&code_owned, &language_owned, dark) })
                         .await;
                     state.update(cx, |state, cx| {
-                        state.highlighted = Some(highlighted);
-                        cx.notify();
+                        if accept_highlight(state.pending, code_hash) {
+                            state.highlighted = Some((code_hash, highlighted));
+                            cx.notify();
+                        }
                     });
                 })
                 .detach();
@@ -1208,7 +1212,12 @@ struct CodeBlockState {
     wrapped: bool,
     show_code: bool,
     pending: Option<u64>,
-    highlighted: Option<Arc<super::code_highlight::HighlightedCode>>,
+    highlighted: Option<(u64, Arc<super::code_highlight::HighlightedCode>)>,
+}
+
+/// A highlight job is current only while its hash is still the one in flight.
+fn accept_highlight(pending: Option<u64>, finished: u64) -> bool {
+    pending == Some(finished)
 }
 
 impl Md<'_> {
@@ -1490,6 +1499,13 @@ impl RenderOnce for ChatMarkdown {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignores_a_stale_highlight_completion() {
+        assert!(!accept_highlight(Some(2), 1));
+        assert!(accept_highlight(Some(2), 2));
+        assert!(!accept_highlight(None, 2));
+    }
 
     #[test]
     fn fence_titles() {

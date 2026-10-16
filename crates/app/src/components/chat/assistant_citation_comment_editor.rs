@@ -8,12 +8,12 @@ use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div, rems,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, div, rems,
 };
 
 use super::timeline::assistant_citations::ASSISTANT_CITATION_MAX_COMMENT_LENGTH;
 use crate::theme::ActiveAppTheme;
-use crate::theme::tokens::TEXT_XS;
+use crate::theme::tokens::{TEXT_SM, TEXT_XS};
 use crate::ui::{Button, ButtonSize, ButtonVariant};
 
 fn utf16_len(value: &str) -> usize {
@@ -22,6 +22,19 @@ fn utf16_len(value: &str) -> usize {
 
 pub fn comment_too_long(comment: &str) -> bool {
     utf16_len(comment) > ASSISTANT_CITATION_MAX_COMMENT_LENGTH
+}
+
+/// Grouped decimal, matching `8,000` in the comment-limit message.
+pub fn format_comment_limit(limit: usize) -> String {
+    let digits = limit.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped.chars().rev().collect()
 }
 
 /// What the comment field asks its host to do.
@@ -97,7 +110,7 @@ impl Render for AssistantCitationCommentEditor {
         let theme = cx.app_theme();
         let value = self.value(cx);
         let too_long = comment_too_long(&value);
-        let limit = ASSISTANT_CITATION_MAX_COMMENT_LENGTH;
+        let limit = format_comment_limit(ASSISTANT_CITATION_MAX_COMMENT_LENGTH);
         div()
             .id("citation-comment-editor")
             .w_full()
@@ -106,7 +119,18 @@ impl Render for AssistantCitationCommentEditor {
                     this.cancel(cx);
                 }
             }))
-            .child(Textarea::new(&self.input))
+            .child(
+                div()
+                    .id("citation-comment-field")
+                    .w_full()
+                    .min_h(rems(4.))
+                    .max_h(rems(10.))
+                    .px(rems(0.25))
+                    .py(rems(0.375))
+                    .overflow_y_scroll()
+                    .text_size(TEXT_SM.size)
+                    .child(Textarea::new(&self.input)),
+            )
             .when(too_long, |this| {
                 this.child(
                     div()
@@ -138,5 +162,17 @@ impl Render for AssistantCitationCommentEditor {
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_the_comment_limit_with_a_thousands_separator() {
+        assert_eq!(format_comment_limit(8000), "8,000");
+        assert_eq!(format_comment_limit(999), "999");
+        assert_eq!(format_comment_limit(1_000_000), "1,000,000");
     }
 }

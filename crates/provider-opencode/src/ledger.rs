@@ -274,6 +274,11 @@ impl OpenCodeServerLedger {
             return;
         };
         let Some(observed) = observe(pid).await else {
+            // The leader already exited. Its group can still hold the children it
+            // started, which is the orphan this entry recorded.
+            if process_group_exists(pgid) {
+                self.signal_group_until_gone(pgid).await;
+            }
             return;
         };
         if observed.zombie
@@ -281,12 +286,19 @@ impl OpenCodeServerLedger {
             || observed.pgid != pgid
             || observed.command != entry.command
         {
+            if observed.zombie && process_group_exists(pgid) {
+                self.signal_group_until_gone(pgid).await;
+            }
             return;
         }
         tracing::info!(
             "Stopping an OpenCode server left by a previous T3 Code server (pid={pgid}, port={})",
             entry.port
         );
+        self.signal_group_until_gone(pgid).await;
+    }
+
+    async fn signal_group_until_gone(&self, pgid: u32) {
         let _ = signal_process_group(pgid, SIGTERM);
         for _ in 0..STOP_POLL_ATTEMPTS {
             if !process_group_exists(pgid) {
@@ -296,6 +308,12 @@ impl OpenCodeServerLedger {
         }
         if process_group_exists(pgid) {
             let _ = signal_process_group(pgid, SIGKILL);
+            for _ in 0..STOP_POLL_ATTEMPTS {
+                if !process_group_exists(pgid) {
+                    return;
+                }
+                tokio::time::sleep(STOP_POLL_INTERVAL).await;
+            }
         }
     }
 }

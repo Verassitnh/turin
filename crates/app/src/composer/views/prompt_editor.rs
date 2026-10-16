@@ -240,6 +240,8 @@ pub struct PromptEditor {
     context_record_count: usize,
     /// The open citation's comment field (`AssistantCitationCommentEditor`).
     comment_editor: Option<(String, Entity<PromptEditor>, Subscription)>,
+    /// Frames repainted while waiting for the chip's box to anchor to.
+    comment_anchor_retries: u8,
     build_context_fragment: Option<BuildContextFragment>,
     import_context_fragment: Option<ImportContextFragment>,
 }
@@ -277,6 +279,7 @@ impl PromptEditor {
             was_focused: false,
             context_record_count: 0,
             comment_editor: None,
+            comment_anchor_retries: 0,
             build_context_fragment: None,
             import_context_fragment: None,
         };
@@ -1930,6 +1933,15 @@ impl Render for PromptEditor {
                 cx.emit(PromptEditorEvent::PageScrollRelease);
             }
         }
+        // Anchored to the chip's box from the last painted frame; until one
+        // exists, paint again so the popover appears.
+        let comment_popover = self.citation_comment_popover(cx);
+        if comment_popover.is_some() || self.comment_editor.is_none() {
+            self.comment_anchor_retries = 0;
+        } else if self.comment_anchor_retries < 3 {
+            self.comment_anchor_retries += 1;
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
         let env = self.env(&theme, window);
         let doc = self.state.doc().clone();
         let depths = list_depths(&doc);
@@ -2045,7 +2057,7 @@ impl Render for PromptEditor {
                     .p(px(4.))
                     .child(div().flex().flex_col().w_full().children(rows).pb(bottom)),
             )
-            .children(self.citation_comment_popover(cx))
+            .children(comment_popover)
             .when(empty, |this| {
                 this.child(
                     div()

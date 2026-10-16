@@ -161,6 +161,65 @@ impl ChatComposer {
     /// Debug aid for screenshots: `TURIN_COMPOSER_DEMO=<scenario>` preloads
     /// the prompt and opens a layer, since synthetic input is unavailable
     /// to the capture scripts.
+    /// `TURIN_COMPOSER_DEMO=citation[-comment]`: a quote chip and a terminal
+    /// context chip, optionally with the quote's comment editor open.
+    fn apply_citation_demo(
+        &mut self,
+        open_comment: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let citation: turin_contracts::assistant_citations::AssistantCitation =
+            serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "environmentId": "local",
+                "threadId": "thread-1",
+                "messageId": "assistant-1",
+                "text": "The parser keeps a stack of open blocks",
+                "start": 0,
+                "end": 39,
+                "prefix": "",
+                "suffix": "",
+            }))
+            .expect("demo citation");
+        let quote = turin_shared::assistant_citations::serialize_assistant_citation(&citation);
+        let terminal = turin_shared::composer_context_references::format_composer_context_reference(
+            "terminal",
+            "terminal_ctx-1",
+            "Terminal 1 lines 3-4",
+        );
+        let prompt = format!("Why does {quote} fail with {terminal} here? ");
+        let key = "local:thread-1".to_owned();
+        self.drafts.set_prompt(&key, &prompt);
+        if !open_comment {
+            return;
+        }
+        let citation_start = crate::composer::js_string::utf16_len("Why does ");
+        let editor = self.editor.clone();
+        window
+            .spawn(cx, async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(600))
+                    .await;
+                cx.update(|window, cx| {
+                    editor.update(cx, |editor, cx| {
+                        editor.request_citation_comment(
+                            crate::composer::editor_state::CitationCommentRequest {
+                                previous_value: String::new(),
+                                value: prompt.clone(),
+                                citation_start,
+                                inserted_spaces: Default::default(),
+                            },
+                            window,
+                            cx,
+                        );
+                    });
+                })
+                .ok();
+            })
+            .detach();
+    }
+
     fn apply_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(scenario) = std::env::var("TURIN_COMPOSER_DEMO") else {
             return;
@@ -177,6 +236,9 @@ impl ChatComposer {
         if let Some(prompt) = prompt {
             let key = "local:thread-1".to_owned();
             self.drafts.set_prompt(&key, prompt);
+        }
+        if scenario.starts_with("citation") {
+            self.apply_citation_demo(scenario == "citation-comment", window, cx);
         }
         let overlay = scenario.clone();
         self.store.update(cx, |store, cx| {

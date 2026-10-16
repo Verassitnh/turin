@@ -1246,6 +1246,7 @@ impl DiffPanel {
             return div().into_any_element();
         };
         let digits = total_lines(&entry.file).to_string().len();
+        self.ensure_file_highlights(&entry, cx);
         let highlights = self.highlights(&entry, theme.is_dark());
         let ctx = RowCtx {
             colors,

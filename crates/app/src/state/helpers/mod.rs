@@ -9,6 +9,7 @@ pub mod filesystem;
 pub mod git_actions;
 pub mod handoff;
 pub mod image_attachment_size;
+pub mod image_compression;
 pub mod markdown_images;
 pub mod media_actions;
 pub mod media_reference;

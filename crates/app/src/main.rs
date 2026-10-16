@@ -1,5 +1,6 @@
 //! Turin: t3 fork but without all the bullshit.
 
+mod app_runtime;
 mod assets;
 mod branding;
 mod components;
@@ -68,21 +69,27 @@ fn dev_overrides(cx: &mut App) -> bool {
 
 fn main() {
     tracing_subscriber::fmt::init();
-    // The view-model reducers run on tokio, off the UI thread. The orchestrator
-    // feeds `state::store::ClientStateRuntime::sender` and drains `requests`;
-    // until it is wired in, the store simply stays empty.
+    // The view-model reducers and the read path run on tokio, off the UI thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let client_state =
-        state::store::spawn_client_state(runtime.handle(), state::local_environment_id());
+    let state::store::ClientStateRuntime {
+        sender,
+        requests,
+        handle,
+    } = state::store::spawn_client_state(runtime.handle(), state::local_environment_id());
+    // Opens Turin's database and feeds the store. Kept alive for the whole
+    // process; dropping it aborts the feeds.
+    let _feeds = tokio_util::task::AbortOnDropHandle::new(runtime.handle().spawn(
+        app_runtime::run(app_runtime::data_dir::resolve_data_dir(), sender, requests),
+    ));
     gpui_kit::application()
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
             theme::init(cx);
-            let store = state::store::bind_client_store(client_state.handle.clone(), cx);
+            let store = state::store::bind_client_store(handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);

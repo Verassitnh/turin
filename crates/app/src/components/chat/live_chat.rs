@@ -321,6 +321,18 @@ impl LiveSource {
             restore_draft: overrides.restore.clone(),
             path_entries: overrides.path_entries.clone(),
             path_search_pending: overrides.path_search_pending,
+            has_pending_approval: detail
+                .map(|detail| {
+                    !super::timeline::live_projection::pending_approvals(&detail.pending_requests)
+                        .is_empty()
+                })
+                .unwrap_or(false),
+            banners: {
+                let state = self.handle.snapshot();
+                super::live_wiring::usage_limit_recovery_banner(&state, &self.thread_id)
+                    .into_iter()
+                    .collect()
+            },
             ..ComposerViewModel::default()
         }
     }
@@ -544,9 +556,44 @@ impl ComposerSource for LiveSource {
         self.not_wired("Compact context", cx);
     }
 
-    fn dismiss_banner(&self, _id: &str, _cx: &mut App) {}
+    fn dismiss_banner(&self, id: &str, _cx: &mut App) {
+        if id.starts_with("usage-limit-recovery:") {
+            return;
+        }
+    }
 
-    fn banner_action(&self, _banner_id: &str, _action_id: &str, _cx: &mut App) {}
+    fn banner_action(&self, banner_id: &str, action_id: &str, cx: &mut App) {
+        if !banner_id.starts_with("usage-limit-recovery:") {
+            self.not_wired("Composer banner action", cx);
+            return;
+        }
+        use super::usage_limit_recovery_banner::{
+            RecoveryAction, RecoveryToggle, plan_recovery_toggle,
+        };
+        let Some(action) = RecoveryAction::from_id(action_id) else {
+            return;
+        };
+        let state = self.handle.snapshot();
+        let Some(props) = super::live_wiring::usage_limit_recovery_props(&state, &self.thread_id)
+        else {
+            return;
+        };
+        match plan_recovery_toggle(&props, action, chrono::Utc::now().timestamp_millis()) {
+            RecoveryToggle::Ignore => {}
+            RecoveryToggle::Error(message) => push_error(cx, "Usage limit recovery", &message),
+            RecoveryToggle::Update(input) => {
+                let Some(update) = input.into_update() else {
+                    return;
+                };
+                self.queue_command(
+                    "Failed to save usage limit recovery",
+                    cx,
+                    "thread.metadata.update",
+                    json!({ "limitRecovery": update }),
+                );
+            }
+        }
+    }
 
     fn edit_queued_run(&self, run_id: &str, cx: &mut App) {
         let run_id = run_id.to_owned();
@@ -604,7 +651,9 @@ impl ComposerSource for LiveSource {
     }
 
     fn respond_to_pending_input(&self, _request_id: &str, _answer: &str, cx: &mut App) {
-        self.not_wired("Answering questions", cx);
+        // Multi-question answers go through [`TimelineSource::respond_to_user_input`]
+        // from the pending-input drawer; this hook is for the composer-only path.
+        self.not_wired("Answering questions from the composer", cx);
     }
 
     fn previous_pending_question(&self, _cx: &mut App) {}

@@ -7,11 +7,14 @@
 //!
 //! - which stored draft is reusable, and whether it is empty or invested;
 //! - the workspace context a reused draft takes (explicit options win, an
-//!   open draft keeps its own, otherwise configured defaults);
+//!   open draft keeps its own, otherwise configured defaults), and the
+//!   target environment's `runtimeMode`, written only when that draft is
+//!   not already open;
 //! - the snapshot the handler compares before and after each await, so a
 //!   stale request bails out instead of clobbering a winner's writes;
-//! - the mint-fresh draft fields and the carry-over precedence (composer
-//!   state, then the viewed thread, then the viewed draft).
+//! - the mint-fresh draft fields, including that same `runtimeMode`, and
+//!   the carry-over precedence (composer state, then the viewed thread,
+//!   then the viewed draft).
 //!
 //! The async handler that writes the store and navigates is the composer
 //! task's. It calls these with the facts it reads.
@@ -19,6 +22,7 @@
 #![allow(dead_code)]
 
 use turin_contracts::environment::ThreadEnvMode;
+use turin_contracts::provider_policy::RuntimeMode;
 
 use crate::hooks::chat_thread_actions::{
     ComposerModelSelectionState, resolve_new_draft_start_from_origin,
@@ -120,27 +124,45 @@ pub enum ReusedDraftWorkspace {
     },
 }
 
+/// Workspace plus `runtimeMode` for a reused empty draft.
+///
+/// Upstream writes `projectSettings.settings.defaultRuntimeMode` only when
+/// `!isDraftAlreadyOpen`, including when explicit workspace options are
+/// passed. An open draft omits the key, so it keeps the mode it already has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReusedDraftDecision {
+    pub workspace: ReusedDraftWorkspace,
+    pub runtime_mode: Option<RuntimeMode>,
+}
+
 /// The workspace decision for a reused empty draft. `default_env_mode` is the
 /// project's resolved env mode, which the caller reads (the project file
-/// read is async).
+/// read is async). `default_runtime_mode` is
+/// `projectSettings.settings.defaultRuntimeMode`.
 pub fn reused_draft_workspace(
     options: &NewThreadOptions,
     is_draft_already_open: bool,
     default_env_mode: ThreadEnvMode,
     new_worktrees_start_from_origin: bool,
-) -> ReusedDraftWorkspace {
-    if has_explicit_workspace_option(options) {
-        return ReusedDraftWorkspace::Explicit(pick_explicit_workspace_options(options));
-    }
-    if is_draft_already_open {
-        return ReusedDraftWorkspace::KeepOpenDraft;
-    }
-    ReusedDraftWorkspace::Defaults {
-        env_mode: default_env_mode,
-        start_from_origin: resolve_new_draft_start_from_origin(
-            default_env_mode,
-            new_worktrees_start_from_origin,
-        ),
+    default_runtime_mode: RuntimeMode,
+) -> ReusedDraftDecision {
+    let runtime_mode = (!is_draft_already_open).then_some(default_runtime_mode);
+    let workspace = if has_explicit_workspace_option(options) {
+        ReusedDraftWorkspace::Explicit(pick_explicit_workspace_options(options))
+    } else if is_draft_already_open {
+        ReusedDraftWorkspace::KeepOpenDraft
+    } else {
+        ReusedDraftWorkspace::Defaults {
+            env_mode: default_env_mode,
+            start_from_origin: resolve_new_draft_start_from_origin(
+                default_env_mode,
+                new_worktrees_start_from_origin,
+            ),
+        }
+    };
+    ReusedDraftDecision {
+        workspace,
+        runtime_mode,
     }
 }
 
@@ -192,14 +214,18 @@ pub struct NewDraftFields {
     pub worktree_path: Option<String>,
     pub env_mode: ThreadEnvMode,
     pub start_from_origin: bool,
+    /// `projectSettings.settings.defaultRuntimeMode`. Options never override it.
+    pub runtime_mode: RuntimeMode,
 }
 
 /// The mint-fresh draft's fields: explicit options, with the start-from-origin
 /// default when the caller did not pass one (`options?.startFromOrigin ?? ...`).
+/// `runtime_mode` is always the target environment's default.
 pub fn new_draft_fields(
     options: &NewThreadOptions,
     initial_env_mode: ThreadEnvMode,
     new_worktrees_start_from_origin: bool,
+    default_runtime_mode: RuntimeMode,
 ) -> NewDraftFields {
     NewDraftFields {
         branch: options.branch.clone().flatten(),
@@ -208,6 +234,7 @@ pub fn new_draft_fields(
         start_from_origin: options.start_from_origin.unwrap_or_else(|| {
             resolve_new_draft_start_from_origin(initial_env_mode, new_worktrees_start_from_origin)
         }),
+        runtime_mode: default_runtime_mode,
     }
 }
 

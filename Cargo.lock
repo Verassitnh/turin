@@ -7359,6 +7359,7 @@ dependencies = [
  "tree-sitter-bash",
  "turin-contracts",
  "turin-provider-core",
+ "turin-review",
  "turin-runtime",
  "turin-shared",
  "unicode-normalization",
@@ -7802,6 +7803,7 @@ dependencies = [
  "turin-contracts",
  "turin-persistence",
  "turin-provider-core",
+ "turin-shared",
  "uuid",
 ]
 

@@ -511,52 +511,11 @@ pub fn build_review_submission(
 // Files
 // ---------------------------------------------------------------------------------------------
 
-/// How a file's name travels in a unified patch, which is not as itself. A reader finds the name
-/// in a header by where it stops: `diff --git a/<old> b/<new>` splits on a space, `--- a/<name>`
-/// stops at a tab. So a name holding a tab or a newline reads back as the part of itself before
-/// that byte, or fabricates a header line of its own, and git's answer is to write such a name
-/// quoted with C-style escapes.
-///
-/// Port of `quoteGitPatchPath` from upstream `packages/shared/src/gitPatchPath.ts`. Not every
-/// byte git would escape: `core.quotePath` also escapes anything outside ASCII, which is a
-/// setting for what a terminal can show rather than anything the format needs.
-pub fn quote_git_patch_path(path: &str) -> String {
-    let mut body = String::with_capacity(path.len());
-    let mut quoting = false;
-    for character in path.chars() {
-        let escape = match character {
-            '"' => Some("\\\""),
-            '\\' => Some("\\\\"),
-            '\u{7}' => Some("\\a"),
-            '\u{8}' => Some("\\b"),
-            '\t' => Some("\\t"),
-            '\n' => Some("\\n"),
-            '\u{b}' => Some("\\v"),
-            '\u{c}' => Some("\\f"),
-            '\r' => Some("\\r"),
-            _ => None,
-        };
-        if let Some(escape) = escape {
-            body.push_str(escape);
-            quoting = true;
-            continue;
-        }
-        let code = character as u32;
-        // Every character git has no name for is written as the octal of its byte, and a control
-        // character is one byte in UTF-8, so the character's own code point is that byte.
-        if code < 0x20 || code == 0x7f {
-            body.push_str(&format!("\\{code:03o}"));
-            quoting = true;
-            continue;
-        }
-        body.push(character);
-    }
-    if quoting {
-        format!("\"{body}\"")
-    } else {
-        path.to_owned()
-    }
-}
+/// `quoteGitPatchPath` from upstream `packages/shared/src/gitPatchPath.ts`.
+/// The owner is [`turin_shared::git_patch_path::quote_git_patch_path`]; main had
+/// grown a second copy here with the same escape table (C escapes for quotes,
+/// backslashes and controls; non-ASCII stays literal).
+pub use turin_shared::git_patch_path::quote_git_patch_path;
 
 /// The files API returns hunks per file with no `diff --git` header, so the unified patch every
 /// diff viewer expects is assembled here. This decodes one page; walking pages is the caller's

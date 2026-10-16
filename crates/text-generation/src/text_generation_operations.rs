@@ -17,14 +17,11 @@ use turin_contracts::chat_attachment::ChatAttachment;
 use turin_contracts::git::TextGenerationError;
 use turin_contracts::js_trim;
 use turin_contracts::model_selection::ModelSelection;
-use turin_contracts::pull_request_review_guide::{
-    PullRequestReviewGuideAttentionKind, PullRequestReviewGuideExcerptSide,
-};
 use turin_provider_core::text_generation::{
     BranchNameGenerationInput, BranchNameGenerationResult, CommitMessageGenerationInput,
     CommitMessageGenerationResult, PrContentGenerationInput, PrContentGenerationResult,
     ProviderTextGeneration, ReviewGuideGenerationInput, ReviewGuideGenerationResult,
-    ThreadTitleGenerationInput, ThreadTitleGenerationResult,
+    ReviewGuideStopOutput, ThreadTitleGenerationInput, ThreadTitleGenerationResult,
 };
 
 use crate::git_branch_names::{format_generated_branch_name, sanitize_feature_branch_name};
@@ -356,15 +353,10 @@ impl<R: Runner> ProviderTextGeneration for RunnerTextGeneration<R> {
         &self,
         input: ReviewGuideGenerationInput,
     ) -> Result<ReviewGuideGenerationResult, TextGenerationError> {
-        // `ReviewGuideGenerationResult` holds contract values (non-empty titles, positive lines).
-        // Model output is only permissive, so it cannot be stored in that type unchanged, and
-        // dropping items here would move the normalizer's rules into the generator. Refuse before
-        // the model runs; `generate_review_guide_raw` returns the output unchanged.
-        let _ = input;
-        Err(TextGenerationError::TextGenerationError {
-            operation: Operation::GenerateReviewGuide.as_str().to_owned(),
-            detail: "Review guide output cannot be stored in the provider result type unchanged. Use generate_review_guide_raw until the review guide normalizer takes it.".to_owned(),
-            cause: None,
+        // The stops go out as the model wrote them. The review guide normalizer, not the generator,
+        // drops and clamps what does not fit the change.
+        Ok(ReviewGuideGenerationResult {
+            stops: self.generate_review_guide_raw(&input).await?,
         })
     }
 }
@@ -402,57 +394,13 @@ struct ReviewGuideReply {
     stops: Vec<ReviewGuideStopOutput>,
 }
 
-/// One review guide stop as the model wrote it. Titles, notes, and questions may be empty and
-/// lines may be zero or negative: the review guide normalizer drops or clamps those.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewGuideStopOutput {
-    pub title: String,
-    pub summary: String,
-    pub attention: Option<ReviewGuideAttentionOutput>,
-    pub excerpts: Vec<ReviewGuideExcerptOutput>,
-    pub files: Vec<ReviewGuideFileOutput>,
-    pub notes: Vec<ReviewGuideNoteOutput>,
-    pub questions: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewGuideAttentionOutput {
-    pub kind: PullRequestReviewGuideAttentionKind,
-    pub note: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewGuideExcerptOutput {
-    pub path: String,
-    pub side: PullRequestReviewGuideExcerptSide,
-    pub start: i64,
-    pub end: i64,
-    pub caption: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ReviewGuideFileOutput {
-    pub path: String,
-    pub note: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct ReviewGuideNoteOutput {
-    pub path: String,
-    pub line: i64,
-    pub title: String,
-    pub body: String,
-}
-
 #[cfg(test)]
 mod review_guide_tests {
     use std::sync::Mutex;
 
     use serde_json::{Value, json};
     use turin_contracts::model_selection::ModelSelection;
+    use turin_contracts::pull_request_review_guide::PullRequestReviewGuideExcerptSide;
     use turin_provider_core::text_generation::{
         ProviderTextGeneration, ReviewGuideGenerationInput,
     };
@@ -608,16 +556,27 @@ mod review_guide_tests {
     }
 
     #[tokio::test]
-    async fn trait_review_guide_refuses_before_running_the_model() {
-        let generation = generation(json!({ "stops": [] }));
-        let error = ProviderTextGeneration::generate_review_guide(&generation, input())
+    async fn trait_review_guide_returns_the_model_stops_unchanged() {
+        // An empty title and a line of zero are what the model may write; the generator keeps them.
+        let generation = generation(json!({
+            "stops": [{
+                "title": "",
+                "summary": "Shape of the change",
+                "attention": null,
+                "excerpts": [{ "path": "src/a.ts", "side": "new", "start": 0, "end": -1, "caption": "" }],
+                "files": [],
+                "notes": [],
+                "questions": []
+            }]
+        }));
+
+        let result = ProviderTextGeneration::generate_review_guide(&generation, input())
             .await
-            .expect_err("trait result cannot carry permissive output");
-        let TextGenerationError::TextGenerationError {
-            operation, detail, ..
-        } = error;
-        assert_eq!(operation, "generateReviewGuide");
-        assert!(detail.contains("generate_review_guide_raw"));
-        assert!(generation.runner.requests.lock().unwrap().is_empty());
+            .expect("the generator returns the model's stops");
+
+        assert_eq!(result.stops.len(), 1);
+        assert_eq!(result.stops[0].title, "");
+        assert_eq!(result.stops[0].excerpts[0].start, 0);
+        assert_eq!(result.stops[0].excerpts[0].end, -1);
     }
 }

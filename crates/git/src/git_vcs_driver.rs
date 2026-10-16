@@ -466,15 +466,17 @@ impl VcsDriver for GitVcsDriver {
             ))
             .await?;
         }
-        std::fs::create_dir_all(&input.cwd).map_err(|error| {
-            exit_error(
-                operation,
-                "git restore",
-                &input.cwd,
-                0,
-                format!("Could not recreate the checkpoint workspace: {error}"),
-            )
-        })?;
+        tokio::fs::create_dir_all(&input.cwd)
+            .await
+            .map_err(|error| {
+                exit_error(
+                    operation,
+                    "git restore",
+                    &input.cwd,
+                    0,
+                    format!("Could not recreate the checkpoint workspace: {error}"),
+                )
+            })?;
         let cleaned = self
             .execute(VcsExecuteInput {
                 allow_non_zero_exit: true,
@@ -484,9 +486,7 @@ impl VcsDriver for GitVcsDriver {
         if cleaned.exit_code != 0 {
             let emptied = cleaned.exit_code == 1
                 && FAILED_TO_REMOVE_WORKSPACE_ROOT.is_match(cleaned.stderr.trim())
-                && std::fs::read_dir(&input.cwd)
-                    .map(|entries| entries.count() == 0)
-                    .unwrap_or(false);
+                && dir_is_empty(&input.cwd).await;
             if !emptied {
                 return Err(exit_error(
                     operation,
@@ -501,15 +501,17 @@ impl VcsDriver for GitVcsDriver {
                 ));
             }
         }
-        std::fs::create_dir_all(&input.cwd).map_err(|error| {
-            exit_error(
-                operation,
-                "git restore",
-                &input.cwd,
-                0,
-                format!("Could not recreate the checkpoint workspace: {error}"),
-            )
-        })?;
+        tokio::fs::create_dir_all(&input.cwd)
+            .await
+            .map_err(|error| {
+                exit_error(
+                    operation,
+                    "git restore",
+                    &input.cwd,
+                    0,
+                    format!("Could not recreate the checkpoint workspace: {error}"),
+                )
+            })?;
         if self.has_head_commit(&input.cwd, None, Vec::new()).await? {
             self.execute(VcsExecuteInput::new(
                 operation,
@@ -977,7 +979,8 @@ impl GitVcsDriver {
             ))
             .await?;
         let source = index_path.stdout.trim();
-        let modified = std::fs::metadata(source)
+        let modified = tokio::fs::metadata(source)
+            .await
             .and_then(|metadata| metadata.modified())
             .map_err(|error| {
                 exit_error(operation, "git rev-parse", &input.cwd, 1, error.to_string())
@@ -990,7 +993,7 @@ impl GitVcsDriver {
         if index_time == 0 {
             return Ok(false);
         }
-        std::fs::copy(source, temp_index).map_err(|error| {
+        tokio::fs::copy(source, temp_index).await.map_err(|error| {
             exit_error(operation, "git rev-parse", &input.cwd, 1, error.to_string())
         })?;
         let mut read_tree = INDEX_CONFIG.map(str::to_owned).to_vec();
@@ -1000,19 +1003,22 @@ impl GitVcsDriver {
             ..VcsExecuteInput::new(operation, &input.cwd, read_tree)
         })
         .await?;
-        let file = std::fs::File::options()
-            .write(true)
-            .open(temp_index)
-            .map_err(|error| {
-                exit_error(operation, "git read-tree", &input.cwd, 1, error.to_string())
-            })?;
+        // std's `set_times` is a blocking syscall, so the open and the stamp run on the blocking
+        // pool rather than a runtime worker.
         let when = UNIX_EPOCH + Duration::from_secs(index_time);
-        file.set_times(
-            std::fs::FileTimes::new()
-                .set_accessed(when)
-                .set_modified(when),
-        )
-        .map_err(|error| {
+        let stamped_path = temp_index.to_path_buf();
+        let stamp = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let file = std::fs::File::options().write(true).open(&stamped_path)?;
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(when)
+                    .set_modified(when),
+            )
+        })
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|stamped| stamped);
+        stamp.map_err(|error| {
             exit_error(operation, "git read-tree", &input.cwd, 1, error.to_string())
         })?;
 
@@ -1200,6 +1206,15 @@ fn non_empty_oid(result: &VcsProcessOutput) -> Option<String> {
     }
 }
 
+/// Whether `path` is an empty directory. An unreadable one counts as not empty, so a failed clean
+/// still fails the restore.
+async fn dir_is_empty(path: &str) -> bool {
+    match tokio::fs::read_dir(path).await {
+        Ok(mut entries) => matches!(entries.next_entry().await, Ok(None)),
+        Err(_) => false,
+    }
+}
+
 fn owned<const N: usize>(args: [&str; N]) -> Vec<String> {
     args.into_iter().map(str::to_owned).collect()
 }
@@ -1382,6 +1397,20 @@ mod tests {
         );
         assert!(patch.contains("+two"), "{patch}");
         assert!(!patch.contains("\u{1b}["), "color leaked into {patch}");
+    }
+
+    #[tokio::test]
+    async fn an_empty_directory_is_told_apart_from_one_with_entries_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(dir_is_empty(empty.to_str().unwrap()).await);
+
+        std::fs::write(empty.join("note.txt"), "one\n").unwrap();
+        assert!(!dir_is_empty(empty.to_str().unwrap()).await);
+
+        let missing = dir.path().join("missing");
+        assert!(!dir_is_empty(missing.to_str().unwrap()).await);
     }
 
     #[test]

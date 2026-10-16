@@ -37,6 +37,12 @@ pub mod page_scroll_controller;
 #[allow(dead_code)]
 pub mod pending_user_input;
 pub mod thread_details_control;
+#[allow(dead_code)]
+pub mod use_composer_multiline_prompt;
+#[allow(dead_code)]
+pub mod use_composer_trigger_state;
+#[allow(dead_code)]
+pub mod use_composer_typing_guard;
 // Sidebar thread drag into the composer. The sidebar view does not drive it yet.
 #[allow(dead_code)]
 pub mod thread_context_drag;

@@ -33,6 +33,7 @@ pub mod morph_icon;
 pub mod number_field;
 pub mod panel_tab_close_button;
 pub mod pierre_icons;
+pub mod pierre_file_icon;
 pub mod popover;
 pub mod preview_card;
 pub mod radio_group;

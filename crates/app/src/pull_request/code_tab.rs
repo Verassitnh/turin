@@ -13,7 +13,7 @@
 //! (`loadDiffFiles`), range selection by dragging line numbers (a comment is on one line, which
 //! is what upstream collapses a range to), the "Add to agent" action, the "Fix in a thread"
 //! hand-off, the find panel, persisting the toolbar choices in client settings, and the file
-//! tree's pierre icons / virtualization.
+//! tree's virtualization (pierre file icons: [`view`] file tree).
 
 mod files_viewed;
 pub mod items;

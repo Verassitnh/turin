@@ -1,6 +1,7 @@
 //! Rendering of the Code tab: the toolbar, the list rows and the states around them.
 
 use super::*;
+use crate::ui::pierre_file_icon::{file_tree_file_icon, file_tree_folder_icon};
 
 /// The code face and the line metrics the rows share.
 #[derive(Clone)]
@@ -803,15 +804,15 @@ impl CodeTab {
                 } else {
                     theme.muted_foreground
                 })
-                .child(
-                    Icon::new(if is_file {
-                        IconName::FileCode
-                    } else {
-                        IconName::Folder
-                    })
-                    .size(rems(0.875))
-                    .color(theme.muted_foreground),
-                )
+                .child(if is_file {
+                    file_tree_file_icon(
+                        path.as_deref().unwrap_or(&row.name),
+                        theme.is_dark(),
+                        rems(0.875),
+                    )
+                } else {
+                    file_tree_folder_icon(false, theme.muted_foreground, rems(0.875))
+                })
                 .child(
                     div()
                         .min_w_0()

@@ -513,12 +513,26 @@ fn now_iso() -> String {
 
 type ProgressSink = Arc<dyn Fn(String) -> BoxFuture<'static, ()> + Send + Sync>;
 
-/// Aborts the sampler when the command ends, however it ends.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
+/// The progress sampler (upstream forks it scoped, and closing the scope waits
+/// for the interruption). [`Sampler::stop`] aborts it and waits until it is gone,
+/// so no progress write can land after the caller writes the final state.
+/// Dropping without `stop` (a dropped caller) still aborts it.
+struct Sampler(Option<tokio::task::JoinHandle<()>>);
 
-impl Drop for AbortOnDrop {
+impl Sampler {
+    async fn stop(mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for Sampler {
     fn drop(&mut self) {
-        self.0.abort();
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
     }
 }
 
@@ -530,6 +544,21 @@ async fn run_provider_maintenance_command(
     timeout: Duration,
     progress_interval: Duration,
 ) -> Result<ProviderMaintenanceCommandResult, ProviderMaintenanceCommandError> {
+    // Holds the newest output line not yet reported; the sampler takes it.
+    let pending_progress: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let sampler = Sampler(Some(tokio::spawn({
+        let pending_progress = Arc::clone(&pending_progress);
+        async move {
+            loop {
+                let line = pending_progress.lock().take();
+                if let Some(line) = line {
+                    on_progress(line).await;
+                }
+                tokio::time::sleep(progress_interval).await;
+            }
+        }
+    })));
+
     let collect = async {
         let spawned = spawner
             .spawn(&command.executable, &command.args, command.env.as_ref())
@@ -546,22 +575,6 @@ async fn run_provider_maintenance_command(
             exit_code,
             guard: _guard,
         } = spawned;
-
-        // Holds the newest output line not yet reported; the sampler takes it.
-        let pending_progress: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let _sampler = AbortOnDrop(tokio::spawn({
-            let pending_progress = Arc::clone(&pending_progress);
-            let on_progress = Arc::clone(&on_progress);
-            async move {
-                loop {
-                    let line = pending_progress.lock().take();
-                    if let Some(line) = line {
-                        on_progress(line).await;
-                    }
-                    tokio::time::sleep(progress_interval).await;
-                }
-            }
-        }));
 
         let track_progress = |stream: BoxStream<'static, io::Result<Vec<u8>>>| {
             let pending_progress = Arc::clone(&pending_progress);
@@ -608,7 +621,7 @@ async fn run_provider_maintenance_command(
         })
     };
 
-    match tokio::time::timeout(timeout, collect).await {
+    let result = match tokio::time::timeout(timeout, collect).await {
         Ok(result) => result,
         Err(_) => Ok(ProviderMaintenanceCommandResult {
             stdout: String::new(),
@@ -618,7 +631,9 @@ async fn run_provider_maintenance_command(
             stdout_truncated: false,
             stderr_truncated: false,
         }),
-    }
+    };
+    sampler.stop().await;
+    result
 }
 
 // ── Runner ─────────────────────────────────────────────────────────

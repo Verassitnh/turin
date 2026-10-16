@@ -1324,6 +1324,82 @@ async fn a_command_that_outlives_the_timeout_ends_as_timed_out() {
     assert_eq!(message_of(&result, 0), "Update timed out.");
 }
 
+#[tokio::test]
+async fn the_progress_sampler_is_gone_before_the_command_result_is_returned() {
+    // QC wf_461dfbcb-a40: an aborted-but-not-awaited sampler could still land a
+    // progress write after the caller wrote the final state.
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let exit = Deferred::new();
+    let writing = Deferred::new();
+    let write_gate = Deferred::new();
+    let write_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let write_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spawner = {
+        let exit = exit.clone();
+        MockSpawner {
+            handler: Box::new(move |_, _, _| MockProcess {
+                stdout: "50%".to_owned(),
+                stderr: String::new(),
+                code: 0,
+                exit: Some(exit.clone()),
+            }),
+        }
+    };
+    // A progress write that is still in flight when the command ends.
+    let on_progress: ProgressSink = {
+        let writing = writing.clone();
+        let write_gate = write_gate.clone();
+        let write_dropped = Arc::clone(&write_dropped);
+        let write_finished = Arc::clone(&write_finished);
+        Arc::new(move |_line| {
+            writing.succeed();
+            let flag = DropFlag(Arc::clone(&write_dropped));
+            let write_gate = write_gate.clone();
+            let write_finished = Arc::clone(&write_finished);
+            Box::pin(async move {
+                let _flag = flag;
+                write_gate.wait().await;
+                write_finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        })
+    };
+    let action = ProviderMaintenanceCommandAction {
+        command: "x".to_owned(),
+        executable: "x".to_owned(),
+        args: Vec::new(),
+        lock_key: "x".to_owned(),
+        env: None,
+    };
+
+    let (result, ()) = tokio::join!(
+        run_provider_maintenance_command(
+            &spawner,
+            &action,
+            on_progress,
+            Duration::from_secs(30),
+            Duration::from_millis(5),
+        ),
+        async {
+            writing.wait().await;
+            exit.succeed();
+        }
+    );
+
+    assert_eq!(result.unwrap().exit_code, Some(0));
+    // Already dropped at return, not "soon": a later release cannot complete it.
+    assert!(write_dropped.load(std::sync::atomic::Ordering::SeqCst));
+    write_gate.succeed();
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!write_finished.load(std::sync::atomic::Ordering::SeqCst));
+}
+
 // ── Added: the real spawner (unix) ─────────────────────────────────
 
 #[cfg(unix)]

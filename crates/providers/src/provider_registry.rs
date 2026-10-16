@@ -321,16 +321,26 @@ fn correlate_snapshot_with_source(
     source: &ProviderSnapshotSource,
     snapshot: ServerProvider,
 ) -> ServerProvider {
-    if snapshot.instance_id != source.instance_id {
+    correlate_snapshot(&source.instance_id, &source.driver_kind, snapshot)
+}
+
+/// [`correlate_snapshot_with_source`] for a subscription task, which keeps only
+/// the ids so it never owns the managed provider.
+fn correlate_snapshot(
+    instance_id: &ProviderInstanceId,
+    driver_kind: &ProviderDriverKind,
+    snapshot: ServerProvider,
+) -> ServerProvider {
+    if &snapshot.instance_id != instance_id {
         panic!(
             "Provider snapshot instance mismatch: source '{}' emitted '{}'.",
-            source.instance_id, snapshot.instance_id
+            instance_id, snapshot.instance_id
         );
     }
-    if snapshot.driver != source.driver_kind {
+    if &snapshot.driver != driver_kind {
         panic!(
             "Provider snapshot driver mismatch for instance '{}': source '{}' emitted '{}'.",
-            source.instance_id, source.driver_kind, snapshot.driver
+            instance_id, driver_kind, snapshot.driver
         );
     }
     snapshot
@@ -434,11 +444,16 @@ impl TaskSet {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct UpsertOptions {
     publish: bool,
     persist: bool,
     replace: bool,
+    /// The emitting source's liveness flag. A snapshot from a source that has
+    /// been retired (its instance was rebuilt or removed) is dropped, checked
+    /// under the same lock as the merge so a late emission cannot overwrite the
+    /// rebuilt instance or bring back a removed one.
+    only_if_active: Option<Arc<AtomicBool>>,
 }
 
 impl Default for UpsertOptions {
@@ -447,7 +462,56 @@ impl Default for UpsertOptions {
             publish: true,
             persist: true,
             replace: false,
+            only_if_active: None,
         }
+    }
+}
+
+impl UpsertOptions {
+    fn from_source(active: &Arc<AtomicBool>) -> Self {
+        Self {
+            only_if_active: Some(Arc::clone(active)),
+            ..Self::default()
+        }
+    }
+
+    fn source_retired(&self) -> bool {
+        self.only_if_active
+            .as_ref()
+            .is_some_and(|active| !active.load(Ordering::SeqCst))
+    }
+}
+
+/// Aborts its task when dropped.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// One live instance and the task forwarding its change stream. The task owns
+/// only the stream receiver and the instance's ids, never the managed provider,
+/// so the instance registry dropping the instance is what ends the provider.
+/// `retire` (also run on drop) stops the task and marks late snapshots stale;
+/// upstream gets the same from the instance scope closing.
+struct LiveSub {
+    instance: Arc<ProviderInstance>,
+    active: Arc<AtomicBool>,
+    task: Option<AbortOnDrop>,
+}
+
+impl LiveSub {
+    fn retire(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
+        self.task = None;
+    }
+}
+
+impl Drop for LiveSub {
+    fn drop(&mut self) {
+        self.retire();
     }
 }
 
@@ -469,7 +533,7 @@ struct Inner {
     /// Live-source registry: the dynamic counterpart to the boot-time sources.
     /// Keyed by `instance_id`; the stored instance is compared by identity so
     /// "no-op" reconciles (settings unchanged) skip re-subscribing and re-probing.
-    live_subs: Mutex<IndexMap<ProviderInstanceId, Arc<ProviderInstance>>>,
+    live_subs: Mutex<IndexMap<ProviderInstanceId, LiveSub>>,
     /// Serializes `sync_live_sources` so a rapid burst of reconciles doesn't
     /// interleave two passes clobbering each other's bookkeeping.
     sync_lock: tokio::sync::Mutex<()>,
@@ -477,6 +541,13 @@ struct Inner {
     refresh_all_in_flight: Mutex<Option<watch::Receiver<RefreshAllResult>>>,
     /// Aggregator fan-out: each subscriber gets every coalesced update.
     subscribers: Mutex<Vec<mpsc::UnboundedSender<Vec<ServerProvider>>>>,
+}
+
+/// A live source plus its liveness flag, for a refresh in flight when the
+/// instance is retired.
+struct LiveSource {
+    source: ProviderSnapshotSource,
+    active: Arc<AtomicBool>,
 }
 
 struct ResetFlagOnDrop(Arc<Inner>);
@@ -570,6 +641,9 @@ impl Inner {
         next_providers: Vec<ServerProvider>,
         options: UpsertOptions,
     ) -> Vec<ServerProvider> {
+        if options.source_retired() {
+            return self.current_providers();
+        }
         let manifest_policies = self.manifest_policies().await;
         let next_providers_with_update_state: Vec<ServerProvider> = next_providers
             .into_iter()
@@ -577,6 +651,9 @@ impl Inner {
             .collect();
         let (previous_providers, providers, providers_to_persist) = {
             let mut current = self.providers.lock();
+            if options.source_retired() {
+                return current.clone();
+            }
             let previous_providers = current.clone();
             let mut merged_providers: IndexMap<ProviderInstanceId, ServerProvider> =
                 previous_providers
@@ -662,6 +739,9 @@ impl Inner {
         provider: ServerProvider,
         options: UpsertOptions,
     ) -> Vec<ServerProvider> {
+        if options.source_retired() {
+            return self.current_providers();
+        }
         let providers = self.upsert_providers(vec![provider], options).await;
         // Reclassify the current read model after fetching. Never republish the
         // probe captured before the fetch: a newer health result may have landed.
@@ -726,21 +806,21 @@ impl Inner {
         .await
     }
 
-    async fn refresh_one_source(
-        self: &Arc<Self>,
-        source: &ProviderSnapshotSource,
-    ) -> Vec<ServerProvider> {
-        let next_provider = source.refresh().await;
-        let next_provider = correlate_snapshot_with_source(source, next_provider);
-        self.sync_provider(next_provider, UpsertOptions::default())
+    async fn refresh_one_source(self: &Arc<Self>, source: &LiveSource) -> Vec<ServerProvider> {
+        let next_provider = source.source.refresh().await;
+        let next_provider = correlate_snapshot_with_source(&source.source, next_provider);
+        self.sync_provider(next_provider, UpsertOptions::from_source(&source.active))
             .await
     }
 
-    fn live_sources(&self) -> Vec<ProviderSnapshotSource> {
+    fn live_sources(&self) -> Vec<LiveSource> {
         self.live_subs
             .lock()
             .values()
-            .map(|instance| build_snapshot_source(instance))
+            .map(|sub| LiveSource {
+                source: build_snapshot_source(&sub.instance),
+                active: Arc::clone(&sub.active),
+            })
             .collect()
     }
 
@@ -802,7 +882,7 @@ impl Inner {
         let sources = self.live_sources();
         let Some(provider_source) = sources
             .iter()
-            .find(|candidate| candidate.instance_id == default_instance_id)
+            .find(|candidate| candidate.source.instance_id == default_instance_id)
         else {
             return Ok(self.current_providers());
         };
@@ -816,7 +896,7 @@ impl Inner {
         let sources = self.live_sources();
         let Some(provider_source) = sources
             .iter()
-            .find(|candidate| &candidate.instance_id == instance_id)
+            .find(|candidate| &candidate.source.instance_id == instance_id)
         else {
             return self.current_providers();
         };
@@ -837,9 +917,11 @@ impl Inner {
     /// snapshots immediately, then receive live probe results through the
     /// already-attached change stream.
     ///
-    /// Per-instance subscription tasks are not tracked individually. When a
-    /// rebuilt instance's old scope closes, its stream ends and our loop exits
-    /// naturally.
+    /// Each instance's subscription task is owned by its [`LiveSub`]. A rebuilt
+    /// or removed instance is retired at the start of the pass: its task is
+    /// aborted and snapshots it still emits are dropped. The task holds only the
+    /// stream receiver and the instance ids, so the managed provider is released
+    /// as soon as the instance registry drops the instance.
     async fn sync_live_sources(self: &Arc<Self>) {
         let _sync_guard = self.sync_lock.lock().await;
         let instances = self.source.list_instances();
@@ -853,18 +935,24 @@ impl Inner {
         for provider in &unavailable_providers {
             known_instance_ids.insert(snapshot_instance_key(provider));
         }
-        let previous_subs = self.live_subs.lock().clone();
-
         // Carry over subscriptions for instances whose identity is unchanged
         // (reconcile treated them as no-op). Instances that disappeared, or
-        // were rebuilt with a different reference, fall through to the
-        // "newly-added" branch below.
-        let mut carried_over: IndexMap<ProviderInstanceId, Arc<ProviderInstance>> = IndexMap::new();
-        for (instance_id, previous_instance) in &previous_subs {
-            if let Some(next_instance) = next_by_instance.get(instance_id)
-                && Arc::ptr_eq(next_instance, previous_instance)
-            {
-                carried_over.insert(instance_id.clone(), Arc::clone(previous_instance));
+        // were rebuilt with a different reference, are retired now and fall
+        // through to the "newly-added" branch below.
+        let mut previously_subscribed: HashSet<ProviderInstanceId> = HashSet::new();
+        let mut carried_over: HashSet<ProviderInstanceId> = HashSet::new();
+        {
+            let mut live_subs = self.live_subs.lock();
+            for (instance_id, sub) in live_subs.iter_mut() {
+                previously_subscribed.insert(instance_id.clone());
+                if next_by_instance
+                    .get(instance_id)
+                    .is_some_and(|next_instance| Arc::ptr_eq(next_instance, &sub.instance))
+                {
+                    carried_over.insert(instance_id.clone());
+                } else {
+                    sub.retire();
+                }
             }
         }
 
@@ -872,14 +960,14 @@ impl Inner {
         // (which preserves settings-author order).
         let newly_added: Vec<(ProviderInstanceId, Arc<ProviderInstance>)> = next_by_instance
             .iter()
-            .filter(|(instance_id, _)| !carried_over.contains_key(*instance_id))
+            .filter(|(instance_id, _)| !carried_over.contains(*instance_id))
             .map(|(instance_id, instance)| (instance_id.clone(), Arc::clone(instance)))
             .collect();
 
         let rebuilt_instance_ids: HashSet<&ProviderInstanceId> = newly_added
             .iter()
             .map(|(instance_id, _)| instance_id)
-            .filter(|instance_id| previous_subs.contains_key(*instance_id))
+            .filter(|instance_id| previously_subscribed.contains(*instance_id))
             .collect();
         if !rebuilt_instance_ids.is_empty() {
             self.update_providers(|previous| {
@@ -902,37 +990,61 @@ impl Inner {
         // initial probe finishes during this sync, either the current read or
         // the active subscriber observes the result. The stream is opened here,
         // not inside the task, so the subscription exists when this returns.
-        for (_, instance) in &newly_added {
-            let source = build_snapshot_source(instance);
-            let mut changes = source.stream_changes();
-            let inner = Arc::clone(self);
-            self.tasks.spawn(async move {
-                while let Some(provider) = changes.next().await {
-                    let provider = correlate_snapshot_with_source(&source, provider);
-                    inner
-                        .sync_provider(provider, UpsertOptions::default())
-                        .await;
-                }
-            });
-        }
+        let new_subs: Vec<(ProviderInstanceId, LiveSub)> = newly_added
+            .iter()
+            .map(|(instance_id, instance)| {
+                let driver_kind = instance.driver_kind.clone();
+                let task_instance_id = instance_id.clone();
+                let mut changes = build_snapshot_source(instance).stream_changes();
+                let active = Arc::new(AtomicBool::new(true));
+                let task = AbortOnDrop(tokio::spawn({
+                    let inner = Arc::downgrade(self);
+                    let active = Arc::clone(&active);
+                    async move {
+                        while let Some(provider) = changes.next().await {
+                            if !active.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            let Some(inner) = inner.upgrade() else {
+                                break;
+                            };
+                            let provider =
+                                correlate_snapshot(&task_instance_id, &driver_kind, provider);
+                            inner
+                                .sync_provider(provider, UpsertOptions::from_source(&active))
+                                .await;
+                        }
+                    }
+                }));
+                (
+                    instance_id.clone(),
+                    LiveSub {
+                        instance: Arc::clone(instance),
+                        active,
+                        task: Some(task),
+                    },
+                )
+            })
+            .collect();
         tokio::task::yield_now().await;
 
         // Snapshot current state without starting a probe. Managed providers
         // launch their startup refresh independently, so this closes the
         // subscription race without putting external work on the registry or
         // app construction path.
-        join_all(newly_added.iter().map(|(_, instance)| async move {
+        join_all(new_subs.iter().map(|(instance_id, sub)| async move {
             let pass = AssertUnwindSafe(async {
-                let source = build_snapshot_source(instance);
+                let source = build_snapshot_source(&sub.instance);
                 let provider = source.get_snapshot().await;
                 let provider = correlate_snapshot_with_source(&source, provider);
-                self.sync_provider(provider, UpsertOptions::default()).await;
+                self.sync_provider(provider, UpsertOptions::from_source(&sub.active))
+                    .await;
             })
             .catch_unwind()
             .await;
             if pass.is_err() {
                 tracing::error!(
-                    instance_id = %instance.instance_id,
+                    %instance_id,
                     "provider registry could not read a new instance's snapshot"
                 );
             }
@@ -948,11 +1060,21 @@ impl Inner {
         )
         .await;
 
-        let mut next_subs = carried_over;
-        for (instance_id, instance) in newly_added {
-            next_subs.insert(instance_id, instance);
+        {
+            let mut live_subs = self.live_subs.lock();
+            let mut previous = std::mem::take(&mut *live_subs);
+            for instance_id in next_by_instance.keys() {
+                if carried_over.contains(instance_id)
+                    && let Some(sub) = previous.shift_remove(instance_id)
+                {
+                    live_subs.insert(instance_id.clone(), sub);
+                }
+            }
+            for (instance_id, sub) in new_subs {
+                live_subs.insert(instance_id, sub);
+            }
+            // Whatever is left in `previous` was retired above; dropping it ends its tasks.
         }
-        *self.live_subs.lock() = next_subs;
 
         // Drop aggregator state for instances that have disappeared — otherwise
         // the UI would keep rendering ghosts.
@@ -1119,6 +1241,8 @@ pub struct ProviderRegistry {
 impl Drop for ProviderRegistry {
     fn drop(&mut self) {
         self.tasks.abort_all();
+        // Each subscription task is owned by its `LiveSub`; dropping them ends the tasks.
+        self.inner.live_subs.lock().clear();
     }
 }
 

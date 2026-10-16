@@ -155,7 +155,9 @@ pub fn apply_catalog_default(
                 }
                 let mut model = model.clone();
                 model.is_default = Some(true);
-                model.aliases = (!aliases.is_empty()).then_some(aliases);
+                if !aliases.is_empty() {
+                    model.aliases = Some(aliases);
+                }
                 return model;
             }
             model.clone()
@@ -372,6 +374,25 @@ mod tests {
             apply_catalog_default(&models[..1], Some(&catalog), None),
             models[..1].to_vec()
         );
+    }
+
+    #[test]
+    fn apply_default_keeps_an_empty_aliases_array_the_new_default_already_has() {
+        // Upstream spreads the model and only overwrites `aliases` when the merged
+        // list is non-empty, so a model's own `aliases: []` survives.
+        let catalog = catalog(
+            vec![catalog_model("model-new", ManifestModelStatus::Current)],
+            Some("model-new"),
+        );
+        let mut old = model("model-old");
+        old.is_default = Some(true);
+        let mut new = model("model-new");
+        new.aliases = Some(Vec::new());
+        let defaulted = apply_catalog_default(&[old, new], Some(&catalog), None);
+        assert_eq!(defaulted[1].is_default, Some(true));
+        assert_eq!(defaulted[1].aliases, Some(Vec::new()));
+        // The previous default loses its aliases key entirely.
+        assert_eq!(defaulted[0].aliases, None);
     }
 
     #[test]

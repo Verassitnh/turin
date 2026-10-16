@@ -731,7 +731,7 @@ struct Identities(Option<ResolveIdentity>);
 
 #[async_trait]
 impl RepositoryIdentityResolver for Identities {
-    async fn resolve(&self, workspace_root: &str) -> Option<RepositoryIdentity> {
+    async fn resolve(&self, workspace_root: &str, _refresh: bool) -> Option<RepositoryIdentity> {
         self.0.as_ref().and_then(|resolve| resolve(workspace_root))
     }
 }

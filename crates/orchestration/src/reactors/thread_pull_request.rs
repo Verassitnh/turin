@@ -99,6 +99,25 @@ fn pull_request_matches_project(
     }
 }
 
+/// `resolveProjectForPullRequestDiscovery`: the project with its repository identity resolved now,
+/// and the repository selector that identity names. `refresh` bypasses the identity cache, as
+/// upstream does after a turn or on an explicit refresh.
+async fn resolve_project_for_discovery(
+    project: &OrchestrationProjectShell,
+    identities: &dyn RepositoryIdentityResolver,
+    refresh: bool,
+) -> (OrchestrationProjectShell, Option<String>) {
+    let identity = identities
+        .resolve(project.workspace_root.as_str(), refresh)
+        .await;
+    let repository = identity
+        .as_ref()
+        .and_then(|identity| source_control_repository_selector(Some(identity.into())));
+    let mut resolved = project.clone();
+    resolved.repository_identity = Some(identity);
+    (resolved, repository)
+}
+
 /// Whether a sweep over every thread reads only unsettled ones. Backfill (or a backfill still owed)
 /// reads settled threads too.
 pub fn periodic_reads_unsettled_only(request: &RefreshRequest, backfill_owed: bool) -> bool {
@@ -433,13 +452,8 @@ impl ThreadPullRequestService {
             self.finish_backfill(group);
             return Ok(());
         };
-        let identity = self
-            .identities
-            .resolve(project.workspace_root.as_str())
-            .await;
-        let repository = identity
-            .as_ref()
-            .and_then(|identity| source_control_repository_selector(Some(identity.into())));
+        let (resolved_project, repository) =
+            resolve_project_for_discovery(project, self.identities.as_ref(), refresh).await;
         if first.branch.is_some() && repository.is_none() {
             self.finish_backfill(group);
             return Ok(());
@@ -460,9 +474,10 @@ impl ThreadPullRequestService {
                     .await?
             }
         };
-        // A pull request in another repository is not this project's.
+        // A pull request in another repository is not this project's. The shell's cached identity
+        // is usually absent, so the check runs against the resolved project.
         if let Some(pull_request) = &detected
-            && !pull_request_matches_project(pull_request, project)
+            && !pull_request_matches_project(pull_request, &resolved_project)
         {
             self.finish_backfill(group);
             return Ok(());
@@ -497,12 +512,9 @@ impl ThreadPullRequestService {
                 .git
                 .branch_pull_request(&cwd, branch.as_str(), true)
                 .await?;
-            let current_identity = self
-                .identities
-                .resolve(project.workspace_root.as_str())
-                .await;
-            let mut refreshed_project = project.clone();
-            refreshed_project.repository_identity = Some(current_identity);
+            // The post-check resolves with `refresh: true` (upstream ThreadPullRequestService.ts).
+            let (refreshed_project, _) =
+                resolve_project_for_discovery(project, self.identities.as_ref(), true).await;
             let unchanged = current.as_ref().is_some_and(|current| {
                 current.change_request.number == detected.change_request.number
                     && current.change_request.url == detected.change_request.url

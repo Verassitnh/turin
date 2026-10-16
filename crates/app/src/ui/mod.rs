@@ -31,6 +31,7 @@ pub mod text_input;
 pub mod textarea;
 pub mod toggle;
 pub mod tooltip;
+pub mod workspace_page;
 
 #[allow(unused_imports)]
 pub use badge::{Badge, BadgeSize, BadgeVariant};

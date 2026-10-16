@@ -3144,9 +3144,22 @@ async fn v2_subagent_events_park_while_the_parent_holds_a_wake() {
     ] {
         script.frames.send(Some(sse(&frame.to_string()))).unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let parked = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if session.test_wake_contains("ses_1", "held") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "child text must park on the held wake before a turn takes it"
+    );
     let mut early = Vec::new();
-    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(50), events.next()).await
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(20), events.next()).await
     {
         early.push(serde_json::to_value(event.expect("event")).expect("event json"));
     }
@@ -3157,6 +3170,16 @@ async fn v2_subagent_events_park_while_the_parent_holds_a_wake() {
         "child text must park on the held wake, not go live: {early:#?}"
     );
     session.start_turn(turn(thread, "take wake")).await.unwrap();
+    let replayed = events_until(&mut events, |value| {
+        value["type"] == "message.updated" && value["message"]["text"] == "held"
+    })
+    .await;
+    assert!(
+        replayed.iter().any(|event| {
+            event["type"] == "message.updated" && event["message"]["text"] == "held"
+        }),
+        "the child transcript must replay once the turn takes the wake: {replayed:#?}"
+    );
     session.close().await;
 }
 

@@ -565,6 +565,19 @@ impl OpenCodeV2Session {
         self.fail_stream(message).await;
     }
 
+    /// Whether a held wake for `session_id` has parked an event whose payload contains `needle`.
+    #[cfg(test)]
+    pub(in crate::adapter) fn test_wake_contains(&self, session_id: &str, needle: &str) -> bool {
+        let guard = self.inner.lock();
+        guard.wakes.get(session_id).is_some_and(|wakes| {
+            wakes.iter().any(|wake| {
+                wake.events
+                    .iter()
+                    .any(|(_, data)| data.to_string().contains(needle))
+            })
+        })
+    }
+
     async fn fail_stream(&self, message: &str) {
         let mut guard = self.inner.lock();
         guard.stream_dead = Some(message.to_owned());
@@ -649,24 +662,43 @@ impl OpenCodeV2Session {
         }
     }
 
+    /// A live stream event. Parked wake events use [`Self::on_held_event`] so they are not
+    /// queued behind the replay that is applying them.
     fn on_event(&self, event_type: &str, data: &Value) {
+        self.dispatch_event(event_type, data, false);
+    }
+
+    /// One event of a wake, applied in wake order (upstream `route(event, session, held=true)`).
+    /// It does not re-enter the `replaying` queue.
+    fn on_held_event(&self, event_type: &str, data: &Value) {
+        self.dispatch_event(event_type, data, true);
+    }
+
+    fn dispatch_event(&self, event_type: &str, data: &Value, held: bool) {
         let session_id = str_field(data, "sessionID");
-        if let Some(session_id) = &session_id {
+        // Live events wait until the wake replay returns. The wake's own events are `held`
+        // and must not be queued behind themselves (upstream holds `lock` across `replay`).
+        if !held {
             let mut guard = self.inner.lock();
-            if guard
-                .threads
-                .get(session_id)
-                .is_some_and(|thread| thread.replaying)
-            {
-                guard
-                    .threads
-                    .get_mut(session_id)
-                    .expect("thread exists")
-                    .replay_deferred
-                    .push((event_type.to_owned(), data.clone()));
+            if let Some(holder) = replaying_holder(&guard, session_id.as_deref(), data) {
+                if let Some(thread) = guard.threads.get_mut(&holder) {
+                    thread
+                        .replay_deferred
+                        .push((event_type.to_owned(), data.clone()));
+                }
                 return;
             }
             drop(guard);
+        }
+        // `session.created` names a child before its events arrive, so the link is recorded
+        // before parking (upstream `handleEvent` returns after `announced.set`).
+        if event_type == "session.created" {
+            let parent = str_field(data, "parentID");
+            let id = str_field(data, "sessionID").or_else(|| str_field(data, "id"));
+            if let (Some(id), Some(parent)) = (id, parent) {
+                self.link_child(&id, &parent);
+            }
+            return;
         }
         if let Some(session_id) = &session_id
             && self.child_execution(session_id, event_type)
@@ -693,13 +725,6 @@ impl OpenCodeV2Session {
                     if let Some(reports) = guard.reports.get_mut(session_id) {
                         reports.retain(|report| report.inbox_id != inbox_id);
                     }
-                }
-            }
-            "session.created" => {
-                let parent = str_field(data, "parentID");
-                let id = str_field(data, "sessionID").or_else(|| str_field(data, "id"));
-                if let (Some(id), Some(parent)) = (id, parent) {
-                    self.link_child(&id, &parent);
                 }
             }
             "session.execution.succeeded" => {
@@ -3530,14 +3555,17 @@ impl OpenCodeV2Session {
 
 impl OpenCodeV2Session {
     /// The parked events of a wake, replayed into the turn that took it.
+    /// Upstream `replay`: `wake.dropped = true`, then `route(event, session, held=true)` in order.
     fn replay(&self, wake: &Wake) {
         wake.dropped.store(true, Ordering::SeqCst);
         for (event_type, data) in &wake.events {
-            self.on_event(event_type, data);
+            self.on_held_event(event_type, data);
         }
     }
 
     /// Replays a wake under `replaying`, then drains events that arrived mid-replay.
+    /// The flag stays set until the deferred queue is empty, so a live event cannot overtake
+    /// the wake (upstream `lock.withPermit` around `takeRunningWake` / `replay`).
     fn replay_wake_into_turn(&self, session_id: &str, wake: &Wake) {
         {
             let mut guard = self.inner.lock();
@@ -3546,16 +3574,21 @@ impl OpenCodeV2Session {
             }
         }
         self.replay(wake);
-        let deferred = {
-            let mut guard = self.inner.lock();
-            let Some(thread) = guard.threads.get_mut(session_id) else {
-                return;
+        loop {
+            let deferred = {
+                let mut guard = self.inner.lock();
+                let Some(thread) = guard.threads.get_mut(session_id) else {
+                    return;
+                };
+                if thread.replay_deferred.is_empty() {
+                    thread.replaying = false;
+                    break;
+                }
+                std::mem::take(&mut thread.replay_deferred)
             };
-            thread.replaying = false;
-            std::mem::take(&mut thread.replay_deferred)
-        };
-        for (event_type, data) in deferred {
-            self.on_event(&event_type, &data);
+            for (event_type, data) in deferred {
+                self.on_held_event(&event_type, &data);
+            }
         }
     }
 
@@ -3658,6 +3691,30 @@ impl Drop for OpenCodeV2Session {
             handle.abort();
         }
     }
+}
+
+/// The session whose wake replay should queue this live event (upstream's lock around `replay`).
+/// A child session queues on its parent while that parent is replaying.
+fn replaying_holder(guard: &V2Inner, session_id: Option<&str>, data: &Value) -> Option<String> {
+    let session_id = session_id?;
+    if guard
+        .threads
+        .get(session_id)
+        .is_some_and(|thread| thread.replaying)
+    {
+        return Some(session_id.to_owned());
+    }
+    let parent = guard
+        .children
+        .get(session_id)
+        .cloned()
+        .or_else(|| str_field(data, "parentID"));
+    parent.filter(|parent| {
+        guard
+            .threads
+            .get(parent)
+            .is_some_and(|thread| thread.replaying)
+    })
 }
 
 /// The events that end an execution (upstream `executionEnd`).

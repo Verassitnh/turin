@@ -2985,6 +2985,111 @@ async fn v2_reconcile_settles_a_background_child_gone_from_active() {
     session.close().await;
 }
 
+/// Reconnect drops wakes and reports only for sessions under a root that still owes work.
+#[tokio::test]
+async fn v2_reconcile_discards_wakes_only_for_sessions_that_owe_work() {
+    let creates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let next = Arc::clone(&creates);
+    let script = script(move |request| {
+        if request.method == "GET" && request.target.contains("/api/session/active") {
+            return FakeResponse::json(
+                200,
+                r#"{"data":{"ses_bg":{},"ses_child":{},"ses_keep":{}}}"#,
+            );
+        }
+        if request.method == "PUT" || request.method == "PATCH" {
+            return FakeResponse::empty(204);
+        }
+        if request.method == "GET" && request.target.contains("/api/model") {
+            return FakeResponse::json(200, r#"{"location":{},"data":[]}"#);
+        }
+        if request.method == "POST" && request.target.ends_with("/api/session") {
+            let id = if next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                "ses_bg"
+            } else {
+                "ses_keep"
+            };
+            return FakeResponse::json(200, &format!(r#"{{"data":{{"id":"{id}"}}}}"#));
+        }
+        FakeResponse::json(200, r#"{"data":{}}"#)
+    })
+    .await;
+    let session = OpenCodeV2Session::open(
+        ProviderInstanceId::new("opencode").unwrap(),
+        ProviderSessionId::new("provider-session").unwrap(),
+        "/work",
+        V2Client::connect(&script.server.url, "pw").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut events = session.events();
+    let ensure = |thread_id: &str| ProviderAdapterV2EnsureThreadInput {
+        thread_id: ThreadId::new(thread_id).unwrap(),
+        title: None,
+        model_selection: model(),
+        runtime_policy: policy(RuntimeMode::FullAccess),
+        provider_session_id: None,
+        existing_provider_thread: None,
+    };
+    let bg = session.ensure_thread(ensure("thread_bg")).await.unwrap();
+    let _keep = session.ensure_thread(ensure("thread_keep")).await.unwrap();
+    session.start_turn(turn(bg, "hi")).await.unwrap();
+    for frame in [
+        json!({"id":"d1","type":"session.tool.called","data":{"sessionID":"ses_bg","id":"call_bg","name":"subagent","input":{"background":true,"prompt":"work"}}}),
+        json!({"id":"d2","type":"session.created","data":{"sessionID":"ses_child","parentID":"ses_bg"}}),
+        json!({"id":"d3","type":"session.tool.progress","data":{"sessionID":"ses_bg","id":"call_bg","metadata":{"sessionID":"ses_child","status":"running"}}}),
+        json!({"id":"d4","type":"session.execution.succeeded","data":{"sessionID":"ses_bg"}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    events_until(&mut events, |value| {
+        value["type"] == "provider_turn.updated" && value["provider_turn"]["status"] == "completed"
+    })
+    .await;
+    for frame in [
+        json!({"id":"d5","type":"session.inbox.enqueued","data":{"sessionID":"ses_child","inboxID":"inbox_child","item":{"type":"synthetic","payload":{"text":"nested","metadata":{"source":"subagent","childID":"ses_nested"}}}}}),
+        json!({"id":"d6","type":"session.execution.started","data":{"sessionID":"ses_bg"}}),
+        json!({"id":"d7","type":"session.execution.started","data":{"sessionID":"ses_keep"}}),
+        json!({"id":"d8","type":"session.inbox.enqueued","data":{"sessionID":"ses_keep","inboxID":"inbox_keep","item":{"type":"synthetic","payload":{"text":"keep me","metadata":{"source":"subagent","childID":"ses_other"}}}}}),
+    ] {
+        script.frames.send(Some(sse(&frame.to_string()))).unwrap();
+    }
+    let mut parked = false;
+    for _ in 0..50 {
+        if session.test_has_wake("ses_bg")
+            && session.test_has_wake("ses_keep")
+            && session.test_has_report("ses_child")
+            && session.test_has_report("ses_keep")
+        {
+            parked = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(parked, "wakes and reports should be queued before reconcile");
+    session
+        .reconcile_within(Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(
+        !session.test_has_wake("ses_bg"),
+        "a root that owes work drops its wake"
+    );
+    assert!(
+        !session.test_has_report("ses_child"),
+        "a nested session of that root drops its report"
+    );
+    assert!(
+        !session.test_has_wake("ses_keep"),
+        "a root that only holds a wake still owes that work"
+    );
+    assert!(
+        !session.test_has_report("ses_keep"),
+        "a root that holds a report still owes that work"
+    );
+    session.close().await;
+}
+
 /// A Stop interrupts a child announced by `session.created` before the call attaches it.
 #[tokio::test]
 async fn v2_stop_interrupts_an_announced_child_before_the_call_attaches() {

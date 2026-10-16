@@ -486,6 +486,10 @@ impl OpenCodeV2Session {
         }
         let lost: Vec<OpenSubagent> = {
             let mut guard = self.inner.lock();
+            // Snapshot before lost calls leave the maps. Upstream builds `background` first
+            // (`subagent === undefined && hasBackground`), then discards wakes and reports
+            // only for `sessionsOf` of those roots.
+            let discard_sessions = background_sessions_of(&guard);
             let lost: Vec<OpenSubagent> = guard
                 .background
                 .iter()
@@ -510,7 +514,7 @@ impl OpenCodeV2Session {
             }
             let mut lost = lost;
             lost.extend(unattached);
-            for session_id in guard.threads.keys().cloned().collect::<Vec<_>>() {
+            for session_id in discard_sessions {
                 if let Some(wakes) = guard.wakes.remove(&session_id) {
                     for wake in wakes {
                         wake.dropped.store(true, Ordering::SeqCst);
@@ -600,6 +604,24 @@ impl OpenCodeV2Session {
     }
 
     /// Whether a held wake for `session_id` has parked an event whose payload contains `needle`.
+    #[cfg(test)]
+    pub(in crate::adapter) fn test_has_wake(&self, session_id: &str) -> bool {
+        self.inner
+            .lock()
+            .wakes
+            .get(session_id)
+            .is_some_and(|wakes| !wakes.is_empty())
+    }
+
+    #[cfg(test)]
+    pub(in crate::adapter) fn test_has_report(&self, session_id: &str) -> bool {
+        self.inner
+            .lock()
+            .reports
+            .get(session_id)
+            .is_some_and(|reports| !reports.is_empty())
+    }
+
     #[cfg(test)]
     pub(in crate::adapter) fn test_wake_contains(&self, session_id: &str, needle: &str) -> bool {
         let guard = self.inner.lock();
@@ -3838,6 +3860,70 @@ impl Drop for OpenCodeV2Session {
             handle.abort();
         }
     }
+}
+
+/// Roots that still owe work (`subagent === undefined && hasBackground`), plus every session
+/// `sessionsOf` reaches from them.
+fn background_sessions_of(guard: &V2Inner) -> Vec<String> {
+    let mut discard = Vec::new();
+    for root in guard.threads.keys() {
+        let sessions = sessions_of(guard, root);
+        if sessions.iter().any(|id| session_owes_work(guard, id)) {
+            discard.extend(sessions);
+        }
+    }
+    discard.sort();
+    discard.dedup();
+    discard
+}
+
+/// A thread's session and the subagent sessions under it (upstream `sessionsOf`).
+fn sessions_of(guard: &V2Inner, root: &str) -> Vec<String> {
+    let mut sessions = vec![root.to_owned()];
+    let mut extra: Vec<String> = guard
+        .children
+        .keys()
+        .filter(|child| child.as_str() != root && session_owns(guard, root, child))
+        .cloned()
+        .collect();
+    for open in guard.background.values().chain(guard.unattached_background.values()) {
+        if open.child_session.is_empty() {
+            continue;
+        }
+        if sessions.iter().any(|id| id == &open.parent_session)
+            || extra.iter().any(|id| id == &open.parent_session)
+            || open.parent_session == root
+        {
+            if open.child_session != root
+                && sessions.iter().all(|id| id != &open.child_session)
+                && extra.iter().all(|id| id != &open.child_session)
+            {
+                extra.push(open.child_session.clone());
+            }
+        }
+    }
+    sessions.extend(extra);
+    sessions
+}
+
+/// Upstream `owesWork`: a held wake, a queued report, or a background call on this session.
+fn session_owes_work(guard: &V2Inner, session_id: &str) -> bool {
+    guard
+        .wakes
+        .get(session_id)
+        .is_some_and(|wakes| !wakes.is_empty())
+        || guard
+            .reports
+            .get(session_id)
+            .is_some_and(|reports| !reports.is_empty())
+        || guard
+            .background
+            .values()
+            .any(|open| open.parent_session == session_id)
+        || guard
+            .unattached_background
+            .values()
+            .any(|open| open.parent_session == session_id)
 }
 
 /// Whether `owner` is `root` or a subagent session under it (upstream `sessionsOf` membership

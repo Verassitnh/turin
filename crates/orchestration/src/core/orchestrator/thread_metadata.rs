@@ -21,14 +21,11 @@ use super::Orchestrator;
 use super::dispatch::{Decision, command_id, dispatch_failure};
 use super::provider_detach;
 use super::thread_mutation::{load_thread, thread_event};
-use super::thread_pull_request::{
-    legacy_pull_request_key_string, legacy_pull_request_link, pull_request_key_string,
-};
+use super::thread_pull_request::relink;
 use crate::pipeline::effect_outbox::{EffectRequest, PendingEffect, ThreadTitleKind};
 use crate::pipeline::orchestrator_port::{
     OrchestratorError, OrchestratorPort, RecordField, RecordFilter,
 };
-use crate::projection::shared::thread_pull_requests::thread_pull_requests_of;
 use turin_shared::orchestration_v2_thread_error::{
     latest_root_provider_failure, usage_limit_blocked_run,
 };
@@ -291,32 +288,6 @@ fn previous_snooze_reset_wake(thread: &OrchestrationV2AppThread) -> bool {
         return false;
     };
     parse_millis(&previous.reset_at) == Some(millis(*until))
-}
-
-/// The pull-request links a relink leaves behind: every link except the one
-/// that matches the old or the new legacy key, then the new link (with its watch).
-fn relink(
-    thread: &OrchestrationV2AppThread,
-    linked: Option<&turin_contracts::thread_pull_request::ThreadLinkedPullRequest>,
-    now: UtcDateTime,
-) -> Vec<turin_contracts::thread_pull_request::ThreadPullRequestLink> {
-    let old_key = thread
-        .linked_pull_request
-        .as_ref()
-        .and_then(Option::as_ref)
-        .map(legacy_pull_request_key_string);
-    let new_key = linked.map(legacy_pull_request_key_string);
-    let mut links: Vec<_> = thread_pull_requests_of(thread)
-        .into_iter()
-        .filter(|link| {
-            let key = pull_request_key_string(link);
-            Some(&key) != old_key.as_ref() && Some(&key) != new_key.as_ref()
-        })
-        .collect();
-    if let Some(linked) = linked {
-        links.push(legacy_pull_request_link(thread, linked, now));
-    }
-    links
 }
 
 fn title_generation_effect(

@@ -16,9 +16,10 @@ use turin_persistence::ReceiptStatus;
 use turin_provider_core::id_allocator::IdAllocator;
 
 use super::{
-    Orchestrator, message_dispatch, prepared_run, queue_start, queued_run, run_stop,
-    runtime_request, secret_request, thread_archive, thread_delete, thread_fork, thread_lifecycle,
-    thread_merge_back, thread_metadata, thread_mutation,
+    Orchestrator, checkpoint_rollback, delegated_commands, delegated_request, message_dispatch,
+    prepared_run, queue_start, queued_run, run_stop, runtime_request, secret_request,
+    thread_archive, thread_delete, thread_fork, thread_lifecycle, thread_merge_back,
+    thread_metadata, thread_mutation, thread_pull_request,
 };
 use crate::pipeline::command_receipt_store::CommandReceipt;
 use crate::pipeline::dispatch_mode_limit::{
@@ -481,10 +482,35 @@ pub async fn dispatch_with_limit(
     limit: Option<&DispatchModeLimit>,
 ) -> Result<DispatchResult, OrchestratorError> {
     let thread_id = command_thread_id(&command).clone();
-    orchestrator
-        .locks
-        .with_lock(&thread_id, || dispatch_locked(orchestrator, command, limit))
-        .await
+    // Follow-up intake into an app-owned child writes the parent's task rows,
+    // so it serializes with Stop and finalize on the parent lock, taken before
+    // the child's.
+    let parent_thread_id = match &command {
+        OrchestrationV2ServerCommand::Client(
+            turin_contracts::orchestration_v2::OrchestrationV2Command::MessageDispatch {
+                created_by,
+                creation_source,
+                ..
+            },
+        ) if *created_by == turin_contracts::orchestration_v2::OrchestrationV2Actor::User
+            || *creation_source
+                == turin_contracts::orchestration_v2::OrchestrationV2CreationSource::Mcp =>
+        {
+            orchestrator
+                .app_owned_subagent_parent_thread_id(&thread_id)
+                .await?
+        }
+        _ => None,
+    };
+    let dispatch = || {
+        orchestrator
+            .locks
+            .with_lock(&thread_id, || dispatch_locked(orchestrator, command, limit))
+    };
+    match parent_thread_id {
+        Some(parent) => orchestrator.locks.with_lock(&parent, dispatch).await,
+        None => dispatch().await,
+    }
 }
 
 /// `refuseAboveDispatchModeLimit`: fails when a limited sender's command would
@@ -648,6 +674,16 @@ async fn run_post_commit_hooks(
             .await
             .map_err(|cause| dispatch_error(command_id, command_type, cause))?;
     }
+    // A task wake policy names its parent thread, which is the command's thread.
+    if matches!(
+        command_type,
+        "notification.delivery.accept" | "delegated_task.wake-policy"
+    ) {
+        orchestrator
+            .offer_delegated_completion_deliveries(thread_id)
+            .await
+            .map_err(|cause| dispatch_error(command_id, command_type, cause))?;
+    }
     Ok(())
 }
 
@@ -761,6 +797,18 @@ async fn decide(
         return Ok(true);
     }
     if queued_run::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if thread_pull_request::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if checkpoint_rollback::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if delegated_commands::decide(orchestrator, command, decision).await? {
+        return Ok(true);
+    }
+    if delegated_request::decide(orchestrator, command, decision).await? {
         return Ok(true);
     }
     if secret_request::decide(orchestrator, command, decision).await? {

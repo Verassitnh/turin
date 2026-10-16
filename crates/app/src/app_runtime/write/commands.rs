@@ -344,6 +344,24 @@ impl Commands {
         .await
     }
 
+    /// Cross-thread message search for the sidebar and palette
+    /// (`ThreadSearch.ts`): the newest best message per thread.
+    pub async fn search_messages(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<turin_contracts::thread_search::OrchestrationThreadSearchMatch>, CommandError>
+    {
+        let input = turin_contracts::thread_search::OrchestrationSearchThreadsInput {
+            query: turin_contracts::TrimmedString::new(query),
+            limit: Some(limit),
+        };
+        turin_orchestration::projection::thread_search::search(&self.runtime.stores.db, input)
+            .await
+            .map(|result| result.matches)
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
     /// Any thread command that is just `{type, commandId, threadId, ..extra}`
     /// (archive, delete, pin, ...).
     pub async fn thread_command(

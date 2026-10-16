@@ -316,6 +316,23 @@ impl ProjectRoots for UnwiredProjectRoots {
     }
 }
 
+/// [`WorkspaceClaimReads`](crate::reactors::checkpoint_restore_safety::WorkspaceClaimReads)
+/// before the projection-backed reader is handed in. Every read fails, so a
+/// file restore is never judged safe without knowing the other threads.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnwiredWorkspaceClaims;
+
+#[async_trait]
+impl crate::reactors::checkpoint_restore_safety::WorkspaceClaimReads for UnwiredWorkspaceClaims {
+    async fn other_thread_claims(
+        &self,
+        _thread_id: &ThreadId,
+    ) -> Result<Vec<crate::reactors::checkpoint_restore_safety::OtherWorkspaceClaim>, BoxError>
+    {
+        Err("workspace claims are not wired (T13c composition root)".into())
+    }
+}
+
 /// The provider-side seams message dispatch reads and writes. Upstream takes
 /// them from the Effect context; here the composition root passes them in.
 #[derive(Clone)]
@@ -334,6 +351,9 @@ pub struct DispatchSeams {
     /// The default drops them.
     pub continuation_requests:
         Arc<turin_provider_core::provider_continuation_requests::ProviderContinuationRequests>,
+    /// What other threads can write to, for the file-restore check of
+    /// `checkpoint.rollback` (`ProjectionWorkspaceClaims`).
+    pub workspace_claims: Arc<dyn crate::reactors::checkpoint_restore_safety::WorkspaceClaimReads>,
 }
 
 impl Default for DispatchSeams {
@@ -348,6 +368,7 @@ impl Default for DispatchSeams {
             continuation_requests: Arc::new(
                 turin_provider_core::provider_continuation_requests::ProviderContinuationRequests::dropping(),
             ),
+            workspace_claims: Arc::new(UnwiredWorkspaceClaims),
         }
     }
 }

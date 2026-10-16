@@ -191,6 +191,22 @@ impl OrchestratorPort for MockOrchestrator {
         Ok(0)
     }
 
+    async fn search_thread_stream(
+        &self,
+        input: &turin_contracts::orchestration_v2::OrchestrationV2SearchThreadInput,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            turin_contracts::orchestration_v2::OrchestrationV2SearchThreadResult,
+        >,
+        OrchestratorError,
+    > {
+        Err(OrchestratorError::projection(
+            input.thread_id.clone(),
+            "search is not scripted",
+        ))
+    }
+
     async fn restart_continuation_pending(&self, run: &OrchestrationV2Run) -> bool {
         (self.restart_pending.lock())(run)
     }

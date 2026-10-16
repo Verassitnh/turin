@@ -203,6 +203,13 @@ async fn send_message_streams_a_fake_claude_reply_into_the_store() {
         "Respond with exactly: first fixture turn complete"
     );
     assert_eq!(user.id, receipt.message_id);
+
+    // Sidebar message search finds the thread by its reply.
+    let found = commands
+        .search_messages("fixture turn", 10)
+        .await
+        .expect("search");
+    assert!(found.iter().any(|hit| hit.thread_id == thread), "{found:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

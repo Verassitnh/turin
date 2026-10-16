@@ -6,12 +6,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use turin_contracts::orchestration_v2::{
+    OrchestrationV2ServerCommand, OrchestrationV2ThreadProjection,
+};
 use turin_contracts::provider_instance::ProviderInstanceId;
 use turin_contracts::settings::ServerSettings;
-use turin_contracts::{ProjectId, ProviderSessionId, RunId, ThreadId};
+use turin_contracts::{MessageId, ProjectId, ProviderSessionId, RunId, ThreadId};
 use turin_orchestration::core::orchestrator::services::{
     CheckpointScopes, PrepareRootRunScope, ProjectRoots, ProviderInstanceSettings,
 };
+use turin_orchestration::core::provider_continuation_service::ContinuationThreads;
 use turin_orchestration::core::provider_session_manager::ProviderSessionManager;
 use turin_orchestration::core::run_finalization_service::{
     RunFinalizationObserver, RunFinalizationRefreshError,
@@ -20,6 +24,9 @@ use turin_orchestration::pipeline::orchestrator_port::BoxError;
 use turin_orchestration::pipeline::seams::{
     ProjectDirectory, ProjectSummary, ProviderSessionLookup, RuntimeTaskStopper,
     ServerSettingsSource, SessionTaskStopper, instance_enabled_for_project,
+};
+use turin_orchestration::pipeline::thread_management_service::{
+    ThreadManagementError, ThreadManagementService,
 };
 use turin_orchestration::projection::project_store::ProjectStore;
 use turin_orchestration::reactors::checkpoint_service::{self, CheckpointService};
@@ -141,5 +148,27 @@ impl RunFinalizationObserver for NoWorkspaceRefresh {
         _run_id: &RunId,
     ) -> Result<(), RunFinalizationRefreshError> {
         Ok(())
+    }
+}
+
+/// `ContinuationThreads` for the thread-management service: `Arc<ThreadManagementCore>`
+/// is private to it, so this delegates through the service's deref.
+pub struct ThreadsForContinuations(pub Arc<ThreadManagementService>);
+
+#[async_trait]
+impl ContinuationThreads for ThreadsForContinuations {
+    async fn records(
+        &self,
+        thread_id: &ThreadId,
+        message_ids: Vec<MessageId>,
+    ) -> Result<OrchestrationV2ThreadProjection, BoxError> {
+        ContinuationThreads::records(&**self.0, thread_id, message_ids).await
+    }
+
+    async fn dispatch(
+        &self,
+        command: OrchestrationV2ServerCommand,
+    ) -> Result<(), ThreadManagementError> {
+        ContinuationThreads::dispatch(&**self.0, command).await
     }
 }

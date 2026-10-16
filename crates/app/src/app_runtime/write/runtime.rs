@@ -28,6 +28,7 @@ use turin_orchestration::core::orchestrator::delegated_task::LateDelegatedTaskRe
 use turin_orchestration::core::orchestrator::services::{
     DispatchSeams, ReconcileTrigger, RestartRecovery as _,
 };
+use turin_orchestration::core::provider_continuation_service::ProviderContinuationService;
 use turin_orchestration::core::provider_event_ingestor::ProviderEventIngestor;
 use turin_orchestration::core::provider_runtime_recovery_service::ProviderRuntimeRecoveryService;
 use turin_orchestration::core::provider_session_manager::{
@@ -59,10 +60,14 @@ use turin_orchestration::pipeline::thread_management_service::{
 use turin_orchestration::reactors::checkpoint_capture_service::CheckpointCaptureService;
 use turin_orchestration::reactors::checkpoint_git::TurinCheckpointGit;
 use turin_orchestration::reactors::checkpoint_service::CheckpointService;
+use turin_orchestration::reactors::workspace_claims::ProjectionWorkspaceClaims;
+use turin_provider_core::id_allocator::IdAllocator;
 use turin_provider_core::provider_adapter_registry::ProviderAdapterRegistry;
+use turin_provider_core::provider_continuation_requests::ProviderContinuationRequests;
 
 use super::adapters::{
     HostSettings, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes, StoredProjects,
+    ThreadsForContinuations,
 };
 use super::effects::TurinEffectExecutor;
 use super::providers::Providers;
@@ -75,6 +80,7 @@ pub struct WriteRuntime {
     pub threads: Arc<ThreadManagementService>,
     pub sessions: Arc<ProviderSessionManager>,
     effects: EffectDaemon,
+    _continuations: ProviderContinuationService,
     recovery: Arc<ProviderRuntimeRecoveryService>,
     _terminal_runs: AbortOnDropHandle<()>,
 }
@@ -173,6 +179,8 @@ impl WriteRuntime {
             late_delegated.clone(),
         ));
 
+        let continuation_requests = Arc::new(ProviderContinuationRequests::queue());
+
         // The decider.
         let switch_planner = Arc::new(ProviderSwitchService::new(Arc::new(
             ProviderAdapterRegistry::from_instances(instances.clone()),
@@ -191,9 +199,13 @@ impl WriteRuntime {
                 sessions: sessions.clone(),
                 switch_planner,
                 provider_instances: host_settings.clone(),
-                // Wake offers are dropped until the continuation worker
-                // (`ProviderContinuationService`) is wired to a queue.
-                ..DispatchSeams::default()
+                // `checkpoint.rollback` file restore: without these it fails closed.
+                workspace_claims: Arc::new(ProjectionWorkspaceClaims::new(
+                    projection.clone(),
+                    Arc::clone(&stores.projects),
+                )),
+                // Wake offers go to the continuation service started below.
+                continuation_requests: continuation_requests.clone(),
             }),
         );
         let threads = Arc::new(ThreadManagementService::new(
@@ -207,6 +219,11 @@ impl WriteRuntime {
         ));
 
         late_threads.bind(threads.clone());
+        let continuations = ProviderContinuationService::start(
+            IdAllocator,
+            continuation_requests,
+            Arc::new(ThreadsForContinuations(threads.clone())),
+        );
         late_delegated.bind(orchestrator.clone());
 
         // Startup order (upstream serverRuntimeStartup): reconcile runs that
@@ -256,6 +273,7 @@ impl WriteRuntime {
             threads,
             sessions,
             effects,
+            _continuations: continuations,
             recovery,
             _terminal_runs: terminal_runs,
         }))

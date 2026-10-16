@@ -7525,6 +7525,7 @@ dependencies = [
  "chrono",
  "futures",
  "indexmap",
+ "markdown",
  "parking_lot",
  "pretty_assertions",
  "regex",

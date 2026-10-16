@@ -15,11 +15,11 @@ use super::tests::{message_command, thread};
 use crate::pipeline::orchestrator_port::OrchestratorPort;
 use crate::projection::test_support::{apply_all, event, message};
 
-const TASK: &str = "node:task:child";
+pub(super) const TASK: &str = "node:task:child";
 
 /// A running parent with an app-owned task whose child thread has a run that
 /// ended (`completed`) with an assistant answer. Returns the child's run.
-async fn child_with_result(h: &Steer, wake: &str) -> OrchestrationV2Run {
+pub(super) async fn child_with_result(h: &Steer, wake: &str) -> OrchestrationV2Run {
     let parent_run = h.running_run("thread:parent").await;
     let projection = h
         .orchestrator
@@ -112,7 +112,9 @@ async fn child_with_result(h: &Steer, wake: &str) -> OrchestrationV2Run {
     serde_json::from_value(value).expect("run decodes")
 }
 
-async fn parent_task(h: &Steer) -> turin_contracts::orchestration_v2::OrchestrationV2Subagent {
+pub(super) async fn parent_task(
+    h: &Steer,
+) -> turin_contracts::orchestration_v2::OrchestrationV2Subagent {
     h.orchestrator
         .get_thread_projection(&thread("thread:parent"))
         .await

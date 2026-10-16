@@ -6,6 +6,13 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 
 ## Roster and budget
 
+**Current policy (user, 2026-10-15 ~23:55 UTC; supersedes the table below):**
+- Claude-plan usage is scarce, Cursor usage is plentiful. Implementation goes through the `cursor` provider: `composer-2.5` (bulk ports), `grok-4.7` (backend). Cursor only runs Grok and Composer models. Sonnet (claudeAgent, scarce) only for the critical path; no cap otherwise.
+- `claudeAgent` Haiku: Workflow QC and small fixes only. PM (Opus) stays lean.
+- Never Codex. Pushing to GitHub (origin) is allowed. Cloud agents only if the Mac is truly resource-bound.
+- Never interrupt running threads to switch models; switch on the next continuation.
+- Builds: rustc-throttle (5 slots) + sccache shared cache (`sccache.noindex`, 20G).
+
 | Agent | Model | Cost | Use for |
 |---|---|---|---|
 | PM | Claude Opus 5.5 | $$$$ | Planning, briefs, merges, conflict calls. No implementation. |
@@ -125,11 +132,11 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | ID | Task | Owns | Agent | Status |
 |---|---|---|---|---|
 | T09a | Codex app-server protocol: codegen types from JSON schema + stdio JSON-RPC client | `crates/codex-app-server` | Codex → Grok | done → QC pending |
-| T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Codex | r3 active (Codex re-auth) |
+| T09 | Codex provider: CodexAdapterV2 + provider/Codex* | `crates/provider-codex` | Haiku | T09d r2 active (ChatGPT auth, managed runtime); then combined T09+T09d QC |
 | T10a | Claude CLI protocol crate (replaces @anthropic-ai/claude-agent-sdk) | `crates/claude-protocol` | Codex → Grok | QC FAIL (1 high: requests hang after EOF; exit status not surfaced) → r3 fix (Grok) |
 | T10 | Claude provider: ClaudeAdapterV2 + provider/Claude* | `crates/provider-claude` | Codex | r3 active (Codex re-auth) |
 | T11a | OpenCode transport: version probe, v1+v2 server runtimes, HTTP clients, SSE | `crates/provider-opencode` | Grok | done → QC wf_118a9a5d-526 |
-| T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Grok | active (base: stage) |
+| T11 | OpenCode adapters (v1 then v2) | `crates/provider-opencode` | Haiku | QC wf_3c934e73-6da running |
 | T12a | ACP protocol crate (port of effect-acp) | `crates/acp` | Codex → Grok | done → QC wf_5bf4fe41-dd5 |
 | T12 | Cursor provider via `cursor-agent acp` (AcpAdapterV2 Cursor flavor) | `crates/provider-cursor` | Grok | r1 done (24 tests, local traits) → r2 wiring to real provider-core |
 | T13a | Orchestrator read side: ProjectionStore + reads/paging/search/streams | `crates/orchestration/src/projection/**` | Codex → Sonnet | r2 active (Codex usage limit again) |
@@ -146,7 +153,7 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 | T17 | Composer: editor, mentions, model picker, attachments, stash, queue | `crates/app/src/composer` | Sonnet+Haiku | done (merged; QC PASS); backlog: queue drag, tasks drawer, usage-limits banner |
 | T18 | Diff: changed files tree, turn/thread diffs, checkpoints | `crates/app/src/diff` | Opus | todo |
 | T19 | GitHub PR views: list, detail tabs, checks, reviews, stacks, guide | `crates/app/src/pull_request` | Opus | todo |
-| T20 | Settings + keybindings UI | `crates/app/src/settings` | Opus | todo |
+| T20 | Settings + keybindings UI | `crates/app/src/settings` | Haiku | QC FAIL fixed (T20c); T20d GitHub-token redaction + premerge active |
 
 ### Wave 5: glue
 
@@ -163,3 +170,20 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 |---|---|---|---|---|
 | T24 | Turin app icon: T3 Code icon with a single T | `assets/**` | Opus | done (merged; T at 1.0×). 1 low (--keep-macos-png normalisation) → r4 |
 | T24b | Wire icon: dev Dock icon, bundle .icns/actool, in-app mark | `crates/app` | Opus | todo (after T24 + T03 merge) |
+
+## PM status 2026-10-15 23:30 UTC
+- Merged since last update: T19, T17, N1 (main workspace check green).
+- QC running: T11, T13d, U3 (U3a+U3b combined on task/U3b-shell-state).
+- Active: T22a (live read path), DEDUP-1, T24b, T10c (QC fixes), T13c-F/D2/D4, T13e r2, T09d r2, T20d, U1/U2 (Sonnet), U3c (chat find/scripts/clipboard), U3d (thread actions/right panel), N1b (runtime async fs), T07 r4.
+
+
+## PM status 2026-10-15 23:50 UTC
+- Coverage (needed ≈ 421.6k upstream lines after cuts): on some branch 71.6% ported + 12.6% partial; on main 47.9% + 7.7%.
+- Merged since 23:30: U3a+U3b. QC: T11 FAIL (T11c fixing), T13d FAIL (fix round), U3 PASS (merged).
+- New logic bundles: R1 provider registry/auth/maintenance, R2 ACP session runtime + cursor accounts, R3 settings/theme logic, R4 composer/sidebar/client-runtime logic, R5 orchestration extras (context handoff, checkpoint rollback, workflow*) + storage cleanup.
+- Queued for Sonnet (after U1/U2): settings UI (theme editor etc.), chat UI leftovers (T16 tsx), ui primitives (T03 tsx), composer UI leftovers, N8 provider update UI, N7b routes, N9 native shell, N10/N11.
+
+## PM status 2026-10-16 00:05 UTC
+- Policy switch (see Roster): Cursor for implementation; continuations of critical-path Haiku tasks (T13c-F, T13e, T11c, T13d fix, T22a) move to cursor/claude-sonnet-5-5 when their current runs end (no interrupts).
+- New UI wave on Cursor: S1 settings UI leftovers (sonnet, from task/T20-settings), S2 chat UI leftovers (sonnet), S3 ui primitives + composer UI (sonnet), S4 provider update UI + prompt links + content search + open-in (composer-2.5).
+- Held for capacity: S5 app shell routes (N7b) + native macOS shell (N9), S6 PR/diff/sidebar leftovers (T19/T18/T15). Cloud agents only if the Mac is truly bound.

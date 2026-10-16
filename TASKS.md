@@ -187,3 +187,11 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 - Policy switch (see Roster): Cursor for implementation; continuations of critical-path Haiku tasks (T13c-F, T13e, T11c, T13d fix, T22a) move to cursor/claude-sonnet-5-5 when their current runs end (no interrupts).
 - New UI wave on Cursor: S1 settings UI leftovers (sonnet, from task/T20-settings), S2 chat UI leftovers (sonnet), S3 ui primitives + composer UI (sonnet), S4 provider update UI + prompt links + content search + open-in (composer-2.5).
 - Held for capacity: S5 app shell routes (N7b) + native macOS shell (N9), S6 PR/diff/sidebar leftovers (T19/T18/T15). Cloud agents only if the Mac is truly bound.
+
+## Definition of done (goal set 2026-10-16)
+1. Coverage: every KEEP upstream file in docs/inventory/upstream-coverage.md is ported on main (coverage script: `none` = 0, every `partial` resolved or logged as a deviation).
+2. QC: every merged branch has a QC PASS report in docs/qc/ (FAIL → fix → re-QC).
+3. App works end to end (T22): real data read path, send/stop/interrupt write path, each provider (Claude, Codex, Cursor, OpenCode) smoke-tested against fake CLIs/servers; `cargo run -p turin` with a seeded dev DB.
+4. UI QC: look-and-feel workflow over every screen (screenshots light/dark vs upstream classes), all UI bugs fixed, re-checked.
+5. Full gate on main: `cargo check --workspace`, per-crate `scripts/check.sh` all green.
+Capacity notes: rustc slots 4 (CPU was pinned at 97%), sccache on; cloud agents not useful for UI (macOS-only GPUI) — backend only if needed.

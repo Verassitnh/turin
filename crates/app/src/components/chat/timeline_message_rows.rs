@@ -355,6 +355,7 @@ fn collapsible_user_message_body(message: &ChatMessage, cx: &RowCx) -> AnyElemen
     let markdown = ChatMarkdown::new(("user-md", cx.order), text)
         .line_breaks(true)
         .full_foreground(true)
+        .skills(cx.snapshot.skills.clone())
         .document_order(cx.order + 1);
     let body = div()
         .relative()

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, CursorStyle, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ObjectFit, ParentElement as _, PathPromptOptions, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Window, div, img, px, rems,
+    AnyElement, AppContext as _, Context, CursorStyle, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathPromptOptions, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px, rems,
 };
 
 use crate::components::chat::chat_media;
@@ -25,26 +25,15 @@ use crate::composer::prompt_history::{
 };
 use crate::composer::view_model::{ComposerViewModel, SessionPhase};
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
+use crate::composer::views::image_thumbnail::ComposerImageThumbnail;
 use crate::composer::views::language_picker_view::{LanguagePickerEvent, LanguagePickerView};
 use crate::composer::views::model_picker_view::{ModelPickerEvent, ModelPickerView};
 use crate::composer::views::prompt_editor::CommandKey;
+use crate::state::helpers::image_compression::ImageFile;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, TEXT_3XS, TEXT_XS};
 use crate::ui::{Icon, IconName, Tooltip};
-
-fn image_format(mime: &str) -> Option<ImageFormat> {
-    Some(match mime {
-        "image/png" => ImageFormat::Png,
-        "image/jpeg" | "image/jpg" => ImageFormat::Jpeg,
-        "image/webp" => ImageFormat::Webp,
-        "image/gif" => ImageFormat::Gif,
-        "image/svg+xml" => ImageFormat::Svg,
-        "image/bmp" => ImageFormat::Bmp,
-        "image/tiff" => ImageFormat::Tiff,
-        _ => return None,
-    })
-}
 
 fn guess_mime(name: &str) -> String {
     if let Some(mime) = infer_image_mime_type_from_name(name) {
@@ -242,8 +231,16 @@ impl ChatComposer {
                 let id = image.id.clone();
                 let name = image.name.clone();
                 let gallery = gallery.clone();
-                let picture = image_format(&image.mime_type)
-                    .map(|format| Arc::new(Image::from_bytes(format, image.data.as_ref().clone())));
+                let fallback = div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .px_1()
+                    .text_size(TEXT_3XS.size)
+                    .text_color(theme.secondary_label)
+                    .child(name.clone())
+                    .into_any_element();
                 div()
                     .id(("composer-image", image.id.len()))
                     .group("attachment")
@@ -264,22 +261,15 @@ impl ChatComposer {
                             }
                         }
                     })
-                    .child(match picture {
-                        Some(picture) => img(picture)
-                            .size_full()
-                            .rounded(RADIUS_LG)
-                            .object_fit(ObjectFit::Cover)
-                            .into_any_element(),
-                        None => div()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .px_1()
-                            .text_size(TEXT_3XS.size)
-                            .text_color(theme.secondary_label)
-                            .child(name.clone())
-                            .into_any_element(),
+                    .child(ComposerImageThumbnail {
+                        id: SharedString::from(format!("composer-thumbnail-{}", image.id)),
+                        file: ImageFile {
+                            name: image.name.clone(),
+                            mime_type: image.mime_type.clone(),
+                            bytes: image.data.clone(),
+                            last_modified: None,
+                        },
+                        fallback,
                     })
                     .child(self.remove_button(
                         ("remove-image", image.id.len()),

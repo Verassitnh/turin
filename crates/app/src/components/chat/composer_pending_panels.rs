@@ -48,11 +48,39 @@ pub(crate) enum BannerVariant {
     Warning,
 }
 
+/// `ComposerBanner.Root` `density`: the block padding of the surface
+/// (`--composer-banner-padding-block`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum BannerDensity {
+    /// `px-1 py-1`.
+    Default,
+    /// `py-1.25`.
+    Comfortable,
+    /// `px-3 py-3`.
+    Spacious,
+}
+
 /// `ComposerBanner.Attachment` + `Root`: a surface that tucks under the
 /// composer's top edge by the overlap.
 pub(crate) fn banner_surface(
     variant: BannerVariant,
     spacious: bool,
+    child: AnyElement,
+    window: &Window,
+    theme: &AppTheme,
+) -> AnyElement {
+    let density = if spacious {
+        BannerDensity::Spacious
+    } else {
+        BannerDensity::Default
+    };
+    banner_surface_with_density(variant, density, child, window, theme)
+}
+
+pub(crate) fn banner_surface_with_density(
+    variant: BannerVariant,
+    density: BannerDensity,
     child: AnyElement,
     window: &Window,
     theme: &AppTheme,
@@ -82,6 +110,11 @@ pub(crate) fn banner_surface(
         ),
     };
     let overlap = attachment_overlap(window);
+    let padding_block = match density {
+        BannerDensity::Default => rems(0.25),
+        BannerDensity::Comfortable => rems(0.3125),
+        BannerDensity::Spacious => rems(0.75),
+    };
     div()
         .mx(rems(DRAWER_INSET_REM))
         .mb(-overlap)
@@ -97,13 +130,13 @@ pub(crate) fn banner_surface(
                     div()
                         .rounded_t(RADIUS_2XL)
                         .when_some(tint, |this, tint| this.bg(tint))
-                        .px(if spacious { rems(0.75) } else { rems(0.25) })
-                        .pt(if spacious { rems(0.75) } else { rems(0.25) })
-                        .pb((if spacious {
-                            window.rem_size() * 0.75
+                        .px(if density == BannerDensity::Spacious {
+                            rems(0.75)
                         } else {
-                            window.rem_size() * 0.25
-                        }) + overlap)
+                            rems(0.25)
+                        })
+                        .pt(padding_block)
+                        .pb(padding_block.to_pixels(window.rem_size()) + overlap)
                         .text_size(TEXT_XS.size)
                         .line_height(rems(1.))
                         .child(child),

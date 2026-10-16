@@ -16,9 +16,11 @@ use crate::composer::footer_layout::{
     should_use_compact_composer_footer, should_use_compact_composer_primary_actions,
 };
 use crate::composer::logic::ComposerSubmissionIntent;
-use crate::composer::model_display::get_trigger_display_model_name;
 use crate::composer::primary_actions::{
     PrimaryActions, SendButton, SendIcon, resolve_primary_actions,
+};
+use crate::composer::provider_model_picker::{
+    ProviderModelTriggerInput, resolve_provider_model_trigger,
 };
 use crate::composer::view_model::{ComposerViewModel, InteractionMode, RuntimeMode, SessionPhase};
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
@@ -26,6 +28,7 @@ use crate::composer::views::chrome::{
     ControlSize, composer_control, control_chevron, control_separator, floating, glass_surface,
     menu_row, track_bounds,
 };
+use crate::composer::views::provider_model_picker::provider_model_trigger_children;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, TEXT_SM, TEXT_XS, tw};
@@ -160,41 +163,41 @@ impl ChatComposer {
         vm: &Arc<ComposerViewModel>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.app_theme().clone();
-        let entry = vm.selected_entry();
-        let model = entry.and_then(|entry| {
-            crate::composer::model_picker::resolve_model_picker_selected_model(
-                Some(entry.driver_kind.as_str()),
-                &vm.selected_model,
-                &entry.models,
-            )
+        let options_for = |instance_id: &str| -> &[crate::composer::provider_state::ProviderModel] {
+            vm.providers
+                .iter()
+                .find(|entry| entry.instance_id == instance_id)
+                .map_or(&[][..], |entry| entry.models.as_slice())
+        };
+        let trigger = resolve_provider_model_trigger(&ProviderModelTriggerInput {
+            active_instance_id: &vm.selected_instance_id,
+            model: &vm.selected_model,
+            instance_entries: &vm.providers,
+            options_for: &options_for,
+            selected_models: None,
+            trigger_label: None,
+            shortcut_label: vm
+                .shortcut_labels
+                .get("modelPicker.toggle")
+                .map(String::as_str),
         });
-        let label = model
-            .map(get_trigger_display_model_name)
-            .unwrap_or_else(|| vm.selected_model.clone());
-        let driver = entry
-            .map(|entry| entry.driver_kind.clone())
-            .unwrap_or_default();
         let open = self.layer == Some(Layer::ModelPicker);
         let disabled = vm.is_send_busy || !vm.provider_catalog_known;
         let bounds = self.trigger_bounds.model.clone();
         composer_control("composer-model-picker", ControlSize::Sm, open, cx)
-            // `-ms-2.5`: the control's padding lines the icon up with the text above.
+            // `-ms-2.5 min-w-13 shrink justify-between`: the control's padding
+            // lines the icon up with the text above.
             .ml(rems(-0.625))
             .min_w(rems(3.25))
+            .justify_between()
             .when(disabled, |this| this.opacity(0.64))
             .child(track_bounds(&bounds))
-            .child(provider_mark(&driver, rems(1.), theme.muted_foreground))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(label),
-            )
-            .child(control_chevron(ControlSize::Sm, cx))
-            .tooltip(|window, cx| Tooltip::new("Change model").build(window, cx))
+            .children(provider_model_trigger_children(
+                &trigger,
+                ControlSize::Sm,
+                true,
+                cx,
+            ))
             .on_click(cx.listener(move |this, _, window, cx| {
                 if disabled {
                     return;

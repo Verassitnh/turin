@@ -7353,6 +7353,7 @@ dependencies = [
  "chrono",
  "futures",
  "gpui-kit",
+ "image",
  "indexmap",
  "markdown",
  "objc2 0.6.5",

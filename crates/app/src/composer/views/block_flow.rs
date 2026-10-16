@@ -16,8 +16,9 @@ use crate::components::chat::markdown::inline_flow::{
 use crate::composer::js_string::utf16_len;
 use crate::composer::rich_doc::{Atom, DocPos, Inline, InlineContent, InlineNode, Marks};
 use crate::composer::rich_text::RichTextMark;
+use crate::composer::views::context_chip::ContextChipKind;
 use crate::theme::AppTheme;
-use crate::theme::color::{MixSpace, color, color_mix, with_alpha};
+use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::ui::IconName;
 
 /// What the painter needs from the environment.
@@ -164,28 +165,12 @@ pub struct BlockFlow {
 /// The accent a chip kind carries (`ContextChip` kinds); `None` is the
 /// `neutral` kind.
 fn chip_accent(atom: &Atom) -> Option<Hsla> {
-    Some(match atom {
-        Atom::Mention { .. } => color("oklch(0.62 0.11 215)"),
-        Atom::Skill { .. } => color("oklch(0.62 0.16 322)"),
-        Atom::Citation { .. } => color("oklch(0.62 0.16 259)"),
-        Atom::ContextReference { kind, .. } => return context_kind_accent(kind),
-    })
-}
-
-/// `contextChipVariants` kind colors for a context reference's kind.
-fn context_kind_accent(kind: &str) -> Option<Hsla> {
-    Some(color(match kind {
-        "image" => "oklch(0.62 0.16 16)",
-        "video" => "oklch(0.62 0.16 48)",
-        "file" => "oklch(0.62 0.136 237)",
-        "terminal" => "oklch(0.62 0.134 163)",
-        "element" | "preview-annotation" => "oklch(0.62 0.134 70)",
-        "review-comment" => "oklch(0.62 0.16 292)",
-        "pull-request" => "oklch(0.62 0.16 277)",
-        "skill" => "oklch(0.62 0.16 322)",
-        "thread" => "oklch(0.62 0.12 190)",
-        _ => return None,
-    }))
+    match atom {
+        Atom::Mention { .. } => ContextChipKind::Mention.accent(),
+        Atom::Skill { .. } => ContextChipKind::Skill.accent(),
+        Atom::Citation { .. } => ContextChipKind::Citation.accent(),
+        Atom::ContextReference { kind, .. } => ContextChipKind::from_context_kind(kind).accent(),
+    }
 }
 
 fn chip_icon(atom: &Atom) -> IconName {

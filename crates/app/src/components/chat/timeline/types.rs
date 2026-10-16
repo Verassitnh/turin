@@ -358,4 +358,7 @@ pub struct ThreadTimelineSnapshot {
     pub pending_user_inputs: Vec<PendingUserInput>,
     /// The project's workspace root, for workspace-relative labels.
     pub workspace_root: Option<String>,
+    /// The provider's skills: `$name` in message text reads as a chip
+    /// (`ctx.skills` in upstream's MessagesTimeline).
+    pub skills: Vec<turin_shared::inline_skills::InlineSkill>,
 }

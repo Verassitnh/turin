@@ -864,7 +864,7 @@ pub(super) fn is_blocking_run(run: &OrchestrationV2Run) -> bool {
 }
 
 /// `isNativeMaintenanceCommand`: `/compact` and `/logout` without attachments.
-pub(super) fn is_native_maintenance_command(text: &str, attachments: &[ChatAttachment]) -> bool {
+pub(crate) fn is_native_maintenance_command(text: &str, attachments: &[ChatAttachment]) -> bool {
     attachments.is_empty() && matches!(text.trim().to_lowercase().as_str(), "/compact" | "/logout")
 }
 

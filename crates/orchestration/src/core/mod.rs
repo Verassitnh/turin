@@ -20,6 +20,7 @@ pub mod provider_turn_control_service;
 pub mod provider_turn_start_service;
 pub mod restart_background_note;
 pub mod restart_continuation;
+pub mod restart_continuation_service;
 pub mod run_execution_service;
 pub mod run_finalization_service;
 pub mod runtime_request_service;

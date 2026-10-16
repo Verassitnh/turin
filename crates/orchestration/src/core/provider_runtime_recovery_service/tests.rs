@@ -1736,3 +1736,413 @@ async fn prepare_for_shutdown_records_nothing_when_continuation_is_off() {
 
     assert!(continuation_effect(&fixture).await.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// `RestartContinuation.test.ts` cases that drive this service
+// ---------------------------------------------------------------------------
+
+fn with_project_override(enabled: bool, override_: Option<bool>, project: &str) -> ServerSettings {
+    let mut settings = default_server_settings();
+    settings.continue_threads_after_server_update = enabled;
+    if let Some(value) = override_ {
+        settings.project_settings_overrides.insert(
+            turin_contracts::ProjectId::new(project).unwrap(),
+            turin_contracts::settings::ProjectSettingsOverrides {
+                continue_threads_after_server_update: Some(value),
+                ..Default::default()
+            },
+        );
+    }
+    settings
+}
+
+#[tokio::test]
+async fn atomically_records_restart_intent_with_cancellation_for_each_opt_in_and_project_override()
+{
+    for (enabled, override_) in [
+        (false, None),
+        (true, None),
+        (false, Some(true)),
+        (true, Some(false)),
+    ] {
+        let fixture = fixture_with(with_project_override(enabled, override_, "project:test")).await;
+        seed_continuable_run(&fixture).await;
+
+        fixture.reconcile(ReconcileTrigger::Startup).await;
+
+        let events = fixture.committed(CONTINUATION_THREAD).await;
+        assert!(
+            of_type(&events, "run.updated")
+                .iter()
+                .any(|event| status_of(event).as_deref() == Some("cancelled"))
+        );
+        let queued = continuation_effect(&fixture).await;
+        assert_eq!(
+            queued.is_some(),
+            override_.unwrap_or(enabled),
+            "enabled {enabled} override {override_:?}"
+        );
+        if let Some(effect) = queued {
+            assert!(matches!(
+                effect.request,
+                EffectRequest::ProviderRuntimeContinue { ref source_run_id }
+                    if source_run_id.as_str() == CONTINUATION_RUN
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn lets_a_cut_blocking_delegate_task_wake_its_parent_like_an_async_task() {
+    let fixture = fixture().await;
+    seed_continuable_run(&fixture).await;
+    let id = CONTINUATION_THREAD;
+    for (task, wake, status) in [
+        ("task:waited", "settled_only", "running"),
+        ("task:async", "always", "running"),
+        ("task:finished", "settled_only", "completed"),
+    ] {
+        let mut row = subagent_json(
+            id,
+            task,
+            Some(CONTINUATION_RUN),
+            "app_owned",
+            CODEX,
+            CODEX,
+            status,
+            Some(&format!("thread:{task}")),
+        );
+        row["completionWake"] = json!(wake);
+        fixture.put("subagent.updated", id, row).await;
+    }
+
+    fixture.reconcile(ReconcileTrigger::Startup).await;
+
+    let events = fixture.committed(id).await;
+    let upgraded: Vec<(String, Value)> = of_type(&events, "subagent.updated")
+        .into_iter()
+        .map(|event| {
+            (
+                payload_id(event),
+                wire(event)["payload"]["completionWake"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(upgraded, vec![("task:waited".to_owned(), json!("always"))]);
+}
+
+/// A run that settled while a restart continuation of it is possible: a
+/// background subagent or dev server it left open, on its own provider thread
+/// or another's.
+async fn seed_settled_run_with_background_work(
+    fixture: &Fixture,
+    status: &str,
+    item_provider_thread: &str,
+    background: &str,
+) {
+    let id = CONTINUATION_THREAD;
+    seed_continuable_run(fixture).await;
+    // Settled: the turn completed, and the run is no longer in flight.
+    fixture
+        .put(
+            "provider-turn.updated",
+            id,
+            patch(
+                provider_turn_json(
+                    "provider_turn_restart",
+                    "provider_thread_restart",
+                    "node_restart",
+                    "attempt_restart",
+                ),
+                json!({"status": "completed", "completedAt": T0}),
+            ),
+        )
+        .await;
+    let mut settled = run_json(id, CONTINUATION_RUN, 1, status, CODEX);
+    settled["providerThreadId"] = json!("provider_thread_restart");
+    settled["activeAttemptId"] = json!("attempt_restart");
+    fixture.put("run.updated", id, settled).await;
+    if background == "subagent" {
+        fixture
+            .put(
+                "turn-item.updated",
+                id,
+                subagent_item(
+                    id,
+                    "turn-item:background-subagent",
+                    CONTINUATION_RUN,
+                    "subagent:background",
+                    item_provider_thread,
+                    "provider_native",
+                    "running",
+                ),
+            )
+            .await;
+        fixture
+            .put(
+                "subagent.updated",
+                id,
+                subagent_json(
+                    id,
+                    "subagent:background",
+                    Some(CONTINUATION_RUN),
+                    "provider_native",
+                    CODEX,
+                    CODEX,
+                    "running",
+                    None,
+                ),
+            )
+            .await;
+    } else {
+        let mut dev_server = command_item(
+            id,
+            "turn-item:dev-server",
+            Some(CONTINUATION_RUN),
+            None,
+            Some(item_provider_thread),
+        );
+        dev_server["input"] = json!("vp run dev");
+        fixture.put("turn-item.updated", id, dev_server).await;
+    }
+}
+
+#[tokio::test]
+async fn prepares_no_continuation_for_background_work_another_provider_thread_launched() {
+    let fixture = fixture().await;
+    // A Claude turn left a background subagent open, then the thread switched
+    // to Codex and its turn settled. Recovery would cancel Claude's work.
+    seed_settled_run_with_background_work(
+        &fixture,
+        "completed",
+        "provider_thread_claude",
+        "subagent",
+    )
+    .await;
+
+    fixture
+        .service
+        .prepare_for_shutdown()
+        .await
+        .expect("prepare");
+    assert!(continuation_effect(&fixture).await.is_none());
+
+    // The same work on the settled run's own provider thread does wake it.
+    fixture
+        .put(
+            "turn-item.updated",
+            CONTINUATION_THREAD,
+            subagent_item(
+                CONTINUATION_THREAD,
+                "turn-item:background-subagent",
+                CONTINUATION_RUN,
+                "subagent:background",
+                "provider_thread_restart",
+                "provider_native",
+                "running",
+            ),
+        )
+        .await;
+    fixture
+        .service
+        .prepare_for_shutdown()
+        .await
+        .expect("prepare");
+    assert!(continuation_effect(&fixture).await.is_some());
+}
+
+async fn cleans_up_background_work_and_wakes_only_for_awaited_work(
+    status: &str,
+    background: &str,
+    wakes: bool,
+) {
+    for trigger in [ReconcileTrigger::Startup, ReconcileTrigger::Shutdown] {
+        let fixture = fixture().await;
+        seed_settled_run_with_background_work(
+            &fixture,
+            status,
+            "provider_thread_restart",
+            background,
+        )
+        .await;
+        // Shutdown records the wake before it cancels the work; a startup after
+        // a kill records it with the cancellation.
+        if trigger == ReconcileTrigger::Shutdown {
+            fixture
+                .service
+                .prepare_for_shutdown()
+                .await
+                .expect("prepare");
+        }
+
+        fixture.reconcile(trigger).await;
+
+        assert_eq!(
+            continuation_effect(&fixture).await.is_some(),
+            wakes,
+            "{status} {background} {trigger:?}"
+        );
+        let events = fixture.committed(CONTINUATION_THREAD).await;
+        assert!(!cancelled_ids(&events, "turn-item.updated").is_empty());
+        let notes = of_type(&events, "run.background-work-cancelled");
+        assert_eq!(notes.len(), 1);
+        let note = &wire(notes[0])["payload"];
+        assert_eq!(note["runId"], CONTINUATION_RUN);
+        let work = note["restartCancelledBackgroundWork"].as_array().unwrap();
+        assert_eq!(work.len(), 1, "{work:?}");
+        if background == "subagent" {
+            assert_eq!(work[0]["kind"], "subagent");
+            assert_eq!(work[0]["id"], "turn-item:background-subagent");
+        } else {
+            assert_eq!(work[0]["kind"], "shell");
+            assert_eq!(work[0]["label"], "vp run dev");
+            assert_eq!(work[0]["id"], "turn-item:dev-server");
+        }
+        if status == "completed" {
+            assert!(of_type(&events, "run.updated").is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn cleans_up_background_work_of_a_completed_run_and_wakes_it_for_an_awaited_subagent() {
+    cleans_up_background_work_and_wakes_only_for_awaited_work("completed", "subagent", true).await;
+}
+
+#[tokio::test]
+async fn cleans_up_background_work_of_a_waiting_run_and_wakes_it_for_an_awaited_subagent() {
+    cleans_up_background_work_and_wakes_only_for_awaited_work("waiting", "subagent", true).await;
+}
+
+#[tokio::test]
+async fn cleans_up_a_completed_runs_dev_server_without_waking_it() {
+    cleans_up_background_work_and_wakes_only_for_awaited_work("completed", "shell", false).await;
+}
+
+#[tokio::test]
+async fn cleans_up_a_waiting_runs_dev_server_without_waking_it() {
+    cleans_up_background_work_and_wakes_only_for_awaited_work("waiting", "shell", false).await;
+}
+
+/// `ThreadManagementService` over the real store, for the continuation that
+/// follows a recovery.
+struct StoreThreads {
+    store: Arc<ProjectionStore>,
+    dispatched: parking_lot::Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::restart_continuation_service::RestartThreads for StoreThreads {
+    async fn get_thread_records(
+        &self,
+        thread_id: &ThreadId,
+        _fields: &[crate::pipeline::orchestrator_port::RecordField],
+        _filter: &crate::pipeline::orchestrator_port::RecordFilter,
+    ) -> Result<crate::pipeline::orchestrator_port::ThreadRecords, BoxError> {
+        Ok(self.store.get_thread_projection(thread_id).await?)
+    }
+
+    async fn dispatch(
+        &self,
+        _command: turin_contracts::orchestration_v2::OrchestrationV2ServerCommand,
+    ) -> Result<
+        crate::pipeline::orchestrator_port::DispatchResult,
+        crate::pipeline::thread_management_service::ThreadManagementError,
+    > {
+        *self.dispatched.lock() += 1;
+        Ok(crate::pipeline::orchestrator_port::DispatchResult {
+            sequence: 0,
+            stored_events: Vec::new(),
+        })
+    }
+
+    async fn recover_delegated_task(&self, _thread_id: &ThreadId, _source_run_id: &RunId) {}
+}
+
+#[tokio::test]
+async fn does_not_cancel_or_resume_a_run_that_completes_while_shutdown_intent_commits() {
+    let fixture = fixture().await;
+    seed_continuable_run(&fixture).await;
+    let id = CONTINUATION_THREAD;
+
+    fixture
+        .service
+        .prepare_for_shutdown()
+        .await
+        .expect("prepare");
+    assert!(continuation_effect(&fixture).await.is_some());
+    // The provider finishes while the intent commits.
+    let mut completed = run_json(id, CONTINUATION_RUN, 1, "completed", CODEX);
+    completed["providerThreadId"] = json!("provider_thread_restart");
+    completed["activeAttemptId"] = json!("attempt_restart");
+    fixture.put("run.updated", id, completed).await;
+
+    fixture.reconcile(ReconcileTrigger::Shutdown).await;
+
+    assert!(
+        of_type(&fixture.committed(id).await, "run.updated").is_empty(),
+        "a completed run is not cancelled"
+    );
+    // Delivery rejects the source run that actually completed.
+    let threads = Arc::new(StoreThreads {
+        store: fixture.store.clone(),
+        dispatched: parking_lot::Mutex::new(0),
+    });
+    let continuation = crate::core::restart_continuation_service::RestartContinuationService::new(
+        Arc::new(StaticSettings(default_server_settings())),
+        threads.clone(),
+        fixture.store.clone(),
+        fixture.sink.outbox().clone(),
+        Arc::new(crate::core::restart_continuation_service::NoDelegatedTaskRecovery),
+    );
+    continuation
+        .continue_restarted_run(&tid(id), &RunId::new(CONTINUATION_RUN).unwrap())
+        .await
+        .expect("continue");
+    assert_eq!(*threads.dispatched.lock(), 0);
+}
+
+#[tokio::test]
+async fn prepares_later_threads_continuations_when_one_thread_fails() {
+    let fixture = fixture().await;
+    let broken = "thread:broken";
+    fixture.thread(broken).await;
+    fixture
+        .put(
+            "run.created",
+            broken,
+            run_json(broken, "run:broken", 1, "running", CODEX),
+        )
+        .await;
+    seed_continuable_run(&fixture).await;
+    // The broken thread's row no longer decodes, so reading its recovery
+    // projection fails.
+    fixture
+        .store
+        .db()
+        .write(|tx| {
+            tx.execute(
+                "UPDATE orchestration_v2_projection_threads SET payload_json = '{}' WHERE thread_id = 'thread:broken'",
+                [],
+            )
+            .map_err(|error| turin_persistence::PersistenceError::sql("test", &error))?;
+            Ok(())
+        })
+        .await
+        .expect("corrupt the row");
+    assert!(
+        fixture
+            .store
+            .get_runtime_recovery_projection(&tid(broken))
+            .await
+            .is_err()
+    );
+
+    fixture
+        .service
+        .prepare_for_shutdown()
+        .await
+        .expect("prepare");
+
+    assert!(continuation_effect(&fixture).await.is_some());
+}

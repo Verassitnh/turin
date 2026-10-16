@@ -501,4 +501,35 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn does_not_wake_a_settled_run_for_work_left_by_a_session_that_already_stopped() {
+        let mut value = base();
+        value["runs"][0]["status"] = json!("completed");
+        value["providerThreads"][0]["status"] = json!("idle");
+        value["turnItems"] = json!([test_support::turn_item(
+            THREAD,
+            "turn-item:background-subagent",
+            Some(RUN),
+            1,
+            "subagent",
+            "running",
+            json!({
+                "providerThreadId": PROVIDER_THREAD, "nodeId": null,
+                "subagentId": "subagent:background", "origin": "provider_native",
+                "driver": "codex", "providerInstanceId": INSTANCE, "childThreadId": null,
+                "prompt": "Review", "progress": null, "result": null, "title": "Background reviewer",
+            }),
+        )]);
+        assert_eq!(
+            restart_continuation_run(&projection(value.clone()), now()).map(|run| run.id.as_str()),
+            Some(RUN)
+        );
+        for status in ["stopped", "error"] {
+            value["providerSessions"][0]["status"] = json!(status);
+            assert!(
+                restart_continuation_run(&projection(value.clone()), now()).is_none(),
+                "{status}"
+            );
+        }
+    }
 }

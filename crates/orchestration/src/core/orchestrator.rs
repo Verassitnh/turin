@@ -18,6 +18,7 @@ pub mod dispatch;
 #[cfg(test)]
 mod dispatch_limit_tests;
 mod message_dispatch;
+pub(crate) use message_dispatch::is_native_maintenance_command;
 #[cfg(test)]
 mod message_dispatch_tests;
 #[cfg(test)]

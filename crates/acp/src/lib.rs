@@ -9,6 +9,7 @@ pub mod meta;
 pub mod process;
 pub mod protocol;
 pub mod schema;
+pub mod stderr;
 
 pub use agent::AcpAgent;
 pub use client::AcpClient;

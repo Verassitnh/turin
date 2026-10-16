@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 futures.workspace = true
+regex.workspace = true
+turin-contracts.workspace = true
 libc = "0.2"
 parking_lot.workspace = true
 serde.workspace = true

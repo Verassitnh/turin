@@ -103,10 +103,40 @@ impl ChatComposer {
                 records,
             })
         });
+        use crate::composer::composer_context_records::{
+            composer_context_draft_from_record, composer_context_import_lookup_ids,
+        };
+        use crate::composer::views::prompt_editor::ImportContextFragment;
+        use crate::state::models::parse_scoped_thread_key;
+
+        let thread_id = parse_scoped_thread_key(&self.thread_key)
+            .map(|(_, thread)| thread)
+            .unwrap_or_else(|| {
+                turin_contracts::ThreadId::new("thread-unknown").expect("thread id")
+            });
+        let store = self.context_records.clone();
+        let import: ImportContextFragment = Rc::new(move |fragment| {
+            let mut rewritten = std::collections::HashMap::new();
+            let mut target = store.borrow_mut();
+            for record in &fragment.records {
+                let id = record.context_id().as_str().to_owned();
+                if let Some(draft) = composer_context_draft_from_record(record, thread_id.clone()) {
+                    target.insert(id.clone(), draft);
+                    if let Some(known) =
+                        crate::composer::composer_context_records::as_known_context_record(record)
+                    {
+                        for alt in composer_context_import_lookup_ids(known) {
+                            rewritten.insert(alt.as_str().to_owned(), id.clone());
+                        }
+                    }
+                }
+                rewritten.entry(id.clone()).or_insert(id);
+            }
+            rewritten
+        });
         self.editor.update(cx, |editor, _| {
             editor.set_build_context_fragment(Some(build));
-            // Paste import needs wire→draft converters on a shared store; host merge pending.
-            editor.set_import_context_fragment(None);
+            editor.set_import_context_fragment(Some(import));
         });
     }
 
@@ -122,7 +152,7 @@ impl ChatComposer {
             files: &files,
             ..Default::default()
         });
-        for (id, record) in &self.context_records {
+        for (id, record) in self.context_records.borrow().iter() {
             records.entry(id.clone()).or_insert_with(|| record.clone());
         }
         records

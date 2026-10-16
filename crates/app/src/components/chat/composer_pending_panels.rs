@@ -439,11 +439,45 @@ struct UserInputState {
     responding: bool,
 }
 
+fn merge_question_attachment_counts(
+    cx: &App,
+    environment_id: Option<&str>,
+    thread_id: Option<&str>,
+    prompt: &PendingUserInput,
+    mut answers: HashMap<String, PendingUserInputDraftAnswer>,
+) -> HashMap<String, PendingUserInputDraftAnswer> {
+    let (Some(environment_id), Some(thread_id)) = (environment_id, thread_id) else {
+        return answers;
+    };
+    for question in &prompt.questions {
+        let count = super::question_attachment_drafts::question_draft_attachment_count(
+            cx,
+            environment_id,
+            thread_id,
+            &prompt.request_id,
+            &question.id,
+        );
+        if count == 0 {
+            continue;
+        }
+        answers
+            .entry(question.id.clone())
+            .and_modify(|draft| draft.attachment_count = Some(count))
+            .or_insert_with(|| PendingUserInputDraftAnswer {
+                attachment_count: Some(count),
+                ..Default::default()
+            });
+    }
+    answers
+}
+
 /// `ComposerPendingUserInputPanel` (the active prompt's card).
 #[derive(IntoElement)]
 pub struct ComposerPendingUserInputBanner {
     pub prompt: PendingUserInput,
     pub source: Option<Arc<dyn TimelineSource>>,
+    pub environment_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
 /// `onAdvanceActivePendingUserInput`: the next question, or the answers on the last one.
@@ -451,6 +485,8 @@ fn advance(
     state: &Entity<UserInputState>,
     prompt: &PendingUserInput,
     source: Option<Arc<dyn TimelineSource>>,
+    environment_id: Option<&str>,
+    thread_id: Option<&str>,
     cx: &mut App,
 ) {
     if prompt.response_capability == ResponseCapability::NotResumable {
@@ -459,9 +495,11 @@ fn advance(
     let questions = contract_questions(&prompt.questions);
     let (progress, answers) = {
         let state = state.read(cx);
+        let merged =
+            merge_question_attachment_counts(cx, environment_id, thread_id, prompt, state.answers.clone());
         (
-            derive_pending_user_input_progress(&questions, &state.answers, state.question_index),
-            build_pending_user_input_answers(&questions, &state.answers),
+            derive_pending_user_input_progress(&questions, &merged, state.question_index),
+            build_pending_user_input_answers(&questions, &merged),
         )
     };
     if !progress.is_last_question {
@@ -494,6 +532,8 @@ impl RenderOnce for ComposerPendingUserInputBanner {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme().clone();
         let prompt = self.prompt;
+        let banner_environment_id = self.environment_id.clone();
+        let banner_thread_id = self.thread_id.clone();
         let state = window.use_keyed_state(
             ElementId::Name(format!("pending-input-{}", prompt.request_id).into()),
             cx,
@@ -507,9 +547,19 @@ impl RenderOnce for ComposerPendingUserInputBanner {
         );
         let _ = &state.read(cx).request_id;
         let contract = contract_questions(&prompt.questions);
+        let answers = {
+            let base = state.read(cx).answers.clone();
+            merge_question_attachment_counts(
+                cx,
+                self.environment_id.as_deref(),
+                self.thread_id.as_deref(),
+                &self.prompt,
+                base,
+            )
+        };
         let progress = {
             let state = state.read(cx);
-            derive_pending_user_input_progress(&contract, &state.answers, state.question_index)
+            derive_pending_user_input_progress(&contract, &answers, state.question_index)
         };
         let index = progress.question_index;
         let Some(question) = prompt.questions.get(index).cloned() else {
@@ -730,11 +780,22 @@ impl RenderOnce for ComposerPendingUserInputBanner {
                             let state = state.clone();
                             let prompt = prompt_for_click.clone();
                             let source = source.clone();
+                            let env = banner_environment_id.clone();
+                            let thread = banner_thread_id.clone();
                             cx.spawn(async move |cx| {
                                 cx.background_executor()
                                     .timer(Duration::from_millis(200))
                                     .await;
-                                cx.update(|cx| advance(&state, &prompt, source, cx));
+                                cx.update(|cx| {
+                                    advance(
+                                        &state,
+                                        &prompt,
+                                        source,
+                                        env.as_deref(),
+                                        thread.as_deref(),
+                                        cx,
+                                    )
+                                });
                             })
                             .detach();
                         }
@@ -764,6 +825,55 @@ impl RenderOnce for ComposerPendingUserInputBanner {
                                 .child("Select one or more options."),
                         )
                     })
+                    .when(
+                        question.allow_custom_answer != Some(false)
+                            && self.environment_id.is_some()
+                            && self.thread_id.is_some(),
+                        |this| {
+                            let env = self.environment_id.clone().unwrap_or_default();
+                            let thread = self.thread_id.clone().unwrap_or_default();
+                            let request = self.prompt.request_id.clone();
+                            let qid = question.id.clone();
+                            let count = super::question_attachment_drafts::question_draft_attachment_count(
+                                cx,
+                                &env,
+                                &thread,
+                                &request,
+                                &qid,
+                            );
+                            this.child(
+                                div()
+                                    .mt(rems(0.5))
+                                    .flex()
+                                    .items_center()
+                                    .gap(rems(0.5))
+                                    .child(
+                                        Button::new(("pending-attach", index))
+                                            .variant(ButtonVariant::GhostMuted)
+                                            .size(ButtonSize::Xs)
+                                            .child(Icon::new(IconName::Plus).size(rems(0.75)))
+                                            .child("Attach files")
+                                            .on_click(move |_, window, cx| {
+                                                let key =
+                                                    crate::state::question_attachments::question_attachment_draft_id(
+                                                        &env, &thread, &request, &qid,
+                                                    );
+                                                super::question_attachment_drafts::pick_question_attachments(
+                                                    window, cx, key,
+                                                );
+                                            }),
+                                    )
+                                    .when(count > 0, |row| {
+                                        row.child(
+                                            div()
+                                                .text_size(TEXT_XS.size)
+                                                .text_color(theme.secondary_label)
+                                                .child(format!("{count} attached")),
+                                        )
+                                    }),
+                            )
+                        },
+                    )
                     .child(options),
             );
         let content = div()

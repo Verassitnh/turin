@@ -126,6 +126,7 @@ pub struct ChatMarkdown {
     extra_remark_plugin: Option<ExtraRemarkPlugin>,
     /// `$skill` tokens of these skills read as chips (`renderSkillInlineMarkdownChildren`).
     skills: Vec<InlineSkill>,
+    assistant_message_id: Option<SharedString>,
 }
 
 impl ChatMarkdown {
@@ -139,7 +140,13 @@ impl ChatMarkdown {
             document_order: 0,
             extra_remark_plugin: None,
             skills: Vec::new(),
+            assistant_message_id: None,
         }
+    }
+
+    pub fn assistant_selection_source(mut self, message_id: impl Into<SharedString>) -> Self {
+        self.assistant_message_id = Some(message_id.into());
+        self
     }
 
     /// `extraRemarkPlugins`.
@@ -200,6 +207,8 @@ struct Md<'a> {
     streaming: bool,
     selection: Hsla,
     skills: &'a [InlineSkill],
+    assistant_message_id: Option<&'a str>,
+    assistant_message_text: Option<&'a str>,
 }
 
 /// Inherited text properties (`color`, `font-size`, `line-height`).
@@ -490,7 +499,7 @@ impl Md<'_> {
         white_space: WhiteSpace,
     ) -> InlineFlow {
         let (id, order) = self.next_leaf();
-        InlineFlow::new(id, self.flow_text(inlines, inherit), white_space)
+        let mut flow = InlineFlow::new(id, self.flow_text(inlines, inherit), white_space)
             .strut(self.fonts.sans.clone(), inherit.size, inherit.line_height)
             .document_order(order)
             .selection_color(self.selection)
@@ -500,7 +509,14 @@ impl Md<'_> {
                 } else {
                     cx.open_url(url);
                 }
-            }))
+            }));
+        if let (Some(message_id), Some(message_text)) = (
+            self.assistant_message_id,
+            self.assistant_message_text,
+        ) {
+            flow = flow.assistant_selection(message_id.to_owned(), message_text.to_owned());
+        }
+        flow
     }
 
     /// Stacks rendered siblings with collapsed margins. Returns the stack and
@@ -1614,6 +1630,11 @@ impl RenderOnce for ChatMarkdown {
             streaming: self.is_streaming,
             selection,
             skills: &self.skills,
+            assistant_message_id: self.assistant_message_id.as_deref(),
+            assistant_message_text: self
+                .assistant_message_id
+                .as_ref()
+                .map(|_| self.text.as_ref()),
         };
         let _ = md.streaming;
         let inherit = Inherit {

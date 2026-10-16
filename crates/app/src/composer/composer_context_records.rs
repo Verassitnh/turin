@@ -1188,6 +1188,60 @@ fn stable_payload(record: &ComposerContextRecord) -> String {
     serde_json::to_string(&sort_deep(value)).unwrap_or_default()
 }
 
+/// Wire record → draft store entry for context paste import.
+pub fn composer_context_draft_from_record(
+    record: &ComposerContextRecord,
+    thread_id: ThreadId,
+) -> Option<crate::composer::views::composer_context_presentation::ComposerDraftContextRecord> {
+    use crate::composer::draft_store::{ComposerFileAttachment, ComposerImageAttachment};
+    use crate::composer::views::composer_context_presentation::ComposerDraftContextRecord;
+
+    let known = as_known_context_record(record)?;
+    Some(match known {
+        KnownComposerContextRecord::Terminal(record) => {
+            ComposerDraftContextRecord::Terminal(terminal_context_draft_from_record(
+                record, thread_id,
+            ))
+        }
+        KnownComposerContextRecord::ReviewComment(record) => {
+            ComposerDraftContextRecord::ReviewComment(review_comment_from_record(record))
+        }
+        KnownComposerContextRecord::Thread(record) => {
+            ComposerDraftContextRecord::Thread(record.clone())
+        }
+        KnownComposerContextRecord::PreviewAnnotation(record) => {
+            ComposerDraftContextRecord::PreviewAnnotation {
+                record: preview_annotation_from_record(record),
+                screenshot: None,
+            }
+        }
+        KnownComposerContextRecord::Image(record) => ComposerDraftContextRecord::Image {
+            record: ComposerImageAttachment::new(
+                producer_id_from_composer_context_id("image", record.context_id.as_str()),
+                record.name.as_str(),
+                record.mime_type.as_str(),
+                Vec::new(),
+            ),
+            upload: None,
+        },
+        KnownComposerContextRecord::File(record) => ComposerDraftContextRecord::File {
+            record: ComposerFileAttachment {
+                id: producer_id_from_composer_context_id("file", record.context_id.as_str()),
+                name: record.name.to_string(),
+                mime_type: record.mime_type.to_string(),
+                size_bytes: record.size_bytes,
+                data: None,
+                uploaded_attachment_id: Some(record.attachment_id.as_str().to_owned()),
+                upload_environment_id: None,
+            },
+            upload: None,
+        },
+        KnownComposerContextRecord::Element(_)
+        | KnownComposerContextRecord::Mention(_)
+        | KnownComposerContextRecord::Skill(_) => return None,
+    })
+}
+
 fn sort_deep(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(items) => {

@@ -236,7 +236,7 @@ async fn stop_interrupts_the_run_and_holds_the_queue() {
             "command:hold",
             "thread:hold",
             &run_id,
-            json!({"holdQueue": true}),
+            json!({"holdQueue": true, "reason": "enough"}),
         )))
         .await
         .expect("the stop commits");
@@ -252,10 +252,21 @@ async fn stop_interrupts_the_run_and_holds_the_queue() {
         .find(|run| run.status == OrchestrationV2RunStatus::Queued)
         .expect("the queued run stays queued");
     assert_eq!(queued.queue_held, Some(true), "Stop holds the queue");
-    assert!(matches!(
-        h.effects("command:hold").await.as_slice(),
-        [EffectRequest::ProviderTurnInterrupt { .. }]
-    ));
+    // Stop also stops every delegated task under the thread, with the reason.
+    let effects = h.effects("command:hold").await;
+    assert_eq!(effects.len(), 2, "{effects:?}");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, EffectRequest::ProviderTurnInterrupt { .. }))
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            EffectRequest::DelegatedTasksStop { reason: Some(reason) } if reason == "enough"
+        )),
+        "{effects:?}"
+    );
 }
 
 #[tokio::test]

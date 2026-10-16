@@ -14,8 +14,6 @@ use turin_contracts::{
         OrchestrationV2PendingBackgroundTask, OrchestrationV2PlanArtifact,
         OrchestrationV2ProviderThread, OrchestrationV2ProviderTurn,
         OrchestrationV2ProviderTurnStatus, OrchestrationV2Run, OrchestrationV2RunAttempt,
-        OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
-        OrchestrationV2TurnItem,
     },
 };
 
@@ -161,11 +159,9 @@ impl IngestReads for ProjectionStore {
     }
 
     async fn node_stored(&self, node: &OrchestrationV2ExecutionNode) -> Result<bool, BoxError> {
-        let projection = self
-            .get_thread_records(&node.thread_id, vec![ProjectionRecordField::Nodes], None)
+        self.is_node_stored(node)
             .await
-            .map_err(|error| Box::new(error) as BoxError)?;
-        Ok(projection.nodes.iter().any(|stored| stored == node))
+            .map_err(|error| Box::new(error) as BoxError)
     }
 
     async fn pending_native_user_inputs(
@@ -173,53 +169,15 @@ impl IngestReads for ProjectionStore {
         thread_id: &ThreadId,
         provider_turn_id: &ProviderTurnId,
     ) -> Result<PendingNativeUserInputs, BoxError> {
-        let projection = self
-            .get_thread_records(
-                thread_id,
-                vec![
-                    ProjectionRecordField::RuntimeRequests,
-                    ProjectionRecordField::Nodes,
-                    ProjectionRecordField::TurnItems,
-                ],
-                None,
-            )
+        // Native requests only: message-answerable ones stay pending.
+        let pending = self
+            .get_pending_native_user_inputs(thread_id, provider_turn_id)
             .await
             .map_err(|error| Box::new(error) as BoxError)?;
-        let runtime_requests: Vec<_> = projection
-            .runtime_requests
-            .iter()
-            .filter(|request| {
-                request.provider_turn_id.as_ref() == Some(provider_turn_id)
-                    && request.kind == OrchestrationV2RuntimeRequestKind::UserInput
-                    && request.status == OrchestrationV2RuntimeRequestStatus::Pending
-            })
-            .cloned()
-            .collect();
-        let nodes = projection
-            .nodes
-            .iter()
-            .filter(|node| {
-                runtime_requests
-                    .iter()
-                    .any(|request| request.node_id == node.id)
-            })
-            .cloned()
-            .collect();
-        let turn_items = projection
-            .turn_items
-            .iter()
-            .filter(|item| match item {
-                OrchestrationV2TurnItem::UserInputRequest { request_id, .. } => runtime_requests
-                    .iter()
-                    .any(|request| &request.id == request_id),
-                _ => false,
-            })
-            .cloned()
-            .collect();
         Ok(PendingNativeUserInputs {
-            runtime_requests,
-            nodes,
-            turn_items,
+            runtime_requests: pending.runtime_requests,
+            nodes: pending.nodes,
+            turn_items: pending.turn_items,
         })
     }
 
@@ -228,21 +186,9 @@ impl IngestReads for ProjectionStore {
         thread_id: &ThreadId,
         plan_id: &PlanId,
     ) -> Result<Option<OrchestrationV2PlanArtifact>, BoxError> {
-        let projection = self
-            .get_thread_records(thread_id, vec![ProjectionRecordField::Plans], None)
+        self.get_plan(thread_id, plan_id.as_str())
             .await
-            .map_err(|error| Box::new(error) as BoxError)?;
-        Ok(projection.plans.into_iter().find(|plan| {
-            serde_json::to_value(plan)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("id")
-                        .and_then(|id| id.as_str().map(str::to_owned))
-                })
-                .as_deref()
-                == Some(plan_id.as_str())
-        }))
+            .map_err(|error| Box::new(error) as BoxError)
     }
 }
 
@@ -267,9 +213,8 @@ pub struct ProviderControlContext {
     pub run: Option<OrchestrationV2Run>,
 }
 
-/// The provider-control read (`getProviderControlContext`). Reads the whole
-/// record kinds through `get_thread_records`, narrowed by the target's ids. A
-/// targeted SQL read is a perf follow-up.
+/// The provider-control read (`getProviderControlContext`), over the store's
+/// targeted query.
 #[async_trait]
 pub trait ProviderControlReads: Send + Sync {
     async fn provider_control_context(
@@ -293,67 +238,24 @@ impl ProviderControlReads for ProjectionStore {
         thread_id: &ThreadId,
         target: &ProviderControlTarget,
     ) -> Result<ProviderControlContext, BoxError> {
-        let filter = ProjectionRecordFilter {
-            message_ids: target
-                .message_id
-                .as_ref()
-                .map(|id| vec![id.as_str().to_owned()]),
-            ..ProjectionRecordFilter::default()
-        };
-        let projection = self
-            .get_thread_records(
+        let context = self
+            .get_provider_control_context(
                 thread_id,
-                vec![
-                    ProjectionRecordField::ProviderThreads,
-                    ProjectionRecordField::ProviderTurns,
-                    ProjectionRecordField::Attempts,
-                    ProjectionRecordField::Messages,
-                    ProjectionRecordField::Runs,
-                ],
-                Some(filter),
+                crate::projection::store::contexts::ProviderControlTarget {
+                    provider_thread_id: target.provider_thread_id.clone(),
+                    provider_turn_id: target.provider_turn_id.clone(),
+                    attempt_id: target.attempt_id.clone(),
+                    message_id: target.message_id.clone(),
+                },
             )
             .await
             .map_err(|error| Box::new(error) as BoxError)?;
-        let provider_thread = projection
-            .provider_threads
-            .iter()
-            .find(|thread| thread.id == target.provider_thread_id)
-            .cloned();
-        let provider_turn = projection
-            .provider_turns
-            .iter()
-            .find(|turn| turn.id == target.provider_turn_id)
-            .cloned();
-        let attempt = target.attempt_id.as_ref().and_then(|id| {
-            projection
-                .attempts
-                .iter()
-                .find(|attempt| &attempt.id == id)
-                .cloned()
-        });
-        let message = target.message_id.as_ref().and_then(|id| {
-            projection
-                .messages
-                .iter()
-                .find(|message| &message.id == id)
-                .cloned()
-        });
-        let run = match (&message, &provider_turn) {
-            (Some(message), Some(_)) => message.run_id.as_ref().and_then(|run_id| {
-                projection
-                    .runs
-                    .iter()
-                    .find(|run| &run.id == run_id)
-                    .cloned()
-            }),
-            _ => None,
-        };
         Ok(ProviderControlContext {
-            provider_thread,
-            provider_turn,
-            attempt,
-            message,
-            run,
+            provider_thread: context.provider_thread,
+            provider_turn: context.provider_turn,
+            attempt: context.attempt,
+            message: context.message,
+            run: context.run,
         })
     }
 

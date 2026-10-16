@@ -271,3 +271,103 @@ async fn a_finished_provider_turn_is_reported_to_analytics_once() {
     assert_eq!(recorded[0]["terminalStatus"], "completed");
     assert_eq!(recorded[0]["usageStatus"], "unavailable");
 }
+
+/// A user-input request with its owning node and timeline item, pending on
+/// provider turn `provider-turn:q`.
+fn question(
+    id: &str,
+    capability: Value,
+) -> Vec<turin_contracts::orchestration_v2::OrchestrationV2DomainEvent> {
+    use crate::projection::test_support::{event, turn_item};
+    let node = json!({
+        "id": format!("node:{id}"), "threadId": "thread:root", "runId": null,
+        "parentNodeId": null, "rootNodeId": format!("node:{id}"), "kind": "user_input_request",
+        "status": "waiting", "countsForRun": false, "providerThreadId": null,
+        "providerTurnId": null, "nativeItemRef": null, "runtimeRequestId": null,
+        "checkpointScopeId": null, "startedAt": T0, "completedAt": null,
+    });
+    let request = json!({
+        "id": id, "threadId": "thread:root", "nodeId": format!("node:{id}"),
+        "providerTurnId": "provider-turn:q", "nativeRequestRef": null, "kind": "user_input",
+        "status": "pending", "responseCapability": capability, "createdAt": T0, "resolvedAt": null,
+    });
+    let mut item = turn_item(
+        "thread:root",
+        &format!("item:{id}"),
+        None,
+        1,
+        "user_input_request",
+        "waiting",
+        json!({"requestId": id, "questions": [{
+            "id": "q1", "header": "Name", "question": "Name?", "options": [], "required": true
+        }]}),
+    );
+    item["providerTurnId"] = json!("provider-turn:q");
+    item["nodeId"] = json!(format!("node:{id}"));
+    vec![
+        event("node.updated", "thread:root", T0, node),
+        event("runtime-request.updated", "thread:root", T0, request),
+        event("turn-item.updated", "thread:root", T0, item),
+    ]
+}
+
+/// Upstream `ProviderEventIngestor.test.ts` ("cancels native user inputs when
+/// the turn ends"): only requests the provider itself waits on are closed. A
+/// message-capable (async) question outlives the turn.
+#[tokio::test]
+async fn a_finished_turn_cancels_native_questions_but_keeps_message_ones() {
+    let fixture = fixture().await;
+    let mut events = vec![crate::projection::test_support::event(
+        "thread.created",
+        "thread:root",
+        T0,
+        thread_json("thread:root"),
+    )];
+    events.extend(question(
+        "request:live",
+        json!({"type": "live", "providerSessionId": "provider-session:1"}),
+    ));
+    events.extend(question("request:message", json!({"type": "message"})));
+    events.extend(question(
+        "request:gone",
+        json!({"type": "not_resumable", "reason": "The run ended."}),
+    ));
+    crate::projection::test_support::apply_all(&fixture.projection, events).await;
+
+    fixture
+        .ingestor
+        .ingest(
+            &input(json!({
+                "type": "provider_turn.updated", "driver": "codex",
+                "provider_turn": {
+                    "id": "provider-turn:q", "providerThreadId": "provider-thread:1",
+                    "nodeId": "node:request:live", "runAttemptId": null, "nativeTurnRef": null,
+                    "ordinal": 1, "status": "completed", "startedAt": T0, "completedAt": T0,
+                },
+            })),
+            &IngestGuard::default(),
+        )
+        .await
+        .expect("the turn ends");
+
+    let projection = fixture
+        .projection
+        .get_thread_projection(&ThreadId::new("thread:root").expect("id"))
+        .await
+        .expect("projection reads");
+    let status = |id: &str| {
+        projection
+            .runtime_requests
+            .iter()
+            .find(|request| request.id.as_str() == id)
+            .map(|request| format!("{:?}", request.status))
+            .expect("request")
+    };
+    assert_eq!(status("request:live"), "Cancelled");
+    assert_eq!(status("request:gone"), "Cancelled");
+    assert_eq!(
+        status("request:message"),
+        "Pending",
+        "an async question stays open"
+    );
+}

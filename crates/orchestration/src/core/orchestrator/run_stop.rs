@@ -114,6 +114,18 @@ pub(super) async fn decide(
             )
             .await?;
             decision.cancel_unsettled_effects = cancel;
+            // Stop also stops every delegated task under the thread once it commits.
+            if *hold_queue == Some(true) {
+                decision.effects.push(PendingEffect {
+                    id: format!("effect:{}:delegated-tasks.stop", command_id(command)),
+                    command_id: command_id(command).clone(),
+                    thread_id: thread_id.clone(),
+                    request: EffectRequest::DelegatedTasksStop {
+                        reason: reason.clone(),
+                    },
+                    available_at: None,
+                });
+            }
         }
         Client(C::SubagentStop {
             thread_id,

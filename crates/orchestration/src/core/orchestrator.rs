@@ -132,6 +132,20 @@ impl Orchestrator {
         }
     }
 
+    /// Shares the per-thread lock executor, so command dispatch and anything
+    /// else that writes a thread (event ingest, provider-session release)
+    /// serialize on the same locks. Build the executor first and hand clones
+    /// to each writer; the clones share state.
+    pub fn with_thread_executor(mut self, executor: ThreadCommandExecutor) -> Self {
+        self.locks = executor;
+        self
+    }
+
+    /// The executor `dispatch` locks threads with.
+    pub fn thread_executor(&self) -> ThreadCommandExecutor {
+        self.locks.clone()
+    }
+
     /// `dispatch` for a limited sender: refuses a thread that runs above
     /// `limit` (`DispatchModeLimit`, upstream's ambient reference) under the
     /// thread's lock. Additive: `OrchestratorPort::dispatch` is the unlimited

@@ -1000,3 +1000,46 @@ async fn a_new_turn_without_a_provider_adapter_is_refused_before_any_event() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn a_shared_thread_executor_serializes_dispatch_with_other_writers() {
+    use crate::pipeline::thread_command_executor::ThreadCommandExecutor;
+    let executor = ThreadCommandExecutor::new();
+    let (orchestrator, _) = harness().await;
+    let orchestrator = std::sync::Arc::new(orchestrator.with_thread_executor(executor.clone()));
+    let (release, hold) = tokio::sync::oneshot::channel::<()>();
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+    let other_writer = {
+        let executor = executor.clone();
+        tokio::spawn(async move {
+            executor
+                .with_lock(&thread("thread:shared"), || async {
+                    held_tx.send(()).ok();
+                    hold.await.ok();
+                })
+                .await;
+        })
+    };
+    held_rx
+        .await
+        .expect("the other writer holds the thread lock");
+    let dispatching = {
+        let orchestrator = orchestrator.clone();
+        tokio::spawn(async move {
+            orchestrator
+                .dispatch(create_command("command:shared", "thread:shared", "Shared"))
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !dispatching.is_finished(),
+        "dispatch waits for the shared lock"
+    );
+    release.send(()).ok();
+    dispatching
+        .await
+        .expect("task joins")
+        .expect("create commits once the lock frees");
+    other_writer.await.expect("task joins");
+}

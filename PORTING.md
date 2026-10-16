@@ -260,6 +260,10 @@ at app startup (T05b/T22), not per hook.
 | `contracts/base_schemas.rs` | `isUnknownUnionMember(value)` | no function; match `ForwardCompatible::Unknown` | Rust enums make it a pattern |
 | `contracts/base_schemas.rs` | `PortSchema` | omitted | only used by cut features |
 | `contracts/base_schemas.rs` | cut-feature exports (AuthSessionId, RpcClientId, SecretRef, DpopFailureReason, Client* enums) | omitted | features cut (PORTING cut list) |
+| `acp/stderr.rs` `append_acp_stderr_tail` | `String#slice(-4096)` in UTF-16 units can cut a surrogate pair | keeps whole chars whose UTF-16 length fits the budget | Rust strings cannot hold a lone surrogate |
+| `acp/client_policy.rs` containment | `path.basename` returns `..` for a trailing `..` segment, then keeps walking | returns `None` (deny) when a missing path ends in `..` | `Path::file_name` is `None` for `..`. Fails closed |
+| `acp/session_config.rs` / `runtime_model` | `Schema`-validated ACP wire types | serde structs / `serde_json::Value` for wire fragments | Only fields the runtime reads are modelled |
+| `acp/runtime_model/mcp_identity.rs` | `@t3tools/shared/t3McpToolPresentation` import | duplicated `T3_MCP_TOOL_NAMES` static list | No `provider-core` dependency in `turin-acp` |
 | `git/git_vcs_driver_core.rs` | trace2 JSON monitor emits span events for every git command | not emitted | span events are observability; command results, env, and timeouts are unchanged |
 | `git/shared_git.rs` | remote host detection covers GitHub, GitLab, Bitbucket, Azure, Forgejo, GitCafe | GitHub and GitHub Enterprise only; other hosts return none | host detection for the other providers belongs to source control, which this crate does not import |
 | `git/detach_stack_frame.rs` | Effect cache workaround that detaches a stack frame | identity function | there is no Effect runtime to work around |

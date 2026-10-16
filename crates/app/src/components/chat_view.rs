@@ -11,6 +11,7 @@ use gpui_kit::{
 };
 
 use super::chat::chat_header::ChatHeader;
+use super::chat::chat_media::chat_media_layer;
 use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
@@ -110,7 +111,8 @@ impl RenderOnce for ChatView {
                     .min_h_0()
                     // `MessagesTimeline`, owned by the chat column for now; the
                     // thread route will own it once threads are selectable.
-                    .child(timeline)
+                    .child(timeline.clone())
+                    .child(chat_media_layer(timeline, window, cx))
                     .child(
                         div()
                             .flex_shrink_0()

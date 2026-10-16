@@ -5,7 +5,17 @@ pub mod agent_elapsed;
 #[allow(dead_code)]
 pub mod agent_spawn_summary;
 #[allow(dead_code)]
+pub mod assistant_citation_chip;
+#[allow(dead_code)]
+pub mod assistant_citation_comment_dismissal;
+#[allow(dead_code)]
+pub mod assistant_citation_comment_editor;
+#[allow(dead_code)]
 pub mod assistant_citation_navigation;
+#[allow(dead_code)]
+pub mod assistant_citation_source;
+#[allow(dead_code)]
+pub mod assistant_citation_target;
 pub mod changed_files_tree;
 pub mod chat_header;
 #[allow(dead_code)]
@@ -16,8 +26,15 @@ pub mod chat_canvas_layout;
 // Pure citation-selector text logic; the DOM capture half is not ported yet.
 #[allow(dead_code)]
 pub mod assistant_text_selection;
+pub mod chat_media;
 pub mod composer_pending_panels;
+#[allow(dead_code)]
+pub mod expanded_image;
+#[allow(dead_code)]
+pub mod highlighted_tokens;
 pub mod markdown;
+#[allow(dead_code)]
+pub mod mermaid_diagram;
 pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod panel_layout_controls;

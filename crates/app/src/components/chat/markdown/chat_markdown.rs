@@ -12,6 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,7 +22,7 @@ use gpui_kit::{
     Styled as _, Window, div, px, relative, rems,
 };
 
-use super::code_highlight::highlight_code;
+use super::code_highlight::{cached_highlight, highlight_code, plain_highlight};
 use super::inline_flow::{FlowSpan, FlowSpanStyle, FlowText, InlineFlow, SpanChrome, WhiteSpace};
 use super::markdown_links::{
     file_link_label, inline_code_file_path_candidate, is_markdown_file_link_label,
@@ -30,7 +31,12 @@ use super::markdown_links::{
 use super::markdown_pipeline::{
     AlertKind, Align, Block, Inlines, ListItem, MarkdownDocument, Marks, parse_chat_markdown,
 };
+use crate::components::chat::chat_media;
+use crate::components::chat::mermaid_diagram::{MERMAID_UNAVAILABLE, mermaid_diagram};
 use crate::components::chat::message_copy_button::{CODE_COPY_TIMEOUT_MS, MessageCopyButton};
+use crate::components::chat::timeline::assistant_citations::{
+    assistant_citation_label, parse_assistant_citation_href,
+};
 use crate::theme::color::{MixSpace, color, color_mix, with_alpha};
 use crate::theme::tokens::{RADIUS_LG, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
@@ -209,6 +215,27 @@ impl Md<'_> {
             }
             if let Some(link) = marks.link
                 && (ix == 0 || runs[ix - 1].1.link != Some(link))
+                && let Some(citation) = inlines
+                    .links
+                    .get(link)
+                    .and_then(|url| parse_assistant_citation_href(url))
+            {
+                let group_end = runs[ix..]
+                    .iter()
+                    .position(|(_, m)| m.link != Some(link))
+                    .map_or(runs.len(), |offset| ix + offset);
+                self.push_citation_chip(
+                    &mut text,
+                    &mut spans,
+                    &assistant_citation_label(&citation),
+                    link,
+                    inherit,
+                );
+                ix = group_end;
+                continue;
+            }
+            if let Some(link) = marks.link
+                && (ix == 0 || runs[ix - 1].1.link != Some(link))
                 && let Some(path) = inlines
                     .links
                     .get(link)
@@ -374,6 +401,13 @@ impl Md<'_> {
             .strut(self.fonts.sans.clone(), inherit.size, inherit.line_height)
             .document_order(order)
             .selection_color(self.selection)
+            .on_link(Rc::new(|url, _, cx| {
+                if let Some(citation) = parse_assistant_citation_href(url) {
+                    chat_media::open_quote(citation, cx);
+                } else {
+                    cx.open_url(url);
+                }
+            }))
     }
 
     /// Stacks rendered siblings with collapsed margins. Returns the stack and
@@ -818,12 +852,50 @@ impl Md<'_> {
             ElementId::NamedChild(Arc::new(self.id.clone()), format!("code-{order}").into());
         let wrapped_state = window.use_keyed_state(state_id.clone(), cx, |_, _| CodeBlockState {
             wrapped: true,
+            show_code: false,
+            pending: None,
+            highlighted: None,
         });
         let wrapped = wrapped_state.read(cx).wrapped;
 
         // Shiki keeps a trailing newline's empty line out of the output.
         let code_text = code.strip_suffix('\n').unwrap_or(code);
-        let highlighted = highlight_code(code_text, &language, dark);
+        let mut hasher = DefaultHasher::new();
+        code_text.hash(&mut hasher);
+        let code_hash = hasher.finish();
+        let ready = wrapped_state
+            .read(cx)
+            .highlighted
+            .clone()
+            .filter(|_| wrapped_state.read(cx).pending == Some(code_hash));
+        let highlighted =
+            if let Some(hit) = ready.or_else(|| cached_highlight(code_text, &language, dark)) {
+                hit
+            } else if wrapped_state.read(cx).pending == Some(code_hash) {
+                plain_highlight(code_text, dark)
+            } else {
+                let code_owned = code_text.to_string();
+                let language_owned = language.clone();
+                let state = wrapped_state.clone();
+                wrapped_state.update(cx, |state, _| state.pending = Some(code_hash));
+                cx.spawn(async move |cx| {
+                    let highlighted = cx
+                        .background_executor()
+                        .spawn(async move { highlight_code(&code_owned, &language_owned, dark) })
+                        .await;
+                    state.update(cx, |state, cx| {
+                        state.highlighted = Some(highlighted);
+                        cx.notify();
+                    });
+                })
+                .detach();
+                plain_highlight(code_text, dark)
+            };
+        let mermaid = language.eq_ignore_ascii_case("mermaid");
+        let show_diagram = mermaid
+            && !self.streaming
+            && !wrapped_state.read(cx).show_code
+            && !code_text.trim().is_empty();
         let code_size = self.fonts.code_size;
         let mut spans = Vec::new();
         let mut cursor = 0usize;
@@ -900,6 +972,7 @@ impl Md<'_> {
             "Wrap lines"
         };
         let toggle_state = wrapped_state.clone();
+        let diagram_state = wrapped_state.clone();
         let header = div()
             .flex()
             .items_center()
@@ -925,6 +998,34 @@ impl Md<'_> {
                     .flex()
                     .items_center()
                     .gap(self.rem(0.125))
+                    .when(mermaid && !self.streaming, |this| {
+                        let label = if show_diagram {
+                            "Show code"
+                        } else {
+                            "Show diagram"
+                        };
+                        let icon = if show_diagram {
+                            IconName::Code
+                        } else {
+                            IconName::Workflow
+                        };
+                        this.child(
+                            Button::new(ElementId::NamedChild(
+                                Arc::new(state_id.clone()),
+                                "diagram".into(),
+                            ))
+                            .variant(ButtonVariant::GhostMuted)
+                            .size(ButtonSize::IconXs)
+                            .tooltip(Tooltip::new(label))
+                            .child(Icon::new(icon).size(rems(0.75)))
+                            .on_click(move |_, _, cx| {
+                                diagram_state.update(cx, |state, cx| {
+                                    state.show_code = !state.show_code;
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                    })
                     .child(
                         Button::new(ElementId::NamedChild(
                             Arc::new(state_id.clone()),
@@ -962,8 +1063,15 @@ impl Md<'_> {
             .w_full()
             .px(self.rem(0.9))
             .py(self.rem(0.8))
-            .when(!wrapped, |this| this.overflow_x_scroll())
-            .child(div().when(!wrapped, |this| this.flex_none()).child(flow));
+            .when(!wrapped && !show_diagram, |this| this.overflow_x_scroll())
+            .child(if show_diagram {
+                mermaid_diagram(code_text, MERMAID_UNAVAILABLE, cx)
+            } else {
+                div()
+                    .when(!wrapped, |this| this.flex_none())
+                    .child(flow)
+                    .into_any_element()
+            });
         let margin = self.block_margin();
         Rendered {
             element: div()
@@ -1098,6 +1206,50 @@ impl Md<'_> {
 
 struct CodeBlockState {
     wrapped: bool,
+    show_code: bool,
+    pending: Option<u64>,
+    highlighted: Option<Arc<super::code_highlight::HighlightedCode>>,
+}
+
+impl Md<'_> {
+    fn push_citation_chip(
+        &self,
+        text: &mut String,
+        spans: &mut Vec<FlowSpan>,
+        label: &str,
+        link: usize,
+        inherit: Inherit,
+    ) {
+        let theme = self.theme;
+        let accent: Hsla = color("oklch(0.62 0.16 259)");
+        let size = inherit.size * 0.86;
+        let foreground: Hsla = color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into();
+        text.push_str(label);
+        spans.push(FlowSpan {
+            len: label.len(),
+            style: FlowSpanStyle {
+                family: self.fonts.sans.clone(),
+                weight: FontWeight::MEDIUM,
+                italic: false,
+                size,
+                line_height: 1.,
+                color: foreground,
+                strikethrough: false,
+                chrome: Some(SpanChrome {
+                    background: with_alpha(accent, 0.11).into(),
+                    border: Some(color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into()),
+                    radius: size * 0.5,
+                    pad_x: size * 0.5,
+                    pad_y: size * 0.1,
+                    leading: size * 1.5,
+                    icon: Some((IconName::Quote, foreground, size * 1.17, px(0.))),
+                }),
+                link: Some(link),
+                background: None,
+                atomic: true,
+            },
+        });
+    }
 }
 
 /// `extractFenceTitle`: ```ts title="x.ts" / ```ts src/main.ts

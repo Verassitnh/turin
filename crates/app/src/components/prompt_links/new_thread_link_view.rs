@@ -40,11 +40,7 @@ impl RenderOnce for NewThreadLinkView {
         let theme = cx.app_theme();
         div().child(match self.state {
             NewThreadLinkViewState::Opening => Empty::new()
-                .child(
-                    empty_header()
-                        .child(empty_title("Opening the link...", false))
-                        .child(empty_description("Preparing your draft.", cx)),
-                )
+                .child(empty_header().child(empty_title("Opening the link...", false)))
                 .into_any_element(),
             NewThreadLinkViewState::Opened => Empty::new()
                 .child(empty_header().child(empty_title("This link is open", false)))

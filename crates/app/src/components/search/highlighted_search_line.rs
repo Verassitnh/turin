@@ -3,14 +3,15 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock};
-use std::thread;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
-    rems,
+    App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement as _, Render, RenderOnce,
+    Styled as _, Window, div, rems,
 };
 use parking_lot::Mutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use turin_contracts::project::ProjectContentMatch;
 use turin_shared::js_string::{slice_utf16, utf16_len};
 
@@ -255,18 +256,81 @@ static HIGHLIGHT_CACHE: LazyLock<Mutex<HighlightCacheState>> = LazyLock::new(|| 
     })
 });
 
-/// Warms syntax highlighting off the UI thread for visible rows (upstream Suspense).
-pub struct SearchLineHighlightCache;
+fn commit_highlight_cache_entry(key: HighlightCacheKey, segments: Arc<Vec<HighlightSegment>>) {
+    let _guard = InFlightGuard { key: key.clone() };
+    let mut cache = HIGHLIGHT_CACHE.lock();
+    if cache.entries.len() >= HighlightCacheState::MAX_ENTRIES
+        && let Some(oldest) = cache.order.pop_front()
+    {
+        cache.entries.remove(&oldest);
+    }
+    cache.order.push_back(key.clone());
+    cache.entries.insert(key, segments);
+}
 
-impl SearchLineHighlightCache {
-    pub fn warm(visible: &[ProjectContentMatch], all: &[ProjectContentMatch], dark: bool) {
-        let _ = all;
-        for match_ in visible {
-            Self::schedule(match_, match_.path.as_str(), dark);
+fn finish_highlight_job(
+    key: HighlightCacheKey,
+    segments: Arc<Vec<HighlightSegment>>,
+    notify_host: impl FnOnce(),
+) {
+    commit_highlight_cache_entry(key, segments);
+    notify_host();
+}
+
+fn read_cached_segments(
+    match_: &ProjectContentMatch,
+    path: &str,
+    dark: bool,
+) -> Option<Arc<Vec<HighlightSegment>>> {
+    let key = cache_key(match_, path, dark);
+    HIGHLIGHT_CACHE.lock().entries.get(&key).cloned()
+}
+
+/// Host entity for async syntax highlighting; `cx.notify()` after cache fill (upstream Suspense).
+pub struct SearchLineHighlightController {
+    pub render_generation: usize,
+}
+
+impl SearchLineHighlightController {
+    pub fn new() -> Self {
+        Self {
+            render_generation: 0,
         }
     }
 
-    fn schedule(match_: &ProjectContentMatch, path: &str, dark: bool) {
+    pub fn warm(
+        &mut self,
+        visible: &[ProjectContentMatch],
+        _all: &[ProjectContentMatch],
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) {
+        for match_ in visible {
+            self.schedule_match(match_, match_.path.as_str(), dark, cx);
+        }
+    }
+
+    pub fn segments(
+        &mut self,
+        match_: &ProjectContentMatch,
+        path: &str,
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) -> Arc<Vec<HighlightSegment>> {
+        if let Some(segments) = read_cached_segments(match_, path, dark) {
+            return segments;
+        }
+        self.schedule_match(match_, path, dark, cx);
+        Arc::new(fallback_highlight_segments(match_))
+    }
+
+    fn schedule_match(
+        &mut self,
+        match_: &ProjectContentMatch,
+        path: &str,
+        dark: bool,
+        cx: &mut Context<Self>,
+    ) {
         let key = cache_key(match_, path, dark);
         let mut cache = HIGHLIGHT_CACHE.lock();
         if cache.entries.contains_key(&key) || cache.in_flight.contains(&key) {
@@ -276,32 +340,32 @@ impl SearchLineHighlightCache {
         let match_ = match_.clone();
         let path = path.to_owned();
         drop(cache);
-        thread::spawn(move || {
-            let _guard = InFlightGuard { key: key.clone() };
-            let segments = Arc::new(highlight_segments_for_match(&match_, &path, dark));
-            let mut cache = HIGHLIGHT_CACHE.lock();
-            if cache.entries.len() >= HighlightCacheState::MAX_ENTRIES
-                && let Some(oldest) = cache.order.pop_front()
-            {
-                cache.entries.remove(&oldest);
-            }
-            cache.order.push_back(key.clone());
-            cache.entries.insert(key, segments);
-        });
-    }
 
-    fn cached(match_: &ProjectContentMatch, path: &str, dark: bool) -> Arc<Vec<HighlightSegment>> {
-        let key = cache_key(match_, path, dark);
-        if let Some(segments) = HIGHLIGHT_CACHE.lock().entries.get(&key).cloned() {
-            return segments;
-        }
-        Self::schedule(match_, path, dark);
-        Arc::new(fallback_highlight_segments(match_))
+        cx.spawn(async move |this, cx| {
+            let segments = cx
+                .background_executor()
+                .spawn(async move { Arc::new(highlight_segments_for_match(&match_, &path, dark)) })
+                .await;
+
+            this.update(cx, |this, cx| {
+                finish_highlight_job(key, segments, || cx.notify());
+                this.render_generation = this.render_generation.saturating_add(1);
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for SearchLineHighlightController {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().hidden()
     }
 }
 
 #[derive(IntoElement)]
 pub struct HighlightedSearchLine {
+    pub highlight: Entity<SearchLineHighlightController>,
     pub match_: ProjectContentMatch,
     pub path: String,
     pub dark: bool,
@@ -311,7 +375,9 @@ impl RenderOnce for HighlightedSearchLine {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme();
         let primary_match_bg = with_alpha(theme.primary, 0.25);
-        let segments = SearchLineHighlightCache::cached(&self.match_, &self.path, self.dark);
+        let segments = self.highlight.update(cx, |controller, cx| {
+            controller.segments(&self.match_, &self.path, self.dark, cx)
+        });
         div()
             .flex()
             .flex_wrap()
@@ -388,11 +454,38 @@ mod tests {
     }
 
     #[test]
-    fn uses_fallback_segments_without_syntax_while_cache_warms() {
+    fn uses_fallback_segments_until_cache_is_filled() {
         let match_ = sample_match("hello", &[(1, 4)]);
-        let segments = SearchLineHighlightCache::cached(&match_, "src/main.rs", false);
-        assert!(segments.iter().any(|segment| segment.is_match));
-        assert!(segments.iter().any(|segment| !segment.is_match));
+        let fallback = fallback_highlight_segments(&match_);
+        assert!(fallback.iter().any(|segment| segment.is_match));
+        assert!(fallback.iter().any(|segment| !segment.is_match));
+    }
+
+    #[test]
+    fn finishing_a_highlight_job_notifies_the_host() {
+        let notifies = Arc::new(AtomicUsize::new(0));
+        let match_ = sample_match("let x = 1;", &[]);
+        let key = cache_key(&match_, "lib.rs", false);
+        let segments = Arc::new(highlight_segments_for_match(&match_, "lib.rs", false));
+        let notifies_for_host = notifies.clone();
+        finish_highlight_job(key, segments, move || {
+            notifies_for_host.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(notifies.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cached_segments_use_syntax_colors_after_commit() {
+        let match_ = sample_match("let x = 1;", &[]);
+        let key = cache_key(&match_, "lib.rs", false);
+        let segments = Arc::new(highlight_segments_for_match(&match_, "lib.rs", false));
+        assert!(
+            segments.iter().any(|segment| segment.color.is_some()),
+            "expected syntax-colored segments"
+        );
+        finish_highlight_job(key, segments, || {});
+        let cached = read_cached_segments(&match_, "lib.rs", false).expect("cache entry");
+        assert!(cached.iter().any(|segment| segment.color.is_some()));
     }
 
     #[test]

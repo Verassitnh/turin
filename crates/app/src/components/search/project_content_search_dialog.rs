@@ -5,12 +5,13 @@ use indexmap::IndexMap;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, FontWeight, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div, rems,
+    App, Entity, FontWeight, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div,
+    rems,
 };
 use turin_contracts::EnvironmentId;
 use turin_contracts::project::ProjectContentMatch;
 
-use super::highlighted_search_line::{HighlightedSearchLine, SearchLineHighlightCache};
+use super::highlighted_search_line::{HighlightedSearchLine, SearchLineHighlightController};
 use crate::pull_request::presentation_view::Spinner;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{TEXT_SM, TEXT_XS};
@@ -145,12 +146,13 @@ pub struct ProjectContentSearchDialog {
     pub selected_index: usize,
     pub visible_count: usize,
     pub dark: bool,
+    pub highlight: Entity<SearchLineHighlightController>,
 }
 
 impl RenderOnce for ProjectContentSearchDialog {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = cx.app_theme();
         let Some(_cwd) = self.target_cwd else {
+            let theme = cx.app_theme();
             return div()
                 .flex()
                 .flex_1()
@@ -164,7 +166,13 @@ impl RenderOnce for ProjectContentSearchDialog {
         };
         let has_query = !self.query.query.trim().is_empty();
         let visible = visible_content_matches(&self.results.matches, self.visible_count);
-        SearchLineHighlightCache::warm(&visible, &self.results.matches, self.dark);
+        let highlight = self.highlight.clone();
+        let dark = self.dark;
+        let all_matches = self.results.matches.clone();
+        highlight.update(cx, |controller, cx| {
+            controller.warm(&visible, &all_matches, dark, cx);
+        });
+        let theme = cx.app_theme();
         let groups = group_content_matches(&visible);
         let file_count = content_search_file_count(&self.results.matches);
         let show_status = show_content_search_status_bar(&self.results, has_query);
@@ -298,6 +306,7 @@ impl RenderOnce for ProjectContentSearchDialog {
                                             .child(indexed.match_.line_number.to_string()),
                                     )
                                     .child(div().flex_1().min_w_0().child(HighlightedSearchLine {
+                                        highlight: highlight.clone(),
                                         match_: indexed.match_,
                                         path: group.path.clone(),
                                         dark: self.dark,

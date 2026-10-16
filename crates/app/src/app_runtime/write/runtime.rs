@@ -24,6 +24,7 @@ use turin_git::git_vcs_driver::GitVcsDriver;
 use turin_git::process::ProcessRunner;
 use turin_orchestration::core::context_handoff_service::ContextHandoffService;
 use turin_orchestration::core::orchestrator::Orchestrator;
+use turin_orchestration::core::orchestrator::delegated_task::LateDelegatedTaskRecovery;
 use turin_orchestration::core::orchestrator::services::{
     DispatchSeams, ReconcileTrigger, RestartRecovery as _,
 };
@@ -38,7 +39,7 @@ use turin_orchestration::core::provider_turn_start_service::{
     LocalTurnStartWorkspace, NoPromptCommands, ProjectRootsRuntimePolicy, ProviderTurnStartService,
 };
 use turin_orchestration::core::restart_continuation_service::{
-    LateRestartThreads, NoDelegatedTaskRecovery, RestartContinuationService,
+    LateRestartThreads, RestartContinuationService,
 };
 use turin_orchestration::core::run_execution_service::{NoAfterTurnRefresh, RunExecutionService};
 use turin_orchestration::core::run_finalization_service::RunFinalizationService;
@@ -163,13 +164,13 @@ impl WriteRuntime {
         // construction and the service needs the thread-management service
         // (which holds the orchestrator), so the threads are bound late.
         let late_threads = LateRestartThreads::new();
+        let late_delegated = LateDelegatedTaskRecovery::new();
         let restart = Arc::new(RestartContinuationService::new(
             host_settings.clone(),
             late_threads.clone(),
             projection.clone(),
             stores.outbox.clone(),
-            // Delegated tasks (finalizeAppOwnedSubagent) are not ported yet.
-            Arc::new(NoDelegatedTaskRecovery),
+            late_delegated.clone(),
         ));
 
         // The decider.
@@ -190,6 +191,9 @@ impl WriteRuntime {
                 sessions: sessions.clone(),
                 switch_planner,
                 provider_instances: host_settings.clone(),
+                // Wake offers are dropped until the continuation worker
+                // (`ProviderContinuationService`) is wired to a queue.
+                ..DispatchSeams::default()
             }),
         );
         let threads = Arc::new(ThreadManagementService::new(
@@ -203,6 +207,7 @@ impl WriteRuntime {
         ));
 
         late_threads.bind(threads.clone());
+        late_delegated.bind(orchestrator.clone());
 
         // Startup order (upstream serverRuntimeStartup): reconcile runs that
         // were live when the last process died, settle delegated tasks, then

@@ -466,7 +466,7 @@ async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "WIP: the answered AskUserQuestion turn never settles; under investigation"]
+#[ignore = "provider-claude emits no user_input_request turn item (register_request drops the control request body), so the question id is unknowable; see docs/handoff/T22.md"]
 async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes() {
     use turin_contracts::orchestration_v2::{
         OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
@@ -510,53 +510,56 @@ async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes(
     let mut answered = false;
     let status = tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(item) = events.next().await {
-            match item.expect("event").event {
-                OrchestrationV2DomainEvent::RunUpdated { payload, .. } => match payload.status {
+            if let OrchestrationV2DomainEvent::RunUpdated { payload, .. } =
+                item.expect("event").event
+                && matches!(
+                    payload.status,
                     OrchestrationV2RunStatus::Completed
-                    | OrchestrationV2RunStatus::Failed
-                    | OrchestrationV2RunStatus::Interrupted
-                    | OrchestrationV2RunStatus::Cancelled => return payload.status,
-                    _ if !answered => {
-                        let records = orchestrator
-                            .get_thread_records(
-                                &thread,
-                                &[RecordField::RuntimeRequests, RecordField::TurnItems],
-                                &RecordFilter::default(),
-                            )
-                            .await
-                            .expect("records");
-                        let Some(request) = records.runtime_requests.iter().find(|request| {
-                            request.status == OrchestrationV2RuntimeRequestStatus::Pending
-                        }) else {
-                            continue;
-                        };
-                        let Some(question_id) =
-                            records.turn_items.iter().find_map(|item| match item {
-                                OrchestrationV2TurnItem::UserInputRequest { questions, .. } => {
-                                    questions.first().map(|question| question.id.to_string())
-                                }
-                                _ => None,
-                            })
-                        else {
-                            // The request lands one event before its turn item.
-                            continue;
-                        };
-                        answered = true;
-                        harness
-                            .commands
-                            .respond_to_request(
-                                &thread,
-                                request.id.as_str(),
-                                None,
-                                Some(json!({ question_id: "Blue" })),
-                            )
-                            .await
-                            .expect("respond");
-                    }
-                    _ => {}
-                },
-                _ => {}
+                        | OrchestrationV2RunStatus::Failed
+                        | OrchestrationV2RunStatus::Interrupted
+                        | OrchestrationV2RunStatus::Cancelled
+                )
+            {
+                return payload.status;
             }
+            if answered {
+                continue;
+            }
+            let records = orchestrator
+                .get_thread_records(
+                    &thread,
+                    &[RecordField::RuntimeRequests, RecordField::TurnItems],
+                    &RecordFilter::default(),
+                )
+                .await
+            );
+            let Some(request) = records
+                .runtime_requests
+                .iter()
+                .find(|request| request.status == OrchestrationV2RuntimeRequestStatus::Pending)
+            else {
+                continue;
+            };
+            // The request lands one event before its turn item.
+            let Some(question_id) = records.turn_items.iter().find_map(|item| match item {
+                OrchestrationV2TurnItem::UserInputRequest { questions, .. } => {
+                    questions.first().map(|question| question.id.to_string())
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            answered = true;
+            harness
+                .commands
+                .respond_to_request(
+                    &thread,
+                    request.id.as_str(),
+                    None,
+                    Some(json!({ question_id: "Blue" })),
+                )
+                .await
+                .expect("respond");
         }
         panic!("event stream ended before the run settled");
     })

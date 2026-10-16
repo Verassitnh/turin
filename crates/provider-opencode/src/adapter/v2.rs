@@ -1271,14 +1271,14 @@ impl OpenCodeV2Session {
                         started_at,
                         child: child.clone(),
                     };
-                    if tracked.prompt.is_empty() || tracked.title.is_none() {
-                        if let Some(previous) = inner.unattached_background.get(call_id) {
-                            if tracked.prompt.is_empty() {
-                                tracked.prompt = previous.prompt.clone();
-                            }
-                            if tracked.title.is_none() {
-                                tracked.title = previous.title.clone();
-                            }
+                    if let Some(previous) = inner.unattached_background.get(call_id)
+                        && (tracked.prompt.is_empty() || tracked.title.is_none())
+                    {
+                        if tracked.prompt.is_empty() {
+                            tracked.prompt = previous.prompt.clone();
+                        }
+                        if tracked.title.is_none() {
+                            tracked.title = previous.title.clone();
                         }
                     }
                     if let Some(child_session) = child_session {
@@ -1466,11 +1466,7 @@ impl OpenCodeV2Session {
                     .is_some_and(|turn| turn.provider_turn.id == open.provider_turn_id)
             });
             if !same_turn {
-                if let Some(host) = host {
-                    self.show_ask_on_held_turn(
-                        &mut guard, &host, session_id, &open, native_id, ask, kind,
-                    );
-                }
+                self.show_ask_on_held_turn(&mut guard, session_id, &open, native_id, ask, kind);
                 return;
             }
         }
@@ -1592,16 +1588,18 @@ impl OpenCodeV2Session {
     fn show_ask_on_held_turn(
         &self,
         guard: &mut V2Inner,
-        host: &str,
         session_id: &str,
         open: &OpenSubagent,
         native_id: &str,
         ask: Ask,
         kind: &str,
     ) {
+        let Some(host) = thread_session_of(guard, &open.parent_session) else {
+            return;
+        };
         let now = UtcDateTime::now();
         let (request, item, node, request_id, thread_id) = {
-            let Some(thread) = guard.threads.get_mut(host) else {
+            let Some(thread) = guard.threads.get_mut(&host) else {
                 return;
             };
             let Some((ordinals, next)) = thread.held_ordinals.get_mut(&open.provider_turn_id)
@@ -4047,16 +4045,14 @@ fn sessions_of(guard: &V2Inner, root: &str) -> Vec<String> {
         if open.child_session.is_empty() {
             continue;
         }
-        if sessions.iter().any(|id| id == &open.parent_session)
-            || extra.iter().any(|id| id == &open.parent_session)
-            || open.parent_session == root
-        {
-            if open.child_session != root
-                && sessions.iter().all(|id| id != &open.child_session)
-                && extra.iter().all(|id| id != &open.child_session)
-            {
-                extra.push(open.child_session.clone());
-            }
+        let parent_in_tree = open.parent_session == root
+            || sessions.iter().any(|id| id == &open.parent_session)
+            || extra.iter().any(|id| id == &open.parent_session);
+        let child_new = open.child_session != root
+            && sessions.iter().all(|id| id != &open.child_session)
+            && extra.iter().all(|id| id != &open.child_session);
+        if parent_in_tree && child_new {
+            extra.push(open.child_session.clone());
         }
     }
     sessions.extend(extra);
@@ -4090,10 +4086,7 @@ fn background_call_above(guard: &V2Inner, session_id: &str) -> Option<OpenSubage
         if let Some(open) = guard.background.get(&current) {
             return Some(open.clone());
         }
-        match guard.children.get(&current).cloned() {
-            Some(parent) => current = parent,
-            None => return None,
-        }
+        current = guard.children.get(&current).cloned()?;
     }
     None
 }
@@ -4105,10 +4098,7 @@ fn thread_session_of(guard: &V2Inner, session_id: &str) -> Option<String> {
         if guard.threads.contains_key(&current) {
             return Some(current);
         }
-        match guard.children.get(&current).cloned() {
-            Some(parent) => current = parent,
-            None => return None,
-        }
+        current = guard.children.get(&current).cloned()?;
     }
     None
 }

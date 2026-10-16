@@ -10,6 +10,7 @@ pub mod link_created_pull_request;
 pub mod locale_compare;
 pub mod process;
 pub mod remote_refs;
+pub mod server_source_control_host;
 pub mod shared_git;
 pub mod source_control_bridge;
 pub mod vcs_driver;

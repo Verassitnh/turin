@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/003_CheckpointDiffBlobs.ts
 CREATE TABLE IF NOT EXISTS checkpoint_diff_blobs (
       thread_id TEXT NOT NULL,
       from_turn_count INTEGER NOT NULL,

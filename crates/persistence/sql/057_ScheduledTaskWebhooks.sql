@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/057_ScheduledTaskWebhooks.ts
 ALTER TABLE scheduled_tasks ADD COLUMN webhook_token TEXT;
 ALTER TABLE scheduled_tasks ADD COLUMN webhook_secret TEXT;
 CREATE TABLE IF NOT EXISTS scheduled_task_webhook_deliveries (

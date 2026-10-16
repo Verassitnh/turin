@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/023_ProjectionThreadShellSummary.ts
 ALTER TABLE projection_threads
     ADD COLUMN latest_user_message_at TEXT;
 ALTER TABLE projection_threads

@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/033_ProjectionThreadsSettled.ts
 ALTER TABLE projection_threads
       ADD COLUMN settled_override TEXT;
 ALTER TABLE projection_threads

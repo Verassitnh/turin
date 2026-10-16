@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/046_RepairAutomaticSettlementTimestamps.ts
 WITH activity_timestamps AS (
       SELECT thread_id, created_at AS activity_at
       FROM projection_thread_messages

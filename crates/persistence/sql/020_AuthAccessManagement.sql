@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/020_AuthAccessManagement.ts
 CREATE TABLE IF NOT EXISTS auth_pairing_links (
       id TEXT PRIMARY KEY,
       credential TEXT NOT NULL UNIQUE,

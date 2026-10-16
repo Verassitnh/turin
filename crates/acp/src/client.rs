@@ -1,4 +1,5 @@
 //! Port of upstream/packages/effect-acp/src/client.ts
+//! Also ports upstream/packages/effect-acp/src/_internal/shared.ts.
 //!
 //! Extension requests and extension notifications are separate tables, matching
 //! `extRequestHandlers` and `extNotificationHandlers`. A JSON-RPC request is

@@ -1,4 +1,5 @@
 //! Port of upstream/apps/server/src/persistence/PullRequestFilesViewed.ts
+//! Also ports upstream/apps/server/src/persistence/Migrations/053_PullRequestFilesViewed.ts.
 
 use rusqlite::{Connection, params};
 

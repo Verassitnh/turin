@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/044_ClearAutomaticProjectModelDefaults.ts
 WITH automatically_seeded_projects AS (
       SELECT created.stream_id AS project_id
       FROM orchestration_events AS created

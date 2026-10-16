@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/024_BackfillProjectionThreadShellSummary.ts
 INSERT OR IGNORE INTO projection_pending_approvals (
       request_id,
       thread_id,

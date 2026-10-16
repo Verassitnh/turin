@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/025_CleanupInvalidProjectionPendingApprovals.ts
 DELETE FROM projection_pending_approvals
     WHERE NOT EXISTS (
       SELECT 1

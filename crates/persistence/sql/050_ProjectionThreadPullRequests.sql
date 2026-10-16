@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts
 CREATE TABLE IF NOT EXISTS projection_thread_pull_requests (
       thread_id TEXT NOT NULL,
       host TEXT NOT NULL,

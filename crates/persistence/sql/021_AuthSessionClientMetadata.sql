@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/021_AuthSessionClientMetadata.ts
 ALTER TABLE auth_pairing_links
       ADD COLUMN label TEXT;
 ALTER TABLE auth_sessions

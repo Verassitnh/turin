@@ -6,32 +6,15 @@ license.workspace = true
 
 [dependencies]
 turin-contracts.workspace = true
-turin-codex-app-server = { path = "../codex-app-server" }
-turin-provider-core = { path = "../provider-core" }
-turin-shared = { path = "../shared" }
-turin-text-generation.workspace = true
+turin-provider-core.workspace = true
 anyhow.workspace = true
-async-trait.workspace = true
-base64.workspace = true
-chrono.workspace = true
-regex.workspace = true
-futures.workspace = true
-getrandom.workspace = true
-indexmap.workspace = true
-jsonwebtoken.workspace = true
-parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
-reqwest.workspace = true
-url.workspace = true
-uuid.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-stream.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
-rand = "0.8"
-rsa = { version = "0.9", features = ["pem", "sha2"] }
+pretty_assertions.workspace = true

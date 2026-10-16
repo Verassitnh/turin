@@ -1,4 +1,5 @@
 //! Hand-typed Codex app-server shapes that the pinned schema does not expose.
+//! Also ports upstream/apps/server/src/provider/CodexThreadRevert.ts.
 //!
 //! Upstream decodes these from the raw request channel or assigns them onto a
 //! generated schema (`client.ts` `fieldsAssign`, `CodexAdapterV2.ts`,

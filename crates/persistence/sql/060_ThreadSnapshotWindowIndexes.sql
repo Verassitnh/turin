@@ -1,3 +1,4 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/060_ThreadSnapshotWindowIndexes.ts
 CREATE INDEX IF NOT EXISTS orchestration_v2_projection_turn_items_user_message_idx
     ON orchestration_v2_projection_turn_items(thread_id, ordinal, turn_item_id)
     WHERE type = 'user_message';

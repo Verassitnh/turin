@@ -16,11 +16,18 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
+# Capture the caller's cwd before entering the repo. A relative output dir is
+# resolved against that cwd, including a path that does not exist yet.
+caller_pwd="$PWD"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 target_dir="${CARGO_TARGET_DIR:-target}"
-out_dir="${1:-$target_dir/bundle}"
+case "${1:-}" in
+  "") out_dir="$target_dir/bundle" ;;
+  /*) out_dir="$1" ;;
+  *) out_dir="$caller_pwd/$1" ;;
+esac
 app="$out_dir/Turin.app"
 source_png="assets/prod/black-macos-1024.png"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"

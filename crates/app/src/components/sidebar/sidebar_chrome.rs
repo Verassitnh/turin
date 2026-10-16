@@ -7,7 +7,7 @@
 
 use gpui_kit::{
     App, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    Styled as _, WeakEntity, Window, div, px, svg,
+    Styled as _, WeakEntity, Window, div, rems, svg,
 };
 
 use super::SidebarEvent;
@@ -55,16 +55,18 @@ impl RenderOnce for SidebarChromeHeader {
                             .rounded(CONTROL_RADIUS)
                             .text_color(theme.foreground)
                             // SidebarBrandMark slot styling (`text-sm font-medium
-                            // tracking-tight`): the T mark (`h-[1cap]`, 14px
-                            // text, cap height ~10px, width from the 48.8:56
-                            // viewBox) then Turin's name in place of "Code".
+                            // tracking-tight`): the T mark (`h-[1cap]` on 14px
+                            // text is ~10px, so `rems(0.625)` at the 16px
+                            // default; width from the 48.8:56 viewBox) then
+                            // Turin's name in place of "Code". Rems scale with
+                            // the interface font.
                             .gap_1()
                             .child(
                                 svg()
                                     .path(WORDMARK)
                                     .flex_shrink_0()
-                                    .w(px(8.71))
-                                    .h(px(10.))
+                                    .w(rems(0.625 * 48.8 / 56.))
+                                    .h(rems(0.625))
                                     .text_color(theme.foreground),
                             )
                             .child(

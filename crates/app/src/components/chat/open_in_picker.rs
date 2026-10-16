@@ -10,6 +10,7 @@ use gpui_kit::{
 use turin_contracts::editor::EditorId;
 
 use super::super::jetbrains_icons;
+use crate::assets::editor_icons;
 use crate::assets::PROVIDER_CURSOR;
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
@@ -35,12 +36,22 @@ fn is_windows_platform(platform: &str) -> bool {
     platform.contains("Win")
 }
 
-fn editor_icon_path(editor: EditorId) -> SharedString {
+fn editor_icon_path(editor: EditorId, platform: &str) -> SharedString {
     if let Some(path) = jetbrains_icons::jetbrains_icon_for_editor(editor) {
         return path.into();
     }
     match editor {
         EditorId::Cursor => PROVIDER_CURSOR.into(),
+        EditorId::Trae => editor_icons::TRAE.into(),
+        EditorId::Kiro => editor_icons::KIRO.into(),
+        EditorId::Vscode => editor_icons::VSCODE.into(),
+        EditorId::VscodeInsiders => editor_icons::VSCODE_INSIDERS.into(),
+        EditorId::Vscodium => editor_icons::VSCODIUM.into(),
+        EditorId::Zed => editor_icons::ZED.into(),
+        EditorId::Antigravity => editor_icons::ANTIGRAVITY.into(),
+        EditorId::FileManager if is_mac_platform(platform) => editor_icons::FINDER.into(),
+        EditorId::FileManager if is_windows_platform(platform) => editor_icons::FILE_EXPLORER.into(),
+        EditorId::FileManager => editor_icons::FOLDER_CLOSED.into(),
         _ => PROVIDER_CURSOR.into(),
     }
 }
@@ -59,7 +70,7 @@ pub fn resolve_open_in_options(
         if available_editors.contains(&editor) {
             options.push(OpenInOption {
                 label: turin_launcher::editor_labels::editor_label_for_platform(editor, platform),
-                icon_path: editor_icon_path(editor),
+                icon_path: editor_icon_path(editor, platform),
                 value: editor,
                 kind,
             });
@@ -182,5 +193,36 @@ mod tests {
     #[test]
     fn omits_unavailable_editors() {
         assert!(resolve_open_in_options("MacIntel", &[]).is_empty());
+    }
+
+    #[test]
+    fn maps_each_editor_to_its_own_icon() {
+        let options = resolve_open_in_options(
+            "MacIntel",
+            &[
+                EditorId::Vscode,
+                EditorId::Zed,
+                EditorId::FileManager,
+            ],
+        );
+        let vscode = options
+            .iter()
+            .find(|option| option.value == EditorId::Vscode)
+            .unwrap();
+        let zed = options
+            .iter()
+            .find(|option| option.value == EditorId::Zed)
+            .unwrap();
+        assert_eq!(vscode.icon_path.as_ref(), editor_icons::VSCODE);
+        assert_eq!(zed.icon_path.as_ref(), editor_icons::ZED);
+        assert_eq!(
+            options
+                .iter()
+                .find(|option| option.value == EditorId::FileManager)
+                .unwrap()
+                .icon_path
+                .as_ref(),
+            editor_icons::FINDER
+        );
     }
 }

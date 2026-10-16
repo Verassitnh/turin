@@ -17,6 +17,7 @@ pub mod input_group;
 pub mod kbd;
 pub mod label;
 pub mod menu;
+pub mod morph_icon;
 pub mod number_field;
 pub mod popover;
 pub mod radio_group;

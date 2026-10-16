@@ -182,7 +182,12 @@ impl CommandPalette {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let active = enabled && self.highlighted.as_deref() == Some(item.value.as_str());
+        let active_value = if self.auto_highlights_first_row() && !self.highlight_cleared {
+            self.effective_highlight()
+        } else {
+            self.highlighted.clone()
+        };
+        let active = enabled && active_value.as_deref() == Some(item.value.as_str());
         let sidebar = self.snapshot.as_ref().map(|snapshot| &snapshot.sidebar);
 
         let project_for_action = match item.run() {

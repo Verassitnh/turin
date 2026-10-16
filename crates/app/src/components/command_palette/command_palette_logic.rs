@@ -664,6 +664,48 @@ pub fn find_highlighted_command_palette_item<'a>(
         .find(|item| item.value == value && !item.disabled)
 }
 
+/// Keyboard highlight position, including Base UI's hidden first-row highlight.
+pub fn resolve_command_palette_highlight_index(
+    item_count: usize,
+    highlighted: Option<usize>,
+    auto_highlights_first_row: bool,
+    highlight_cleared: bool,
+) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+    if let Some(index) = highlighted {
+        return Some(index);
+    }
+    if auto_highlights_first_row && !highlight_cleared {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+/// `CommandPalette.tsx` ArrowUp/ArrowDown over the flat item list.
+pub fn move_command_palette_highlight_index(
+    item_count: usize,
+    highlighted: Option<usize>,
+    auto_highlights_first_row: bool,
+    highlight_cleared: bool,
+    delta: isize,
+) -> usize {
+    let current = resolve_command_palette_highlight_index(
+        item_count,
+        highlighted,
+        auto_highlights_first_row,
+        highlight_cleared,
+    );
+    match (current, highlight_cleared, delta) {
+        (None, true, d) if d > 0 => 0,
+        (None, _, d) if d > 0 => 0,
+        (None, _, _) => item_count.saturating_sub(1),
+        (Some(index), _, d) => (index as isize + d).rem_euclid(item_count as isize) as usize,
+    }
+}
+
 /// Assigns positional jump shortcuts to the first nine displayed items.
 pub fn enumerate_command_palette_items(items: Vec<CommandPaletteItem>) -> Vec<CommandPaletteItem> {
     items

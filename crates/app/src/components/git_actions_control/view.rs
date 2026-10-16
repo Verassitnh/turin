@@ -197,7 +197,7 @@ impl GitActionsControl {
     }
 
     /// `gitItems`: the menu's rows and warnings.
-    fn menu_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn menu_content(&mut self, panel: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.app_theme().clone();
         let weak = cx.entity().downgrade();
         let status_view = self.status_for(cx);
@@ -270,7 +270,8 @@ impl GitActionsControl {
         div()
             .flex()
             .flex_col()
-            .min_w(rems(12.))
+            .min_w(rems(10.))
+            .when(panel, |this| this.w_full())
             .p_1()
             .rounded_lg()
             .border_1()
@@ -601,10 +602,11 @@ impl GitActionsControl {
                         })
                         .content({
                             let weak_content = weak.clone();
+                            let panel_menu = panel;
                             move |_, _, cx| match weak_content.upgrade() {
-                                Some(control) => {
-                                    control.update(cx, |control, cx| control.menu_content(cx))
-                                }
+                                Some(control) => control.update(cx, |control, cx| {
+                                    control.menu_content(panel_menu, cx)
+                                }),
                                 None => div().into_any_element(),
                             }
                         }),

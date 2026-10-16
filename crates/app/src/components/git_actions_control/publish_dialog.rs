@@ -259,40 +259,46 @@ impl Render for PublishForm {
                     .child(label("Provider"))
                     .child(
                         div()
-                            .w(rems(14.))
                             .flex()
-                            .items_center()
-                            .gap_3()
-                            .rounded(RADIUS_LG)
-                            .border_1()
-                            .border_color(border)
-                            .bg(background)
-                            .px_3()
-                            .py_3()
-                            .when(ready, |this| this.cursor(CursorStyle::PointingHand))
-                            .when(!ready, |this| this.opacity(0.64))
-                            .child(
-                                Icon::new(IconName::Github)
-                                    .size(rems(1.25))
-                                    .color(theme.foreground),
-                            )
+                            .gap_2()
                             .child(
                                 div()
-                                    .min_w_0()
                                     .flex_1()
-                                    .truncate()
-                                    .text_size(TEXT_SM.size)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(self.provider.label.clone()),
-                            )
-                            .when(!ready, |this| {
-                                this.child(
-                                    Button::new("publish-setup-required")
-                                        .variant(ButtonVariant::WarningOutline)
-                                        .size(ButtonSize::Micro)
-                                        .label("Setup Required"),
-                                )
-                            }),
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .rounded(RADIUS_LG)
+                                    .border_1()
+                                    .border_color(border)
+                                    .bg(background)
+                                    .px_3()
+                                    .py_3()
+                                    .when(ready, |this| this.cursor(CursorStyle::PointingHand))
+                                    .when(!ready, |this| this.opacity(0.64))
+                                    .child(
+                                        Icon::new(IconName::Github)
+                                            .size(rems(1.25))
+                                            .color(theme.foreground),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .truncate()
+                                            .text_size(TEXT_SM.size)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(self.provider.label.clone()),
+                                    )
+                                    .when(!ready, |this| {
+                                        this.child(
+                                            Button::new("publish-setup-required")
+                                                .variant(ButtonVariant::WarningOutline)
+                                                .size(ButtonSize::Micro)
+                                                .label("Setup Required"),
+                                        )
+                                    }),
+                            ),
                     )
                     .children(hint.filter(|_| !ready).map(|hint| {
                         div()
@@ -765,7 +771,7 @@ pub fn open(
     window.open_dialog(cx, move |dialog, _, _| {
         dialog
             .title("Publish repository")
-            .w(px(560.))
+            .w(px(576.))
             .child(form.clone())
     });
 }

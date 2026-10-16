@@ -1144,17 +1144,19 @@ impl CommandPalette {
         if count == 0 {
             return;
         }
-        let current = self
-            .highlighted
-            .as_ref()
-            .and_then(|value| self.rows.item_values.iter().position(|item| item == value));
-        let next = match (current, self.highlight_cleared, delta) {
-            // The first ArrowDown after typing lands on the first row.
-            (None, true, d) if d > 0 => 0,
-            (None, _, d) if d > 0 => 0,
-            (None, _, _) => count - 1,
-            (Some(index), _, d) => (index as isize + d).rem_euclid(count as isize) as usize,
-        };
+        let highlighted = self.highlighted.as_ref().and_then(|value| {
+            self.rows
+                .item_values
+                .iter()
+                .position(|item| item == value)
+        });
+        let next = command_palette_logic::move_command_palette_highlight_index(
+            count,
+            highlighted,
+            self.auto_highlights_first_row(),
+            self.highlight_cleared,
+            delta,
+        );
         self.highlight_cleared = false;
         self.highlighted = Some(self.rows.item_values[next].clone());
         if let Some(row) = self.rows.row_index_by_item_index.get(next) {

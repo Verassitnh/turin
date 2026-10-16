@@ -117,6 +117,6 @@ pub fn open(
         continue_label,
     });
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog.title(title.clone()).w(px(560.)).child(form.clone())
+        dialog.title(title.clone()).w(px(576.)).child(form.clone())
     });
 }

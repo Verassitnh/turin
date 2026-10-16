@@ -498,7 +498,7 @@ pub fn open(
     window.open_dialog(cx, move |dialog, _, _| {
         dialog
             .title(COMMIT_DIALOG_TITLE)
-            .w(px(560.))
+            .w(px(512.))
             .child(form.clone())
     });
 }

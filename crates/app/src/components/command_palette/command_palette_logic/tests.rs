@@ -972,3 +972,27 @@ fn browse_input_end_padding_reserves_room_for_the_submit_label() {
     assert_eq!(browse_input_end_padding(false, true), 7.5);
     assert_eq!(browse_input_end_padding(false, false), 6.);
 }
+
+#[test]
+fn auto_highlight_makes_the_first_arrow_down_select_row_two() {
+    assert_eq!(
+        resolve_command_palette_highlight_index(3, None, true, false),
+        Some(0)
+    );
+    assert_eq!(
+        move_command_palette_highlight_index(3, None, true, false, 1),
+        1
+    );
+}
+
+#[test]
+fn cleared_highlight_makes_the_first_arrow_down_select_row_one() {
+    assert_eq!(
+        resolve_command_palette_highlight_index(3, None, true, true),
+        None
+    );
+    assert_eq!(
+        move_command_palette_highlight_index(3, None, true, true, 1),
+        0
+    );
+}

@@ -141,7 +141,7 @@ impl RenderOnce for ComposerControl {
             .rounded(CONTROL_RADIUS)
             .border_1()
             .border_color(gpui_kit::transparent_black())
-            .h(rems(1.75))
+            .h(if xs { rems(1.5) } else { rems(1.75) })
             .map(|this| {
                 if xs {
                     this.gap_1()

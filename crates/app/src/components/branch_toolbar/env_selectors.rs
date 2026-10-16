@@ -70,7 +70,7 @@ pub fn environment_indicator(
         .unwrap_or_else(|| "Run on".to_owned());
     div()
         .flex()
-        .h(rems(1.75))
+        .h(rems(1.5))
         .min_w_0()
         .max_w_full()
         .items_center()

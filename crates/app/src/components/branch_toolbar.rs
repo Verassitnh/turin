@@ -500,7 +500,7 @@ impl BranchToolbar {
             } else {
                 div()
                     .flex()
-                    .h(rems(1.75))
+                    .h(rems(1.5))
                     .min_w_0()
                     .items_center()
                     .gap_1()

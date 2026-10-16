@@ -38,4 +38,6 @@ pub mod timestamp_format;
 // Find-in-thread logic. The timeline does not drive find yet, so nothing calls these.
 #[allow(dead_code)]
 pub mod thread_find;
+#[allow(dead_code)]
+pub mod thread_find_position;
 pub mod work_log;

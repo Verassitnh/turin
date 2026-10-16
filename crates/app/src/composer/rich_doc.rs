@@ -97,13 +97,36 @@ pub enum Atom {
         label: String,
         description: Option<String>,
     },
+    /// `composer-citation`: an assistant quote. `cite_key` identifies the
+    /// node while its comment editor is open (upstream `randomNodeKey`).
+    Citation {
+        citation: Box<turin_contracts::assistant_citations::AssistantCitation>,
+        source: String,
+        cite_key: String,
+    },
+    /// `composer-context-reference`: a `t3-context://` link.
+    ContextReference {
+        kind: String,
+        context_id: String,
+        label: String,
+        source: String,
+    },
+}
+
+/// `randomNodeKey`: unique per process, which is all the key is used for.
+pub fn random_node_key() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    format!("tiptap-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 impl Atom {
     /// `readAtomSource`.
     pub fn source(&self) -> String {
         match self {
-            Atom::Mention { source, .. } => source.clone(),
+            Atom::Mention { source, .. }
+            | Atom::Citation { source, .. }
+            | Atom::ContextReference { source, .. } => source.clone(),
             Atom::Skill { name, .. } if !name.is_empty() => format!("${name}"),
             Atom::Skill { .. } => String::new(),
         }
@@ -527,6 +550,22 @@ fn atom_for_segment(
                 description: meta.description,
             }
         }
+        ComposerPromptSegment::Citation { citation, source } => Atom::Citation {
+            citation: Box::new(citation.clone()),
+            source: source.clone(),
+            cite_key: random_node_key(),
+        },
+        ComposerPromptSegment::ContextReference {
+            kind,
+            context_id,
+            label,
+            source,
+        } => Atom::ContextReference {
+            kind: kind.clone(),
+            context_id: context_id.clone(),
+            label: label.clone(),
+            source: source.clone(),
+        },
         ComposerPromptSegment::Text { .. } => unreachable!("text is not an atom"),
     }
 }
@@ -857,6 +896,8 @@ pub struct DocMap {
     pub block_starts: Vec<usize>,
     /// Block that owns each markdown line (diagnostics / tests).
     pub block_count: usize,
+    /// Unique context ids referenced by the value (`contextIds`).
+    pub context_ids: Vec<String>,
 }
 
 struct Acc {
@@ -1243,13 +1284,30 @@ pub fn serialize_doc(doc: &Doc) -> DocMap {
             Block::Paragraph(content) => append_inline_runs(content, index, &mut acc),
         }
     }
+    let context_ids = collect_inline_context_ids(&acc.value);
     DocMap {
         value: acc.value,
         runs: acc.runs,
         doc_length: acc.flat,
         block_starts,
         block_count: doc.blocks.len(),
+        context_ids,
     }
+}
+
+/// `collectInlineContextIds` (lib/composerContextReferences.ts): unique ids,
+/// in first-occurrence order.
+pub fn collect_inline_context_ids(prompt: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for occurrence in
+        turin_shared::composer_context_references::collect_composer_context_references(prompt)
+    {
+        let id = occurrence.context_id.as_str();
+        if !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
 }
 
 /// `serializeSelection` for a flat range: the stored markdown of the blocks

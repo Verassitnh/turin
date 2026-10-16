@@ -324,10 +324,20 @@ impl ChatComposer {
         self.validation = None;
         self.history_position = None;
         self.layer = None;
-        self.editor.update(cx, |editor, cx| {
+        let saved = self.editor.update(cx, |editor, cx| {
             let end = crate::composer::js_string::utf16_len(&prompt);
-            editor.set_value(&prompt, end, cx);
+            editor.set_value(&prompt, end, cx)
         });
+        // An unsaved citation comment belongs to the thread being left.
+        if let Some(saved) = saved
+            && !previous.is_empty()
+            && self
+                .drafts
+                .get_composer_draft(&previous)
+                .is_some_and(|draft| draft.prompt == saved.replaced_value)
+        {
+            self.drafts.set_prompt(&previous, &saved.saved_value);
+        }
         let _ = window;
     }
 
@@ -370,6 +380,28 @@ impl ChatComposer {
                 self.open_language_picker(*block, *anchor, window, cx)
             }
             PromptEditorEvent::VisibleSelectionChanged => cx.notify(),
+            // The timeline's page scroll is not wired to the composer yet
+            // (ChatView owns `PageScrollController`).
+            PromptEditorEvent::PageScrollKeyDown(_)
+            | PromptEditorEvent::PageScrollKeyUp(_)
+            | PromptEditorEvent::PageScrollRelease => {}
+            // No file preview surface in the composer yet.
+            PromptEditorEvent::OpenMention(_) => {}
+            PromptEditorEvent::CitationSubmitAndSend => {
+                let weak = cx.weak_entity();
+                window.defer(cx, move |window, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.submit(ComposerSubmissionIntent::Foreground, window, cx)
+                    })
+                    .ok();
+                });
+            }
+            PromptEditorEvent::CitationDraftSaved(saved) => {
+                // `if (replacedValue === prompt) setPrompt(savedValue)`.
+                if self.prompt(cx) == saved.replaced_value {
+                    self.drafts.set_prompt(&self.thread_key, &saved.saved_value);
+                }
+            }
         }
     }
 

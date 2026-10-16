@@ -1,3 +1,5 @@
+//! Port of upstream/apps/web/src/components/ComposerPromptEditorTiptap.tsx
+//!
 //! The rich prompt editor's state machine: document, selection, stored marks,
 //! undo history and every editing command, with no UI attached.
 //!
@@ -17,7 +19,10 @@ use crate::composer::code_block::{
 };
 use crate::composer::js_string::utf16_len;
 use crate::composer::list_continuation::next_ordered_marker_text;
-use crate::composer::logic::{clamp_collapsed_composer_cursor, detect_composer_trigger};
+use crate::composer::logic::{
+    CursorDirection, clamp_collapsed_composer_cursor, detect_composer_trigger,
+    is_collapsed_cursor_adjacent_to_inline_token,
+};
 use crate::composer::rich_doc::{
     Atom, Block, BuildOptions, CodeBlock, Doc, DocMap, DocPos, Inline, InlineContent, InlineNode,
     ItemPrefix, Marks, SkillMeta, build_blocks, build_doc, collapsed_to_flat, flat_to_collapsed,
@@ -208,6 +213,12 @@ pub struct EditorSnapshot {
     /// Selection in markdown offsets.
     pub selection_start: usize,
     pub selection_end: usize,
+    /// Context ids referenced by the value (`contextIds`); empty for literal
+    /// answers, which hold no chips.
+    pub context_ids: Vec<String>,
+    /// `cursorAdjacentToMention` in `onChange`: no `@` / `$` / `/` menu for
+    /// literal answers, inside a fence, or with the caret against a chip.
+    pub suppress_trigger: bool,
 }
 
 pub struct EditorState {
@@ -225,6 +236,7 @@ pub struct EditorState {
     /// Rich text styling on (marks and block syntax) or plain.
     rich: bool,
     literal: bool,
+    citation_comments: citations::CitationComments,
 }
 
 impl EditorState {
@@ -247,6 +259,7 @@ impl EditorState {
             input_rule_undo: None,
             rich,
             literal,
+            citation_comments: citations::CitationComments::default(),
         }
     }
 
@@ -507,16 +520,38 @@ impl EditorState {
         let expanded = flat_to_markdown(&map, head_flat).min(value_len);
         let start = flat_to_markdown(&map, from_flat).min(value_len);
         let end = flat_to_markdown(&map, to_flat).min(value_len);
+        let cursor = if self.literal {
+            expanded
+        } else {
+            clamp_collapsed_composer_cursor(&map.value, cursor, false)
+        };
+        // A fence holds no chips, so nothing in it should summon the mention or
+        // command menu: `@` in code is a decorator, not a file.
+        let in_code_block = matches!(self.doc.blocks[selection.from().block], Block::Code(_));
+        let suppress_trigger = self.literal
+            || in_code_block
+            || is_collapsed_cursor_adjacent_to_inline_token(
+                &map.value,
+                cursor,
+                CursorDirection::Left,
+            )
+            || is_collapsed_cursor_adjacent_to_inline_token(
+                &map.value,
+                cursor,
+                CursorDirection::Right,
+            );
         EditorSnapshot {
             value: map.value.clone(),
-            cursor: if self.literal {
-                expanded
-            } else {
-                clamp_collapsed_composer_cursor(&map.value, cursor, false)
-            },
+            cursor,
             expanded_cursor: expanded,
             selection_start: start.min(end),
             selection_end: start.max(end),
+            context_ids: if self.literal {
+                Vec::new()
+            } else {
+                map.context_ids.clone()
+            },
+            suppress_trigger,
         }
     }
 
@@ -1884,19 +1919,22 @@ impl EditorState {
             let tokens =
                 crate::composer::editor_mentions::collect_composer_prompt_inline_tokens(&probe);
             if let Some(last) = tokens.last()
-                && last.end == utf16_len(&text)
+                && last.is_mention_or_skill()
+                && last.end() == utf16_len(&text)
             {
                 text.push(' ');
             }
             if let Some(first) = tokens.first()
-                && first.start == 0
+                && first.is_mention_or_skill()
+                && first.start() == 0
             {
                 let snapshot = self.snapshot();
                 let offset = snapshot.selection_start;
                 if offset > 0 {
                     let units: Vec<u16> = snapshot.value.encode_utf16().collect();
                     if let Some(previous) = units.get(offset - 1)
-                        && char::from_u32(u32::from(*previous)).is_some_and(|c| !c.is_whitespace())
+                        && !char::from_u32(u32::from(*previous))
+                            .is_some_and(crate::composer::js_string::is_js_whitespace_char)
                     {
                         text = format!(" {text}");
                     }
@@ -2064,10 +2102,10 @@ impl EditorState {
 
     /// `detectComposerTrigger` at the caret, in the stored text.
     pub fn trigger(&mut self) -> Option<crate::composer::logic::ComposerTrigger> {
-        if self.literal {
+        let snapshot = self.snapshot();
+        if snapshot.suppress_trigger {
             return None;
         }
-        let snapshot = self.snapshot();
         detect_composer_trigger(&snapshot.value, snapshot.expanded_cursor)
     }
 }
@@ -2214,8 +2252,12 @@ fn align_with_sibling(item: &ItemPrefix, sibling: &ItemPrefix, after_sibling: bo
     }
 }
 
+mod citations;
 mod ime;
 mod input;
+mod keys;
+pub use citations::{CitationCommentRequest, CitationDraftSave};
+pub use keys::EditorKey;
 
 #[cfg(test)]
 mod tests;

@@ -1,11 +1,12 @@
 //! Port of upstream/apps/web/src/composer-editor-mentions.ts
 //!
-//! Splits a prompt into text and inline-token segments. Offsets are UTF-16
-//! code units, like upstream.
-//!
-//! Assistant citations and composer context references (terminal contexts,
-//! PR findings, file comments) have no producer in Turin yet; their segment
-//! kinds are omitted (PORTING.md, Deviations).
+//! Splits a prompt into text and inline-token segments: file mentions,
+//! skills, assistant citations and composer context references. Offsets are
+//! UTF-16 code units, like upstream.
+
+use turin_contracts::assistant_citations::AssistantCitation;
+use turin_shared::assistant_citations::collect_assistant_citations;
+use turin_shared::composer_context_references::collect_composer_context_references;
 
 use crate::composer::inline_tokens::{
     CollectComposerInlineTokensOptions, ComposerInlineToken, ComposerInlineTokenKind,
@@ -15,9 +16,27 @@ use crate::composer::js_string::{is_js_whitespace_char, utf16_len};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerPromptSegment {
-    Text { text: String },
-    Mention { path: String, source: String },
-    Skill { name: String, source: String },
+    Text {
+        text: String,
+    },
+    Mention {
+        path: String,
+        source: String,
+    },
+    Skill {
+        name: String,
+        source: String,
+    },
+    Citation {
+        citation: AssistantCitation,
+        source: String,
+    },
+    ContextReference {
+        kind: String,
+        context_id: String,
+        label: String,
+        source: String,
+    },
 }
 
 impl ComposerPromptSegment {
@@ -29,7 +48,10 @@ impl ComposerPromptSegment {
     pub fn source(&self) -> &str {
         match self {
             Self::Text { text } => text,
-            Self::Mention { source, .. } | Self::Skill { source, .. } => source,
+            Self::Mention { source, .. }
+            | Self::Skill { source, .. }
+            | Self::Citation { source, .. }
+            | Self::ContextReference { source, .. } => source,
         }
     }
 
@@ -39,9 +61,97 @@ impl ComposerPromptSegment {
     }
 }
 
+/// One match of `collectComposerPromptInlineTokens`: a mention or skill
+/// token, or a citation / context-reference link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposerPromptToken {
+    Inline(ComposerInlineToken),
+    Citation {
+        citation: AssistantCitation,
+        source: String,
+        start: usize,
+        end: usize,
+    },
+    ContextReference {
+        kind: String,
+        context_id: String,
+        label: String,
+        source: String,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl ComposerPromptToken {
+    /// UTF-16 offset of the token's first unit.
+    pub fn start(&self) -> usize {
+        match self {
+            Self::Inline(token) => token.start,
+            Self::Citation { start, .. } | Self::ContextReference { start, .. } => *start,
+        }
+    }
+
+    /// UTF-16 offset just past the token.
+    pub fn end(&self) -> usize {
+        match self {
+            Self::Inline(token) => token.end,
+            Self::Citation { end, .. } | Self::ContextReference { end, .. } => *end,
+        }
+    }
+
+    /// A file mention or a skill (`type === "mention" || type === "skill"`).
+    pub fn is_mention_or_skill(&self) -> bool {
+        matches!(self, Self::Inline(_))
+    }
+}
+
 /// `collectComposerPromptInlineTokens`.
-pub fn collect_composer_prompt_inline_tokens(text: &str) -> Vec<ComposerInlineToken> {
-    collect_composer_inline_tokens(text, CollectComposerInlineTokensOptions::default())
+pub fn collect_composer_prompt_inline_tokens(text: &str) -> Vec<ComposerPromptToken> {
+    let tokens =
+        collect_composer_inline_tokens(text, CollectComposerInlineTokensOptions::default());
+    // The shared collectors report byte offsets; upstream's are UTF-16.
+    let utf16_at = |byte: usize| utf16_len(&text[..byte]);
+    let mut links: Vec<ComposerPromptToken> = collect_assistant_citations(text)
+        .into_iter()
+        .map(|found| ComposerPromptToken::Citation {
+            start: utf16_at(found.start),
+            end: utf16_at(found.end),
+            citation: found.citation,
+            source: found.source,
+        })
+        .collect();
+    links.extend(
+        collect_composer_context_references(text)
+            .into_iter()
+            .map(|found| ComposerPromptToken::ContextReference {
+                start: utf16_at(found.start),
+                end: utf16_at(found.end),
+                kind: found.kind.as_str().to_owned(),
+                context_id: found.context_id.as_str().to_owned(),
+                label: found.label,
+                source: found.source,
+            }),
+    );
+    if links.is_empty() {
+        return tokens
+            .into_iter()
+            .map(ComposerPromptToken::Inline)
+            .collect();
+    }
+    // An unfinished @ mention can otherwise consume the start of a link label.
+    let mut all: Vec<ComposerPromptToken> = tokens
+        .into_iter()
+        .filter(|token| {
+            !links
+                .iter()
+                .any(|link| token.start < link.end() && token.end > link.start())
+        })
+        .map(ComposerPromptToken::Inline)
+        .collect();
+    all.extend(links);
+    // Stable, like `Array.prototype.sort`.
+    all.sort_by_key(ComposerPromptToken::start);
+    all
 }
 
 fn push_text_segment(segments: &mut Vec<ComposerPromptSegment>, text: &str) {
@@ -67,23 +177,40 @@ pub fn split_prompt_into_composer_segments(prompt: &str) -> Vec<ComposerPromptSe
     let slice = |from: usize, to: usize| String::from_utf16_lossy(&units[from..to]);
     let mut cursor = 0usize;
     for token in collect_composer_prompt_inline_tokens(prompt) {
-        if token.start < cursor {
+        if token.start() < cursor {
             continue;
         }
-        if token.start > cursor {
-            push_text_segment(&mut segments, &slice(cursor, token.start));
+        if token.start() > cursor {
+            push_text_segment(&mut segments, &slice(cursor, token.start()));
         }
-        segments.push(match token.kind {
-            ComposerInlineTokenKind::Mention => ComposerPromptSegment::Mention {
-                path: token.value,
-                source: token.source,
+        cursor = token.end();
+        segments.push(match token {
+            ComposerPromptToken::Citation {
+                citation, source, ..
+            } => ComposerPromptSegment::Citation { citation, source },
+            ComposerPromptToken::ContextReference {
+                kind,
+                context_id,
+                label,
+                source,
+                ..
+            } => ComposerPromptSegment::ContextReference {
+                kind,
+                context_id,
+                label,
+                source,
             },
-            ComposerInlineTokenKind::Skill => ComposerPromptSegment::Skill {
-                name: token.value,
-                source: token.source,
+            ComposerPromptToken::Inline(token) => match token.kind {
+                ComposerInlineTokenKind::Mention => ComposerPromptSegment::Mention {
+                    path: token.value,
+                    source: token.source,
+                },
+                ComposerInlineTokenKind::Skill => ComposerPromptSegment::Skill {
+                    name: token.value,
+                    source: token.source,
+                },
             },
         });
-        cursor = token.end;
     }
     if cursor < units.len() {
         push_text_segment(&mut segments, &slice(cursor, units.len()));
@@ -109,7 +236,14 @@ pub fn selection_touches_mention_boundary(prompt: &str, start: usize, end: usize
     };
     collect_composer_prompt_inline_tokens(prompt)
         .iter()
-        .filter(|token| token.kind == ComposerInlineTokenKind::Mention)
+        .filter_map(|token| match token {
+            ComposerPromptToken::Inline(token)
+                if token.kind == ComposerInlineTokenKind::Mention =>
+            {
+                Some(token)
+            }
+            _ => None,
+        })
         .any(|token| {
             if token.start >= 1
                 && is_space(token.start - 1)
@@ -313,6 +447,189 @@ mod tests {
             split_prompt_into_composer_segments("Use $review-follow-up"),
             vec![text("Use $review-follow-up")]
         );
+    }
+
+    // ── Citations and context references ────────────────────────────────
+
+    fn citation() -> AssistantCitation {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "environmentId": "remote/環境",
+            "threadId": "thread-1",
+            "messageId": "message-1",
+            "text": "Use @AGENTS.md, $review and \"雪 ❄️\" (carefully).",
+            "start": 4,
+            "end": 50,
+            "prefix": "前: ",
+            "suffix": " 後",
+        }))
+        .expect("citation")
+    }
+
+    fn citation_segment(citation: AssistantCitation, source: &str) -> ComposerPromptSegment {
+        ComposerPromptSegment::Citation {
+            citation,
+            source: source.to_owned(),
+        }
+    }
+
+    /// `formatTerminalContextReference({ id: "ctx-1", terminalLabel: "Terminal 1", lineStart: 3, lineEnd: 4 })`.
+    fn terminal_reference() -> String {
+        turin_shared::composer_context_references::format_composer_context_reference(
+            "terminal",
+            "terminal_ctx-1",
+            "Terminal 1 lines 3-4",
+        )
+    }
+
+    fn terminal_segment() -> ComposerPromptSegment {
+        ComposerPromptSegment::ContextReference {
+            kind: "terminal".to_owned(),
+            context_id: "terminal_ctx-1".to_owned(),
+            label: "Terminal 1 lines 3-4".to_owned(),
+            source: terminal_reference(),
+        }
+    }
+
+    use turin_shared::assistant_citations::serialize_assistant_citation;
+
+    #[test]
+    fn keeps_multiple_assistant_citations_atomic_next_to_punctuation_and_unicode() {
+        let citation = citation();
+        let source = serialize_assistant_citation(&citation);
+        let other = AssistantCitation {
+            message_id: turin_contracts::base_schemas::MessageId::new("message-2").expect("id"),
+            text: "A second quote".to_owned(),
+            ..citation.clone()
+        };
+        let other_source = serialize_assistant_citation(&other);
+        assert_eq!(
+            split_prompt_into_composer_segments(&format!("前({source}),{other_source}後")),
+            vec![
+                text("前("),
+                citation_segment(citation, &source),
+                text("),"),
+                citation_segment(other, &other_source),
+                text("後"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_exact_citation_source_encoding_for_adjacent_chips_at_the_end_of_a_prompt() {
+        let citation = citation();
+        let source = serialize_assistant_citation(&citation).replace('+', "%20");
+        assert_eq!(
+            split_prompt_into_composer_segments(&format!("{source}{source}")),
+            vec![
+                citation_segment(citation.clone(), &source),
+                citation_segment(citation, &source),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_citation_after_an_unfinished_mention_intact() {
+        for prefix in ["@", "@AGENTS.md"] {
+            let citation = citation();
+            let source = serialize_assistant_citation(&citation);
+            assert_eq!(
+                split_prompt_into_composer_segments(&format!("{prefix}{source}")),
+                vec![text(prefix), citation_segment(citation, &source)],
+                "{prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_citations_alongside_file_mentions_skills_and_context_references() {
+        let citation = citation();
+        let source = serialize_assistant_citation(&citation);
+        let reference = terminal_reference();
+        assert_eq!(
+            split_prompt_into_composer_segments(&format!(
+                "@AGENTS.md {source}\n$review {reference}{source}"
+            )),
+            vec![
+                mention("AGENTS.md", "@AGENTS.md"),
+                text(" "),
+                citation_segment(citation.clone(), &source),
+                text("\n"),
+                skill("review", "$review"),
+                text(" "),
+                terminal_segment(),
+                citation_segment(citation, &source),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_malformed_citation_links_as_editable_text() {
+        let prompt = "[Assistant quote](t3-citation://v1/env/thread/message?text=missing+metadata)";
+        assert_eq!(
+            split_prompt_into_composer_segments(prompt),
+            vec![text(prompt)]
+        );
+    }
+
+    #[test]
+    fn keeps_context_references_at_their_prompt_positions() {
+        assert_eq!(
+            split_prompt_into_composer_segments(&format!(
+                "Inspect {} @AGENTS.md please",
+                terminal_reference()
+            )),
+            vec![
+                text("Inspect "),
+                terminal_segment(),
+                text(" "),
+                mention("AGENTS.md", "@AGENTS.md"),
+                text(" please"),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_consecutive_context_references_without_dropping_positions() {
+        let reference = terminal_reference();
+        assert_eq!(
+            split_prompt_into_composer_segments(&format!("{reference}{reference}tail")),
+            vec![terminal_segment(), terminal_segment(), text("tail")]
+        );
+    }
+
+    #[test]
+    fn keeps_skill_parsing_alongside_mentions_and_context_references() {
+        assert_eq!(
+            split_prompt_into_composer_segments(&format!(
+                "Inspect {} $review-follow-up after @AGENTS.md ",
+                terminal_reference()
+            )),
+            vec![
+                text("Inspect "),
+                terminal_segment(),
+                text(" "),
+                skill("review-follow-up", "$review-follow-up"),
+                text(" after "),
+                mention("AGENTS.md", "@AGENTS.md"),
+                text(" "),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_a_context_link_with_an_unparsable_href_as_text() {
+        let prompt = "see [x](t3-context://v1/terminal/ctx 1) now";
+        assert_eq!(
+            split_prompt_into_composer_segments(prompt),
+            vec![text(prompt)]
+        );
+    }
+
+    #[test]
+    fn does_not_treat_text_before_a_citation_as_an_overlapping_file_mention() {
+        let prompt = format!("before @{}", serialize_assistant_citation(&citation()));
+        assert!(!selection_touches_mention_boundary(&prompt, 6, 7));
     }
 
     #[test]

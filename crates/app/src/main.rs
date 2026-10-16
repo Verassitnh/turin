@@ -105,6 +105,7 @@ fn main() {
             let store = state::store::bind_client_store(handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
+            composer::views::prompt_editor::bind_keys(cx);
             let right_panel = dev_overrides(cx);
             // Dev hook: `TURIN_SETTINGS=<page>` shows the settings window on mock data.
             if settings::demo::open_if_requested(window_options(cx), cx) {

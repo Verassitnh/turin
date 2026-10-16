@@ -182,3 +182,8 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 - Merged since 23:30: U3a+U3b. QC: T11 FAIL (T11c fixing), T13d FAIL (fix round), U3 PASS (merged).
 - New logic bundles: R1 provider registry/auth/maintenance, R2 ACP session runtime + cursor accounts, R3 settings/theme logic, R4 composer/sidebar/client-runtime logic, R5 orchestration extras (context handoff, checkpoint rollback, workflow*) + storage cleanup.
 - Queued for Sonnet (after U1/U2): settings UI (theme editor etc.), chat UI leftovers (T16 tsx), ui primitives (T03 tsx), composer UI leftovers, N8 provider update UI, N7b routes, N9 native shell, N10/N11.
+
+## PM status 2026-10-16 00:05 UTC
+- Policy switch (see Roster): Cursor for implementation; continuations of critical-path Haiku tasks (T13c-F, T13e, T11c, T13d fix, T22a) move to cursor/claude-sonnet-5-5 when their current runs end (no interrupts).
+- New UI wave on Cursor: S1 settings UI leftovers (sonnet, from task/T20-settings), S2 chat UI leftovers (sonnet), S3 ui primitives + composer UI (sonnet), S4 provider update UI + prompt links + content search + open-in (composer-2.5).
+- Held for capacity: S5 app shell routes (N7b) + native macOS shell (N9), S6 PR/diff/sidebar leftovers (T19/T18/T15). Cloud agents only if the Mac is truly bound.

@@ -7698,19 +7698,26 @@ name = "turin-provider-opencode"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "futures",
  "getrandom 0.2.17",
+ "parking_lot",
  "pretty_assertions",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "turin-contracts",
+ "turin-provider-core",
 ]
 
 [[package]]

@@ -28,6 +28,7 @@ pub mod radio_group;
 pub mod refresh_icon;
 pub mod scroll_area;
 pub mod separator;
+pub mod sheet;
 pub mod sidebar;
 pub mod skeleton;
 pub mod standalone_page;

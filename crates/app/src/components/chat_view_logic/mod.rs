@@ -15,21 +15,33 @@ mod checkout_memory;
 mod composer;
 mod dispatch;
 mod draft;
+mod model_change;
+mod plan_follow_up;
 mod preview_urls;
 mod provider_instances;
+mod refocus;
 mod revert;
 mod terminal_send;
 mod thread;
 mod timeline_hold;
 mod worktree;
 
+#[cfg(test)]
+mod test_fixtures;
+
+#[cfg(test)]
+mod composer_logic_matrix;
+
 pub use anchor::*;
 pub use checkout_memory::*;
 pub use composer::*;
 pub use dispatch::*;
 pub use draft::*;
+pub use model_change::*;
+pub use plan_follow_up::*;
 pub use preview_urls::*;
 pub use provider_instances::*;
+pub use refocus::*;
 pub use revert::*;
 pub use terminal_send::*;
 pub use thread::*;

@@ -114,10 +114,14 @@ pub struct ComposerInteractionMode {
 
 pub fn resolve_composer_interaction_mode(
     plan_mode_enabled: bool,
-    show_interaction_mode_toggle: Option<bool>,
+    show_interaction_mode_toggle: Option<Option<bool>>,
     interaction_mode: ProviderInteractionMode,
 ) -> ComposerInteractionMode {
-    let enabled = plan_mode_enabled && show_interaction_mode_toggle.is_none_or(|toggle| toggle);
+    let enabled = plan_mode_enabled
+        && show_interaction_mode_toggle.is_some()
+        && show_interaction_mode_toggle
+            .flatten()
+            .is_none_or(|toggle| toggle);
     ComposerInteractionMode {
         enabled,
         interaction_mode: if enabled {
@@ -172,92 +176,26 @@ pub fn get_antigravity_send_block_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use turin_contracts::TrimmedNonEmptyString;
-    use turin_provider_core::server_provider::ServerProviderModel;
-
-    fn tne(value: &str) -> TrimmedNonEmptyString {
-        TrimmedNonEmptyString::new(value).unwrap()
-    }
-
-    fn entry(
-        driver: &str,
-        instance_id: &str,
-        overrides: ProviderEntryOverrides,
-    ) -> ProviderInstanceEntry {
-        let driver_kind = ProviderDriverKind::new(driver).unwrap();
-        let instance_id = ProviderInstanceId::new(instance_id).unwrap();
-        let mut snapshot: ServerProvider = serde_json::from_value(serde_json::json!({
-            "instanceId": instance_id.as_str(),
-            "driver": driver,
-            "enabled": overrides.enabled,
-            "installed": overrides.installed,
-            "status": match overrides.status {
-                ServerProviderState::Ready => "ready",
-                ServerProviderState::Warning => "warning",
-                ServerProviderState::Error => "error",
-                ServerProviderState::Disabled => "disabled",
-            },
-            "auth": { "status": match overrides.auth.status {
-                ServerProviderAuthStatus::Authenticated => "authenticated",
-                ServerProviderAuthStatus::Unauthenticated => "unauthenticated",
-                ServerProviderAuthStatus::Unknown => "unknown",
-            }},
-            "models": overrides.models,
-            "showInteractionModeToggle": overrides.show_interaction_mode_toggle,
-            "continuation": overrides.continuation_group_key.map(|group_key| serde_json::json!({ "groupKey": group_key })),
-            "checkedAt": "2026-03-29T00:00:00.000Z",
-            "version": null,
-            "slashCommands": [],
-            "skills": [],
-        }))
-        .expect("provider snapshot json");
-        snapshot.models = overrides.models;
-        ProviderInstanceEntry {
-            instance_id: instance_id.clone(),
-            driver_kind,
-            continuation_group_key: overrides.continuation_group_key.map(str::to_owned),
-            enabled: overrides.enabled,
-            is_available: true,
-            status: overrides.status,
-            snapshot,
-        }
-    }
-
-    struct ProviderEntryOverrides {
-        enabled: bool,
-        installed: bool,
-        status: ServerProviderState,
-        auth: ServerProviderAuth,
-        models: Vec<ServerProviderModel>,
-        show_interaction_mode_toggle: Option<bool>,
-        continuation_group_key: Option<&'static str>,
-    }
-
-    impl Default for ProviderEntryOverrides {
-        fn default() -> Self {
-            Self {
-                enabled: true,
-                installed: true,
-                status: ServerProviderState::Ready,
-                auth: ServerProviderAuth::with_status(ServerProviderAuthStatus::Authenticated),
-                models: Vec::new(),
-                show_interaction_mode_toggle: None,
-                continuation_group_key: None,
-            }
-        }
-    }
 
     #[test]
-    fn interaction_mode_resets_when_plan_is_unsupported() {
+    fn interaction_mode_resets_when_the_selected_instance_does_not_support_plan_mode() {
         assert_eq!(
-            resolve_composer_interaction_mode(true, Some(false), ProviderInteractionMode::Plan),
+            resolve_composer_interaction_mode(
+                true,
+                Some(Some(false)),
+                ProviderInteractionMode::Plan
+            ),
             ComposerInteractionMode {
                 enabled: false,
                 interaction_mode: ProviderInteractionMode::Default,
             }
         );
+    }
+
+    #[test]
+    fn interaction_mode_keeps_legacy_plan_behavior_when_capability_is_omitted() {
         assert_eq!(
-            resolve_composer_interaction_mode(true, None, ProviderInteractionMode::Plan),
+            resolve_composer_interaction_mode(true, Some(None), ProviderInteractionMode::Plan),
             ComposerInteractionMode {
                 enabled: true,
                 interaction_mode: ProviderInteractionMode::Plan,
@@ -266,39 +204,28 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_blocks_unauthenticated_and_missing_model_catalog() {
-        let signed_out = entry(
-            "antigravity",
-            "google_work",
-            ProviderEntryOverrides {
-                status: ServerProviderState::Error,
-                auth: ServerProviderAuth::with_status(ServerProviderAuthStatus::Unauthenticated),
-                models: vec![ServerProviderModel {
-                    slug: tne("gemini-pro"),
-                    name: tne("Gemini Pro"),
-                    short_name: None,
-                    sub_provider: None,
-                    aliases: None,
-                    badge: None,
-                    is_custom: false,
-                    is_default: None,
-                    is_legacy: None,
-                    capabilities: None,
-                }],
-                ..Default::default()
-            },
-        );
+    fn interaction_mode_resets_when_the_beta_setting_is_off() {
         assert_eq!(
-            get_antigravity_send_block_reason(Some(&signed_out.snapshot), "gemini-pro").as_deref(),
-            Some("Sign in to Antigravity in provider settings before sending.")
+            resolve_composer_interaction_mode(
+                false,
+                Some(Some(true)),
+                ProviderInteractionMode::Plan
+            ),
+            ComposerInteractionMode {
+                enabled: false,
+                interaction_mode: ProviderInteractionMode::Default,
+            }
         );
+    }
+
+    #[test]
+    fn interaction_mode_disables_plan_mode_until_the_selected_provider_is_available() {
         assert_eq!(
-            get_antigravity_send_block_reason(
-                Some(&entry("antigravity", "antigravity", Default::default()).snapshot),
-                "gemini-pro"
-            )
-            .as_deref(),
-            Some("Refresh Antigravity models in provider settings before sending.")
+            resolve_composer_interaction_mode(true, None, ProviderInteractionMode::Plan),
+            ComposerInteractionMode {
+                enabled: false,
+                interaction_mode: ProviderInteractionMode::Default,
+            }
         );
     }
 }

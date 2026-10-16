@@ -109,7 +109,7 @@ pub(super) async fn decide(
 
 /// `dispatchMessage`. Emits the decision's events and effects; the caller
 /// commits them under the thread lock.
-async fn dispatch_message(
+pub(super) async fn dispatch_message(
     orchestrator: &Orchestrator,
     command: &OrchestrationV2ServerCommand,
     client: &C,

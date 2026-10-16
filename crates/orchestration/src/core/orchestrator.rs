@@ -38,6 +38,9 @@ mod queued_run_tests;
 mod run_stop;
 #[cfg(test)]
 mod run_stop_tests;
+mod runtime_request;
+#[cfg(test)]
+mod runtime_request_tests;
 pub mod services;
 #[cfg(test)]
 pub(super) mod test_harness;

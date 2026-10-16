@@ -10,6 +10,8 @@ use gpui_kit::{
     Styled as _, StyledImage as _, Window, div, img, px, rems,
 };
 
+use crate::components::chat::chat_media;
+use crate::components::chat::expanded_image::{PreviewAttachment, build_expanded_image_preview};
 use crate::composer::attachment_files::{
     ComposerAttachmentFileKind, PickedFile, classify_composer_attachment_file,
     format_attachment_size, infer_image_mime_type_from_name,
@@ -223,11 +225,23 @@ impl ChatComposer {
             return None;
         }
         let theme = cx.app_theme().clone();
+        let gallery: Vec<PreviewAttachment> = images
+            .iter()
+            .map(|image| PreviewAttachment {
+                id: image.id.clone(),
+                name: image.name.clone(),
+                kind: "image".into(),
+                mime_type: image.mime_type.clone(),
+                preview_url: Some(image.id.clone()),
+                bytes: Some(image.data.as_ref().clone()),
+            })
+            .collect();
         let thumbs = images
             .iter()
             .map(|image| {
                 let id = image.id.clone();
                 let name = image.name.clone();
+                let gallery = gallery.clone();
                 let picture = image_format(&image.mime_type)
                     .map(|format| Arc::new(Image::from_bytes(format, image.data.as_ref().clone())));
                 div()
@@ -241,6 +255,15 @@ impl ChatComposer {
                     .border_1()
                     .border_color(with_alpha(theme.border, 0.8))
                     .bg(theme.background)
+                    .cursor(CursorStyle::PointingHand)
+                    .on_click({
+                        let id = id.clone();
+                        move |_, _, cx| {
+                            if let Some(preview) = build_expanded_image_preview(&gallery, &id) {
+                                chat_media::open_preview(preview, cx);
+                            }
+                        }
+                    })
                     .child(match picture {
                         Some(picture) => img(picture)
                             .size_full()

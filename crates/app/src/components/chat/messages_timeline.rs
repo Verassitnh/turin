@@ -14,14 +14,22 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, App, Context, Entity, FollowMode, IntoElement, ListAlignment, ListState,
     ParentElement as _, Render, Styled as _, Subscription, Task, Window, div, list, px, rems,
 };
 
+use super::assistant_citation_source::citation_highlight_opacity;
+use super::assistant_citation_target::{
+    AssistantCitationController, AssistantCitationRequest, CitationEntryView, CitationRowView,
+    CitationTargetEffect, CitationTargetInput,
+};
+use super::timeline::assistant_citations::AssistantCitation;
 use super::timeline::messages_timeline_logic::{
     MessagesTimelineRow, MessagesTimelineRowContent, MessagesTimelineRowsInput,
     MessagesTimelineRowsProjection, StableMessagesTimelineRowsState,
@@ -75,6 +83,9 @@ pub struct RowCx {
     pub timestamp_format: TimestampFormat,
     /// Selection document order base for this row.
     pub order: u64,
+    /// Assistant message currently pulsing as a citation source, and its opacity.
+    pub citation_message: Option<String>,
+    pub citation_opacity: f32,
 }
 
 impl RowCx {
@@ -116,6 +127,9 @@ pub struct MessagesTimeline {
     ui: Arc<TimelineUiState>,
     timestamp_format: TimestampFormat,
     ticker: Option<Task<()>>,
+    citation: AssistantCitationController,
+    pulse: Option<(String, Instant)>,
+    pulse_task: Option<Task<()>>,
     _observe: Subscription,
 }
 
@@ -136,6 +150,9 @@ impl MessagesTimeline {
             ui: Arc::new(TimelineUiState::default()),
             timestamp_format: TimestampFormat::default(),
             ticker: None,
+            citation: AssistantCitationController::default(),
+            pulse: None,
+            pulse_task: None,
             _observe: observe,
         };
         this.recompute(cx);
@@ -181,6 +198,134 @@ impl MessagesTimeline {
 
     pub fn store(&self) -> &Entity<ThreadTimelineStore> {
         &self.store
+    }
+
+    /// `goToCitation`: unfold the turn, scroll the source row, and pulse it.
+    pub fn reveal_citation(
+        &mut self,
+        citation: AssistantCitation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let snapshot = self.store.read(cx).snapshot().clone();
+        let request = AssistantCitationRequest {
+            key: format!(
+                "{}:{}:{}",
+                citation.message_id, citation.start, citation.end
+            ),
+            citation,
+        };
+        for _ in 0..3 {
+            let entries = snapshot
+                .timeline_entries
+                .iter()
+                .filter_map(|entry| match &entry.kind {
+                    super::timeline::types::TimelineEntryKind::Message { message, .. } => {
+                        Some(CitationEntryView {
+                            id: entry.id.clone(),
+                            message_id: Some(message.id.clone()),
+                            assistant: message.role
+                                == super::timeline::types::MessageRole::Assistant,
+                            run_id: message.run_id.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            let rows = self
+                .rows
+                .iter()
+                .filter_map(|row| match &row.content {
+                    MessagesTimelineRowContent::Message { id, message, .. } => {
+                        Some(CitationRowView {
+                            id: id.clone(),
+                            message_id: Some(message.id.clone()),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            let effects = self.citation.sync(&CitationTargetInput {
+                request: Some(request.clone()),
+                entries,
+                rows,
+                viewport: true,
+                history_loading: false,
+                load_earlier: None,
+                list_loaded: true,
+                list_present: true,
+            });
+            let mut expanded = false;
+            for effect in effects {
+                match effect {
+                    CitationTargetEffect::ExpandTurn(run_id) => {
+                        let mut ui = (*self.ui).clone();
+                        ui.expanded_run_ids.insert(run_id);
+                        self.ui = Arc::new(ui);
+                        self.recompute(cx);
+                        expanded = true;
+                    }
+                    CitationTargetEffect::Toast { title, description } => {
+                        window
+                            .push_notification(Notification::warning(description).title(title), cx);
+                    }
+                    CitationTargetEffect::LoadEarlier => {
+                        window.push_notification(
+                            Notification::warning(
+                                "Load earlier turns, then click the citation to try again. Your saved quote is unchanged.",
+                            )
+                            .title("Could not load the cited response"),
+                            cx,
+                        );
+                    }
+                    CitationTargetEffect::ManualNavigation | CitationTargetEffect::CancelScroll => {
+                    }
+                }
+            }
+            if !expanded {
+                break;
+            }
+        }
+        let message_id = request.citation.message_id.clone();
+        if let Some(index) = self.rows.iter().position(|row| {
+            matches!(
+                &row.content,
+                MessagesTimelineRowContent::Message { message, .. }
+                    if message.id == message_id
+            )
+        }) {
+            self.list.set_follow_mode(FollowMode::Normal);
+            self.list.scroll_to(gpui_kit::ListOffset {
+                item_ix: index + 1,
+                offset_in_item: px(0.),
+            });
+            self.citation.mark_scrolled();
+            self.pulse = Some((message_id, Instant::now()));
+            self.pulse_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    let done = this
+                        .update(cx, |this, cx| {
+                            let finished = this
+                                .pulse
+                                .as_ref()
+                                .is_none_or(|(_, started)| started.elapsed().as_millis() > 3000);
+                            if finished {
+                                this.pulse = None;
+                            }
+                            cx.notify();
+                            finished
+                        })
+                        .unwrap_or(true);
+                    if done {
+                        break;
+                    }
+                }
+            }));
+        }
+        cx.notify();
     }
 
     fn rows_input(&self, snapshot: &ThreadTimelineSnapshot) -> MessagesTimelineRowsInput {
@@ -268,6 +413,16 @@ impl MessagesTimeline {
         }
         let row = self.rows[ix - 1].clone();
         tracing::trace!(ix, kind = row.kind().as_str(), "render timeline row");
+        let (citation_message, citation_opacity) = match &self.pulse {
+            Some((id, started)) => {
+                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                (
+                    Some(id.clone()),
+                    citation_highlight_opacity(elapsed, false) as f32,
+                )
+            }
+            None => (None, 0.0),
+        };
         let row_cx = RowCx {
             theme: cx.app_theme().clone(),
             view: cx.entity(),
@@ -276,6 +431,8 @@ impl MessagesTimeline {
             ui: self.ui.clone(),
             timestamp_format: self.timestamp_format,
             order: (ix as u64) << 20,
+            citation_message,
+            citation_opacity,
         };
         // `.messages-timeline-scroll` padding-inline (3rem at ≥640px) and the
         // `.chat-content-lane` max width.

@@ -7,6 +7,8 @@
 use std::borrow::Cow;
 
 use gpui_kit::assets::{Assets, icon_assets};
+
+use crate::components::usage::icons::UsageIcons;
 use gpui_kit::{AssetSource, Result, SharedString};
 
 icon_assets!(
@@ -114,6 +116,7 @@ icon_assets!(
         PenLine,
         Pencil,
         PencilRuler,
+        Quote,
         Pilcrow,
         Pin,
         Play,
@@ -152,6 +155,7 @@ icon_assets!(
         Undo2,
         UserRound,
         Wrench,
+        Workflow,
         Unlink2,
         UserCheck,
         UserLock,
@@ -169,14 +173,11 @@ icon_assets!(
         FileSearch,
         FolderGit,
         GitBranchPlus,
-        GitCommitHorizontal,
         Laptop,
-        Lock,
         MessageSquareDashed,
         Monitor,
         Moon,
         Palette,
-        RotateCcw,
         Scale,
         Server,
         Sun,
@@ -273,6 +274,22 @@ pub mod diff_icons {
 }
 
 const BRAND: &[(&str, &[u8])] = &[
+    (
+        "brand/openai.svg",
+        include_bytes!("../assets/brand/openai.svg"),
+    ),
+    (
+        "brand/claude.svg",
+        include_bytes!("../assets/brand/claude.svg"),
+    ),
+    (
+        "brand/cursor.svg",
+        include_bytes!("../assets/brand/cursor.svg"),
+    ),
+    (
+        "brand/opencode.svg",
+        include_bytes!("../assets/brand/opencode.svg"),
+    ),
     (SEND_ARROW, include_bytes!("../assets/brand/send-arrow.svg")),
     (
         CHEVRON_DOWN,
@@ -441,6 +458,9 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = AppIcons.load(path)? {
             return Ok(Some(bytes));
         }
+        if let Some(bytes) = UsageIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
         if let Some(bytes) = crate::settings::icons::load_brand(path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
@@ -464,6 +484,7 @@ impl AssetSource for AppAssets {
                 .map(SharedString::from),
         );
         names.extend(AppIcons.list(path)?);
+        names.extend(UsageIcons.list(path)?);
         names.extend(crate::settings::icons::SettingsIcons.list(path)?);
         names.extend(Assets.list(path)?);
         names.sort();

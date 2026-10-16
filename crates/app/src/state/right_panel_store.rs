@@ -198,8 +198,19 @@ impl Default for ThreadPanelVisibility {
 /// `ClosedView` (panel-tab entries only).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClosedPanelTab {
+    pub id: String,
     pub thread_ref: ScopedThreadRef,
     pub surface: RightPanelSurface,
+}
+
+impl ClosedPanelTab {
+    pub fn new(thread_ref: ScopedThreadRef, surface: RightPanelSurface) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            thread_ref,
+            surface,
+        }
+    }
 }
 
 /// `PersistedRightPanelState`: what `migratePersistedRightPanelState` returns.
@@ -1133,14 +1144,26 @@ impl RightPanelStore {
         self.closed_panel_tabs.retain(|entry| {
             !(thread_key(&entry.thread_ref) == key && entry.surface.id() == surface_id)
         });
-        self.closed_panel_tabs.insert(
-            0,
-            ClosedPanelTab {
-                thread_ref: thread.clone(),
-                surface,
-            },
-        );
+        self.closed_panel_tabs
+            .insert(0, ClosedPanelTab::new(thread.clone(), surface));
         self.closed_panel_tabs.truncate(CLOSED_VIEW_LIMIT);
+    }
+
+    pub fn remove_closed_id(&mut self, id: &str) {
+        self.closed_panel_tabs.retain(|entry| entry.id != id);
+    }
+
+    /// `defer`: move a failed restore to the end so the next entry is tried.
+    pub fn defer_closed_id(&mut self, id: &str) {
+        let Some(index) = self
+            .closed_panel_tabs
+            .iter()
+            .position(|entry| entry.id == id)
+        else {
+            return;
+        };
+        let entry = self.closed_panel_tabs.remove(index);
+        self.closed_panel_tabs.push(entry);
     }
 
     /// `automaticUpdate`: the app's change, not the user's. It leaves the

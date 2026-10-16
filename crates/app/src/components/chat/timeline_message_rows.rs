@@ -16,7 +16,10 @@ use gpui_kit::{
     StyledImage as _, Window, div, img, linear_color_stop, linear_gradient, px, rems,
 };
 
+use super::assistant_citation_source::AssistantCitationSource;
 use super::changed_files_tree::ChangedFilesCard;
+use super::chat_media;
+use super::expanded_image::{ExpandedImageItem, ExpandedImagePreview};
 use super::markdown::ChatMarkdown;
 use super::markdown::markdown_pipeline::should_preserve_assistant_line_breaks;
 use super::message_copy_button::MessageCopyButton;
@@ -129,21 +132,45 @@ pub fn user_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
         .text_color(theme.message_foreground);
     if !images.is_empty() {
         // `mb-2 grid max-w-[210px] grid-cols-2 gap-2`.
+        let gallery: Vec<ExpandedImageItem> = images
+            .iter()
+            .map(|image| ExpandedImageItem {
+                src: image.preview_path.clone(),
+                name: image.name.clone(),
+                video: false,
+                original_url: None,
+                bytes: None,
+                mime_type: Some(image.mime_type.clone()),
+                actions_source: None,
+            })
+            .collect();
         let mut grid = div()
             .mb(rems(0.5))
             .flex()
             .flex_wrap()
             .gap(rems(0.5))
             .max_w(px(210.));
-        for image in images {
+        for (index, image) in images.iter().enumerate() {
+            let gallery = gallery.clone();
             let frame = div()
+                .id(("user-image", index as u64))
                 .w(px(101.))
                 .h(px(76.))
                 .overflow_hidden()
                 .rounded(RADIUS_LG)
                 .border_1()
                 .border_color(with_alpha(theme.border, 0.8))
-                .bg(with_alpha(theme.background, 0.7));
+                .bg(with_alpha(theme.background, 0.7))
+                .cursor(gpui_kit::CursorStyle::PointingHand)
+                .on_click(move |_, _, cx| {
+                    let mut images = gallery.clone();
+                    if let Some(path) = images.get(index).and_then(|item| item.src.clone())
+                        && let Ok(bytes) = std::fs::read(&path)
+                    {
+                        images[index].bytes = Some(Arc::new(bytes));
+                    }
+                    chat_media::open_preview(ExpandedImagePreview { images, index }, cx);
+                });
             grid = grid.child(match &image.preview_path {
                 Some(path) => frame.child(
                     img(std::path::PathBuf::from(path))
@@ -408,7 +435,11 @@ pub fn assistant_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
     let line_breaks = should_preserve_assistant_line_breaks(&text);
     let group: SharedString = format!("assistant-row-{}", message.id).into();
     let source = cx.source.clone();
-    div()
+    let pulsing =
+        cx.citation_message.as_deref() == Some(message.id.as_str()) && cx.citation_opacity > 0.0;
+    let opacity = cx.citation_opacity;
+    let message_id: SharedString = message.id.clone().into();
+    let row = div()
         .group(group.clone())
         .relative()
         .min_w_0()
@@ -447,8 +478,19 @@ pub fn assistant_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
                 &group,
                 cx,
             )))
-        })
+        });
+    if pulsing {
+        AssistantCitationSource {
+            message_id,
+            environment_id: None,
+            thread_id: None,
+            opacity,
+            child: row.into_any_element(),
+        }
         .into_any_element()
+    } else {
+        row.into_any_element()
+    }
 }
 
 /// `AssistantMetaTimelineRow`.

@@ -83,6 +83,8 @@ pub enum ThreadActionError {
     ArchivedNavigationFailed(CommandFailure<String>),
     /// A dispatch that failed or was interrupted.
     Dispatch(CommandFailure<String>),
+    /// A discarded composer draft could not be restored; carries the message.
+    DraftRestore(String),
 }
 
 impl ThreadActionError {
@@ -123,6 +125,7 @@ impl fmt::Display for ThreadActionError {
             Self::ArchivedNavigationFailed(failure) | Self::Dispatch(failure) => {
                 return fmt::Display::fmt(failure, f);
             }
+            Self::DraftRestore(message) => message.as_str(),
         };
         f.write_str(message)
     }
@@ -242,6 +245,11 @@ pub trait ThreadActionHost {
     /// `clearThreadPreviewState` alone, for a thread not in the store.
     fn clear_thread_preview_state(&mut self, thread: &ScopedThreadRef);
     fn show_error_toast(&mut self, toast: ErrorToast);
+    /// Undo of `discardComposerDraft`: restores the draft discarded under
+    /// `discard_id`. The composer's draft store owns it.
+    fn restore_discarded_draft(&mut self, _discard_id: &str) -> Result<(), String> {
+        Err("The draft cannot be restored.".to_owned())
+    }
 }
 
 /// `navigateAfterThreadDeletion`: runs the navigation, and returns the error
@@ -443,6 +451,10 @@ impl<C: ThreadCommands, H: ThreadActionHost> ThreadActions<C, H> {
                 }
             }
             UndoPlan::Unsnooze { thread } => self.unsnooze_thread(&thread),
+            UndoPlan::RestoreDraft { discard_id } => self
+                .host
+                .restore_discarded_draft(&discard_id)
+                .map_err(ThreadActionError::DraftRestore),
         }
     }
 

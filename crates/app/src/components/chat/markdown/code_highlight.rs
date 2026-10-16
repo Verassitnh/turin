@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui_kit::component::Rope;
 use gpui_kit::component::highlighter::{LanguageRegistry, SyntaxHighlighter};
@@ -168,11 +168,45 @@ struct CacheKey {
 }
 
 thread_local! {
-    static CACHE: RefCell<LruCache<CacheKey, Arc<HighlightedCode>>> = RefCell::new(LruCache::new(
-        MAX_HIGHLIGHT_CACHE_ENTRIES,
-        MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
-    ));
     static HIGHLIGHTERS: RefCell<HashMap<String, SyntaxHighlighter>> = RefCell::default();
+}
+
+/// The highlight LRU (`crate::lru_cache`), bounded by entries and bytes like
+/// upstream. Shared across threads so a background highlight can fill it.
+type HighlightCache = LruCache<CacheKey, Arc<HighlightedCode>>;
+
+fn shared_cache() -> &'static Mutex<HighlightCache> {
+    static CACHE: LazyLock<Mutex<HighlightCache>> = LazyLock::new(|| {
+        Mutex::new(LruCache::new(
+            MAX_HIGHLIGHT_CACHE_ENTRIES,
+            MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
+        ))
+    });
+    &CACHE
+}
+
+/// Uncolored gaps take the theme foreground, so a painted block never skips a byte.
+fn fill_highlight_gaps(
+    code_len: usize,
+    foreground: Hsla,
+    tokens: Vec<(Range<usize>, Hsla)>,
+) -> Vec<(Range<usize>, Hsla)> {
+    let mut filled = Vec::new();
+    let mut cursor = 0usize;
+    for (range, color) in tokens {
+        if range.start < cursor || range.end > code_len || range.start >= range.end {
+            continue;
+        }
+        if range.start > cursor {
+            filled.push((cursor..range.start, foreground));
+        }
+        cursor = range.end;
+        filled.push((range, color));
+    }
+    if cursor < code_len {
+        filled.push((cursor..code_len, foreground));
+    }
+    filled
 }
 
 /// Fence languages Shiki accepts that the grammar registry spells differently.
@@ -205,18 +239,50 @@ fn estimate_highlighted_size(highlighted: &HighlightedCode, code: &str) -> usize
     tokens_bytes.max(code.len() * 3)
 }
 
-/// Highlights `code` for `language`, cached.
-pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<HighlightedCode> {
-    let theme = if dark { &PIERRE_DARK } else { &PIERRE_LIGHT };
+fn cache_key(code: &str, language: &str, dark: bool) -> CacheKey {
     let mut hasher = DefaultHasher::new();
     code.hash(&mut hasher);
-    let key = CacheKey {
+    CacheKey {
         hash: hasher.finish(),
         len: code.len(),
         language: registry_language(language),
         dark,
-    };
-    if let Some(hit) = CACHE.with(|cache| cache.borrow_mut().get(&key).cloned()) {
+    }
+}
+
+/// A cached highlight, if this code was already colored. Safe to call on the UI thread.
+pub fn cached_highlight(code: &str, language: &str, dark: bool) -> Option<Arc<HighlightedCode>> {
+    let key = cache_key(code, language, dark);
+    shared_cache()
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.get(&key).cloned())
+}
+
+/// One foreground run, used until a background highlight finishes.
+pub fn plain_highlight(code: &str, dark: bool) -> Arc<HighlightedCode> {
+    let theme = if dark { &PIERRE_DARK } else { &PIERRE_LIGHT };
+    let foreground: Hsla = theme.foreground.into();
+    Arc::new(HighlightedCode {
+        foreground,
+        tokens: if code.is_empty() {
+            Vec::new()
+        } else {
+            vec![(0..code.len(), foreground)]
+        },
+    })
+}
+
+/// Highlights `code` for `language`, cached. Highlighters stay thread-local;
+/// the result cache is shared so a background thread can fill it.
+pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<HighlightedCode> {
+    let theme = if dark { &PIERRE_DARK } else { &PIERRE_LIGHT };
+    let key = cache_key(code, language, dark);
+    if let Some(hit) = shared_cache()
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.get(&key).cloned())
+    {
         return hit;
     }
     let tokens = if LanguageRegistry::singleton()
@@ -240,17 +306,18 @@ pub fn highlight_code(code: &str, language: &str, dark: bool) -> Arc<Highlighted
     } else {
         Vec::new()
     };
+    let foreground: Hsla = theme.foreground.into();
     let result = Arc::new(HighlightedCode {
-        foreground: theme.foreground.into(),
-        tokens,
+        foreground,
+        tokens: fill_highlight_gaps(code.len(), foreground, tokens),
     });
-    CACHE.with(|cache| {
-        cache.borrow_mut().set(
+    if let Ok(mut cache) = shared_cache().lock() {
+        cache.set(
             key,
             result.clone(),
             estimate_highlighted_size(&result, code),
         );
-    });
+    }
     result
 }
 
@@ -275,5 +342,29 @@ mod tests {
     fn fence_aliases_map_to_grammars() {
         assert_eq!(registry_language("TS"), "typescript");
         assert_eq!(registry_language("sh"), "bash");
+    }
+
+    #[test]
+    fn uncolored_gaps_take_the_foreground() {
+        let foreground = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.0,
+            a: 1.0,
+        };
+        let accent = Hsla {
+            h: 0.2,
+            ..foreground
+        };
+        let filled = fill_highlight_gaps(10, foreground, vec![(2..4, accent), (7..9, accent)]);
+        let covered: usize = filled
+            .iter()
+            .map(|(range, _)| range.end - range.start)
+            .sum();
+        assert_eq!(covered, 10);
+        assert_eq!(filled[0], (0..2, foreground));
+        assert_eq!(filled[1], (2..4, accent));
+        assert_eq!(filled[2], (4..7, foreground));
+        assert_eq!(filled[4], (9..10, foreground));
     }
 }

@@ -7,14 +7,23 @@
 //! user intent through [`view_model::ComposerCallbacks`].
 
 pub mod attachment_files;
+pub mod attachment_upload_queue;
+pub mod attachment_upload_state;
 pub mod banner_stack;
 pub mod catalog;
 pub mod code_block;
+pub mod code_block_highlight;
 pub mod code_languages;
 pub mod command_items;
+pub mod composer_context_records;
+pub mod composer_draft_uploads;
+pub mod composer_handle_context;
+pub mod composer_path_search_state;
 pub mod context_meter;
+pub mod discard_composer_draft;
 pub mod dispatch;
 pub mod draft_store;
+pub mod editable_focus;
 pub mod editor_mentions;
 pub mod editor_state;
 pub mod file_link;
@@ -31,8 +40,11 @@ pub mod model_display;
 pub mod model_picker;
 pub mod model_picker_keys;
 pub mod model_picker_search;
+pub mod model_picker_visibility;
+pub mod placeholder;
 pub mod primary_actions;
 pub mod prompt_history;
+pub mod prompt_stash_store;
 pub mod proposed_plan;
 pub mod provider_options;
 pub mod provider_state;

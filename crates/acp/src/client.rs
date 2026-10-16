@@ -234,6 +234,30 @@ impl AcpClient {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        Self::connect_with_options(
+            read,
+            write,
+            termination_on_eof,
+            termination_on_exit,
+            shutdown,
+            None,
+        )
+    }
+
+    pub fn connect_with_options<R, W>(
+        read: R,
+        write: W,
+        termination_on_eof: Option<
+            Arc<dyn Fn() -> futures::future::BoxFuture<'static, AcpError> + Send + Sync>,
+        >,
+        termination_on_exit: Option<futures::future::BoxFuture<'static, AcpError>>,
+        shutdown: Option<Arc<dyn std::any::Any + Send + Sync>>,
+        transform_session_update: Option<Arc<dyn Fn(Value) -> Value + Send + Sync>>,
+    ) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let handlers = Arc::new(Mutex::new(Handlers::default()));
         let generation = Arc::new(Mutex::new(None));
         let prompts = Arc::new(Mutex::new(HashMap::new()));
@@ -245,6 +269,7 @@ impl AcpClient {
             ..ClientHooks::default()
         });
         let transform_generation = Arc::clone(&generation);
+        let user_transform = transform_session_update;
         let connection = Connection::start(
             read,
             write,
@@ -255,6 +280,11 @@ impl AcpClient {
                 termination_on_eof,
                 termination_on_exit,
                 transform_session_update: Arc::new(move |value| {
+                    let value = if let Some(transform) = user_transform.as_ref() {
+                        transform(value)
+                    } else {
+                        value
+                    };
                     normalize_session_notification(value, *transform_generation.lock())
                 }),
             },
@@ -537,11 +567,17 @@ impl AcpClient {
     }
 
     pub async fn cancel(&self, payload: Value) -> Result<(), AcpError> {
-        self.connection.notify(agent::SESSION_CANCEL, payload).await
+        self.connection
+            .notify_flushed(agent::SESSION_CANCEL, payload)
+            .await
     }
 
     pub async fn ext_request(&self, method: &str, payload: Value) -> Result<Value, AcpError> {
         self.connection.ext_request(method, payload).await
+    }
+
+    pub async fn rpc(&self, method: &str, payload: Value) -> Result<Value, AcpError> {
+        self.connection.rpc_request(method, payload).await
     }
 
     pub async fn ext_notify(&self, method: &str, payload: Value) -> Result<(), AcpError> {
@@ -739,7 +775,6 @@ impl AcpClient {
         *self.generation.lock()
     }
 
-    #[cfg(test)]
     pub(crate) fn shutdown_guard(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
         self.shutdown.as_deref()
     }

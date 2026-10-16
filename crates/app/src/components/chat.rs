@@ -1,20 +1,66 @@
 //! Ports of upstream/apps/web/src/components/chat.
 
+#[allow(dead_code)]
+pub mod agent_elapsed;
+#[allow(dead_code)]
+pub mod agent_spawn_summary;
+#[allow(dead_code)]
+pub mod assistant_citation_chip;
+#[allow(dead_code)]
+pub mod assistant_citation_comment_dismissal;
+#[allow(dead_code)]
+pub mod assistant_citation_comment_editor;
+#[allow(dead_code)]
+pub mod assistant_citation_navigation;
+#[allow(dead_code)]
+pub mod assistant_citation_source;
+#[allow(dead_code)]
+pub mod assistant_citation_target;
 pub mod changed_files_tree;
 pub mod chat_git_host;
 pub mod chat_header;
+#[allow(dead_code)]
+pub mod context_window;
 // Chat-lane geometry for the canvas; the canvas does not call it yet.
 #[allow(dead_code)]
 pub mod chat_canvas_layout;
 // Pure citation-selector text logic; the DOM capture half is not ported yet.
 #[allow(dead_code)]
 pub mod assistant_text_selection;
+pub mod chat_media;
 pub mod composer_pending_panels;
+// Embedded-script scan for command and tool views; no view calls it yet.
+#[allow(dead_code)]
+pub mod embedded_scripts;
+#[allow(dead_code)]
+pub mod expanded_image;
+#[allow(dead_code)]
+pub mod highlighted_tokens;
+// Copy-as-markdown for selections over rendered blocks; nothing calls it yet.
+#[allow(dead_code)]
+pub mod composer_context_undo;
+#[allow(dead_code)]
+pub mod composer_event_scope;
+#[allow(dead_code)]
+pub mod composer_focus_state;
+#[allow(dead_code)]
+pub mod composer_menu_state;
+// Route handoff around the mobile composer morph. No view calls it yet.
+#[allow(dead_code)]
+pub mod draft_hero_transition;
+#[allow(dead_code)]
+pub mod folder_drop;
 pub mod markdown;
+#[allow(dead_code)]
+pub mod markdown_clipboard;
+#[allow(dead_code)]
+pub mod mermaid_diagram;
 pub mod message_copy_button;
 pub mod messages_timeline;
 pub mod open_in_picker;
 pub mod panel_layout_controls;
+#[allow(dead_code)]
+pub mod pending_draft_work;
 // Pure scroll state machine; the timeline view does not drive page keys yet.
 #[allow(dead_code)]
 pub mod page_scroll_controller;
@@ -23,11 +69,26 @@ pub mod page_scroll_controller;
 #[allow(dead_code)]
 pub mod pending_user_input;
 pub mod thread_details_control;
+#[allow(dead_code)]
+pub mod use_composer_multiline_prompt;
+#[allow(dead_code)]
+pub mod use_composer_trigger_state;
+#[allow(dead_code)]
+pub mod use_composer_typing_guard;
+// Sidebar thread drag into the composer. The sidebar view does not drive it yet.
+#[allow(dead_code)]
+pub mod thread_context_drag;
 // The ported timeline read model keeps upstream's full helper surface; the
 // view and T14's reducers call into it piecemeal.
 #[allow(dead_code)]
+pub mod thread_details_card_layout;
+#[allow(dead_code)]
+pub mod thread_status_line;
+#[allow(dead_code)]
 pub mod timeline;
 pub mod timeline_message_rows;
+#[allow(dead_code)]
+pub mod timeline_minimap_items;
 pub mod timeline_work_rows;
 // Scroll anchoring state for the timeline view; the view does not read it yet.
 #[allow(dead_code)]
@@ -36,4 +97,17 @@ pub mod timeline_scroll_anchoring;
 #[allow(dead_code)]
 pub mod selection_actions;
 pub mod timestamp_format;
+// Find-in-thread logic. The timeline does not drive find yet, so nothing calls these.
+#[allow(dead_code)]
+pub mod thread_find;
+#[allow(dead_code)]
+pub mod thread_find_highlights;
+#[allow(dead_code)]
+pub mod thread_find_navigation;
+#[allow(dead_code)]
+pub mod thread_find_position;
+#[allow(dead_code)]
+pub mod thread_find_state;
 pub mod work_log;
+#[allow(dead_code)]
+pub mod workspace_file_drop;

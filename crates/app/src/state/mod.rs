@@ -7,6 +7,7 @@
 //! shapes. See PORTING.md "No client/server split".
 
 pub mod archived_threads;
+pub mod assets;
 pub mod checkpoint_diff;
 pub mod client_state;
 pub mod command_result;
@@ -14,8 +15,10 @@ pub mod composer_dispatch;
 pub mod composer_path_search;
 pub mod contracts;
 pub mod entities;
+pub mod errors;
 pub mod events;
 pub mod file_context_menu;
+pub mod file_metadata;
 pub mod first_run;
 pub mod helpers;
 pub mod item_support;
@@ -23,6 +26,7 @@ pub mod live_refresh;
 pub mod models;
 pub mod orchestration_v2_projection;
 pub mod panel_animations;
+pub mod project_commands;
 pub mod project_grouping;
 pub mod projects;
 pub mod question_attachments;

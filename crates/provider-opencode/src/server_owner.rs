@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use crate::error::OpenCodeRuntimeError;
+use crate::ledger::OpenCodeServerLedger;
 use crate::runtime::{
     OpenCodeServerProcess, StartOpenCodeServer, VerifyFn, default_v1_verify,
     start_open_code_server_process,
@@ -34,6 +35,7 @@ struct Inner {
     environment: Option<BTreeMap<String, String>>,
     shutdown_grace: Option<Duration>,
     verify: VerifyFn,
+    ledger: Option<OpenCodeServerLedger>,
     idle: Duration,
     state: tokio::sync::Mutex<State>,
 }
@@ -51,6 +53,9 @@ pub struct OwnerConfig {
     pub idle: Option<Duration>,
     pub shutdown_grace: Option<Duration>,
     pub verify: Option<VerifyFn>,
+    /// Records each spawned group so a later start can reap it after a crash.
+    /// Upstream always tracks through the injected `OpenCodeServerLedger`.
+    pub ledger: Option<OpenCodeServerLedger>,
 }
 
 impl OpenCodeServerOwner {
@@ -63,6 +68,7 @@ impl OpenCodeServerOwner {
                 environment: config.environment,
                 shutdown_grace: config.shutdown_grace,
                 verify: config.verify.unwrap_or_else(default_v1_verify),
+                ledger: config.ledger,
                 idle: config.idle.unwrap_or(DEFAULT_IDLE),
                 state: tokio::sync::Mutex::new(State {
                     server: None,
@@ -76,6 +82,29 @@ impl OpenCodeServerOwner {
 
     pub async fn close(&self) {
         force_close(&self.inner).await;
+    }
+
+    /// Synchronous close for drop paths: SIGKILLs the process group at once.
+    /// A start in flight holds the state lock, so that case closes on the
+    /// runtime as soon as the start settles.
+    pub fn kill(&self) {
+        let Ok(mut state) = self.inner.state.try_lock() else {
+            let inner = Arc::clone(&self.inner);
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move { force_close(&inner).await });
+            }
+            return;
+        };
+        cancel_idle(&mut state);
+        if let Some(watch) = state.watch.take() {
+            watch.abort();
+        }
+        let server = state.server.take();
+        state.borrowers = 0;
+        drop(state);
+        if let Some(server) = server {
+            server.kill();
+        }
     }
 
     pub async fn with_server<T, E, F, Fut>(&self, use_server: F) -> Result<T, E>
@@ -105,9 +134,9 @@ impl OpenCodeServerOwner {
             }
             state.server = None;
             state.borrowers = 0;
-            drop(state);
+            // Still under the lock: a concurrent acquire must not see the gap and
+            // start a second server. Upstream closes and restarts inside one permit.
             server.shutdown().await;
-            state = self.inner.state.lock().await;
         }
         let started = start_open_code_server_process(
             self.inner.start_input(),
@@ -163,7 +192,7 @@ impl Inner {
             port: None,
             timeout: None,
             shutdown_grace: self.shutdown_grace,
-            ledger: None,
+            ledger: self.ledger.clone(),
         }
     }
 }
@@ -299,6 +328,83 @@ done
     }
 
     #[tokio::test]
+    async fn an_owned_server_is_recorded_and_forgotten_on_close() {
+        let binary = write_fake_opencode();
+        let state_dir =
+            std::env::temp_dir().join(format!("turin-oc-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state_dir);
+        let ledger = OpenCodeServerLedger::make(state_dir.clone()).await;
+        let owner = OpenCodeServerOwner::new(OwnerConfig {
+            binary_path: binary.display().to_string(),
+            directory: "/work".into(),
+            server_password: None,
+            environment: Some(BTreeMap::new()),
+            idle: Some(Duration::from_secs(30)),
+            shutdown_grace: Some(Duration::from_millis(40)),
+            verify: Some(ok_verify()),
+            ledger: Some(ledger),
+        });
+        let records = state_dir.join("opencode-servers");
+        let count = || {
+            std::fs::read_dir(&records)
+                .map(|dir| dir.count())
+                .unwrap_or(0)
+        };
+        owner
+            .with_server(|server| async move {
+                assert_eq!(count(), 1, "the owned server was not recorded");
+                Ok::<_, OpenCodeRuntimeError>(server.pid())
+            })
+            .await
+            .unwrap();
+        owner.close().await;
+        assert_eq!(count(), 0, "a stopped server was left in the ledger");
+        let _ = std::fs::remove_dir_all(&state_dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_acquires_share_one_restarted_server() {
+        let binary = write_fake_opencode();
+        let owner = OpenCodeServerOwner::new(OwnerConfig {
+            binary_path: binary.display().to_string(),
+            directory: "/work".into(),
+            server_password: None,
+            environment: Some(BTreeMap::new()),
+            idle: Some(Duration::from_secs(30)),
+            shutdown_grace: Some(Duration::from_millis(40)),
+            verify: Some(ok_verify()),
+            ledger: None,
+        });
+        let dead = owner
+            .with_server(|server| async move { Ok::<_, OpenCodeRuntimeError>(server.pid()) })
+            .await
+            .unwrap();
+        crate::process_group::signal_process_group(dead, crate::process_group::SIGKILL).unwrap();
+        for _ in 0..100 {
+            let running = owner
+                .inner
+                .state
+                .lock()
+                .await
+                .server
+                .as_ref()
+                .is_some_and(|server| server.is_running());
+            if !running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (first, second) = tokio::join!(
+            owner.with_server(|server| async move { Ok::<_, OpenCodeRuntimeError>(server.pid()) }),
+            owner.with_server(|server| async move { Ok::<_, OpenCodeRuntimeError>(server.pid()) }),
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_ne!(first, dead, "the dead server was reused");
+        assert_eq!(first, second, "two acquires started two servers");
+        owner.close().await;
+    }
+
+    #[tokio::test]
     async fn borrowers_share_one_process_and_idle_closes_it() {
         let binary = write_fake_opencode();
         let owner = OpenCodeServerOwner::new(OwnerConfig {
@@ -309,6 +415,7 @@ done
             idle: Some(Duration::from_millis(150)),
             shutdown_grace: Some(Duration::from_millis(40)),
             verify: Some(ok_verify()),
+            ledger: None,
         });
         let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
         let owner_held = owner.clone();

@@ -28,13 +28,9 @@ async fn settled_fds() -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_spawn_and_drop_does_not_leak_descriptors() {
     async fn spawn_and_drop() {
-        let client = turin_acp::spawn(turin_acp::SpawnCommand {
-            program: "/bin/cat",
-            args: &[],
-            cwd: None,
-        })
-        .await
-        .expect("spawn cat");
+        let client = turin_acp::spawn(turin_acp::SpawnCommand::new("/bin/cat", &[]))
+            .await
+            .expect("spawn cat");
         drop(client);
     }
 

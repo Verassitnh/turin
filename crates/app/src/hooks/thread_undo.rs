@@ -1,0 +1,277 @@
+//! Port of upstream/apps/web/src/hooks/threadUndo.ts (+ test), and the pure
+//! grouping and undo queue of upstream/apps/web/src/hooks/showThreadUndoNotice.ts.
+//!
+//! Upstream keeps the claims in module state so the sidebar, the header and
+//! the menus invalidate one another. Here they live in a shared handle
+//! (`ThreadUndo`, cheap to clone) that every `ThreadActions` owner takes. The
+//! queue is `ThreadUndoNotices`, shared the same way.
+//!
+//! Upstream's undo is a closure. Here it is `UndoPlan`, data that
+//! `ThreadActions` runs, so a notice can be stored and compared without
+//! capturing the hook. The 5 s expiry timer and the zustand notice store are
+//! the caller's: `expire` and `current_notice` are the seams.
+// Consumers are wired by T20/T22.
+#![allow(dead_code)]
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use turin_contracts::environment::ScopedThreadRef;
+
+/// `UndoOptions["action"]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UndoAction {
+    Settled,
+    Snoozed,
+    Unpinned,
+    Archived,
+    Discarded,
+}
+
+impl UndoAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Settled => "Settled",
+            Self::Snoozed => "Snoozed",
+            Self::Unpinned => "Unpinned",
+            Self::Archived => "Archived",
+            Self::Discarded => "Discarded",
+        }
+    }
+}
+
+/// What Undo does. `ThreadActions::run_undo` runs it through the same methods
+/// the original action used, so the gates and claims apply again.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UndoPlan {
+    /// `unarchiveThread(threadRef, { navigate })`.
+    Unarchive {
+        thread: ScopedThreadRef,
+        navigate: bool,
+    },
+    /// `pinThread(target, { orderKey })`.
+    Pin {
+        thread: ScopedThreadRef,
+        order_key: Option<String>,
+    },
+    /// Un-settle, then re-pin and re-snooze what settling cleared.
+    Settle {
+        thread: ScopedThreadRef,
+        was_pinned: bool,
+        pin_order_key: Option<String>,
+        snoozed_until: Option<String>,
+    },
+    /// `unsnoozeThread(target)`.
+    Unsnooze { thread: ScopedThreadRef },
+}
+
+/// `ThreadUndo.begin`'s claim. Upstream's `Symbol` token is a counter here.
+#[derive(Clone, Debug)]
+pub struct ThreadUndoClaim {
+    owner: ThreadUndo,
+    key: (String, String),
+    token: u64,
+}
+
+impl ThreadUndoClaim {
+    /// `isCurrent`.
+    pub fn is_current(&self) -> bool {
+        self.owner.current_token(&self.key) == Some(self.token)
+    }
+
+    /// `finish`: releases the claim if it is still current.
+    pub fn finish(&self) {
+        if self.is_current() {
+            self.owner.lock().current.remove(&self.key);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClaimState {
+    current: HashMap<(String, String), u64>,
+    next_token: u64,
+}
+
+/// `begin` and `invalidate`, shared by every owner.
+#[derive(Clone, Debug, Default)]
+pub struct ThreadUndo {
+    state: Arc<Mutex<ClaimState>>,
+}
+
+impl ThreadUndo {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ClaimState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn current_token(&self, key: &(String, String)) -> Option<u64> {
+        self.lock().current.get(key).copied()
+    }
+
+    /// `begin`: claims one kind of thread action. A later claim of that kind
+    /// expires the earlier one's Undo.
+    pub fn begin(&self, kind: &str, thread_key: &str) -> ThreadUndoClaim {
+        let key = (kind.to_owned(), thread_key.to_owned());
+        let token = {
+            let mut state = self.lock();
+            state.next_token += 1;
+            let token = state.next_token;
+            state.current.insert(key.clone(), token);
+            token
+        };
+        ThreadUndoClaim {
+            owner: self.clone(),
+            key,
+            token,
+        }
+    }
+
+    /// `invalidate`: expires only this action kind for this thread.
+    pub fn invalidate(&self, kind: &str, thread_key: &str) {
+        self.lock()
+            .current
+            .remove(&(kind.to_owned(), thread_key.to_owned()));
+    }
+}
+
+/// One Undo offered by the notice (`UndoOptions`), without its closure.
+#[derive(Clone, Debug)]
+pub struct UndoOffer {
+    pub id: u64,
+    pub action: UndoAction,
+    pub plan: UndoPlan,
+    pub failure_title: &'static str,
+    pub claim: ThreadUndoClaim,
+}
+
+/// `UndoNotice`: the newest action and how many consecutive ones of its kind
+/// are waiting. `ids` names the group `undo` restores.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoNotice {
+    pub action: UndoAction,
+    pub count: usize,
+    pub ids: Vec<u64>,
+}
+
+/// A group the caller must now run. Each claim is already finished.
+#[derive(Clone, Debug)]
+pub struct UndoRun {
+    pub plan: UndoPlan,
+    pub failure_title: &'static str,
+}
+
+#[derive(Debug, Default)]
+struct NoticeState {
+    live: Vec<UndoOffer>,
+    next_id: u64,
+}
+
+/// `showThreadUndoNotice`'s queue, minus the timer and the store.
+#[derive(Clone, Debug, Default)]
+pub struct ThreadUndoNotices {
+    state: Arc<Mutex<NoticeState>>,
+}
+
+impl ThreadUndoNotices {
+    fn lock(&self) -> std::sync::MutexGuard<'_, NoticeState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// `showThreadUndoNotice`. A claim that is already stale shows nothing.
+    pub fn show(
+        &self,
+        action: UndoAction,
+        claim: ThreadUndoClaim,
+        plan: UndoPlan,
+        failure_title: &'static str,
+    ) {
+        if !claim.is_current() {
+            return;
+        }
+        {
+            let mut state = self.lock();
+            state.next_id += 1;
+            let id = state.next_id;
+            state.live.push(UndoOffer {
+                id,
+                action,
+                plan,
+                failure_title,
+                claim,
+            });
+        }
+        self.refresh();
+    }
+
+    /// `refreshNotice`'s first step: drops offers whose claim went stale.
+    fn refresh(&self) {
+        self.lock().live.retain(|offer| offer.claim.is_current());
+    }
+
+    /// The notice to show: the newest offer and the consecutive offers of its
+    /// kind before it. `None` when nothing is left.
+    pub fn current_notice(&self) -> Option<UndoNotice> {
+        self.refresh();
+        let state = self.lock();
+        let latest = state.live.last()?;
+        let group: Vec<u64> = state
+            .live
+            .iter()
+            .rev()
+            .take_while(|offer| offer.action == latest.action)
+            .map(|offer| offer.id)
+            .collect();
+        Some(UndoNotice {
+            action: latest.action,
+            count: group.len(),
+            ids: group,
+        })
+    }
+
+    /// `undo` on a notice: consumes the live offers named by `ids` whose
+    /// claims are still current. Each claim is finished before the caller runs
+    /// anything, so a repeated click restores nothing twice. A stale handle
+    /// restores nothing.
+    pub fn take_undo(&self, ids: &[u64]) -> Vec<UndoRun> {
+        let taken: Vec<UndoOffer> = {
+            let mut state = self.lock();
+            let mut taken = Vec::new();
+            state.live.retain(|offer| {
+                let take = ids.contains(&offer.id) && offer.claim.is_current();
+                if take {
+                    taken.push(offer.clone());
+                }
+                !take
+            });
+            taken
+        };
+        for offer in &taken {
+            offer.claim.finish();
+        }
+        self.refresh();
+        taken
+            .into_iter()
+            .map(|offer| UndoRun {
+                plan: offer.plan,
+                failure_title: offer.failure_title,
+            })
+            .collect()
+    }
+
+    /// The 5 s expiry: every live offer's claim is finished and the queue is
+    /// emptied. The caller owns the timer.
+    pub fn expire(&self) {
+        let expired: Vec<UndoOffer> = std::mem::take(&mut self.lock().live);
+        for offer in &expired {
+            offer.claim.finish();
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "thread_undo_tests.rs"]
+mod tests;

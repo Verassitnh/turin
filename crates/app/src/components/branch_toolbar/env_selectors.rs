@@ -33,8 +33,7 @@ pub fn environment_machine_icon(kind: EnvironmentMachineKind) -> Icon {
     match kind {
         EnvironmentMachineKind::Server => Icon::new(IconName::Server),
         EnvironmentMachineKind::Cloud => Icon::new(IconName::Cloud),
-        // Upstream draws the Linux mark; the generic computer stands in.
-        EnvironmentMachineKind::Linux => Icon::new(IconName::Computer),
+        EnvironmentMachineKind::Linux => Icon::path(crate::assets::LINUX),
         EnvironmentMachineKind::Desktop => Icon::new(IconName::Monitor),
         EnvironmentMachineKind::Laptop => Icon::new(IconName::Laptop),
         EnvironmentMachineKind::MacMini => Icon::path(crate::assets::MAC_MINI),

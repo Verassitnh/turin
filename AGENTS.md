@@ -44,7 +44,7 @@ TASKS.md is the PM's board; don't edit it.
 
 - **Escape literals:** the Edit/Write tool can decode `\uXXXX` escapes inside its parameters, which silently changes string literals in tests. After writing escape-heavy literals, check the file bytes (`od -c`, or `grep -n` for the backslash).
 - **Disk fills fast:** about 25 worktrees build at once. Build only your own package (`-p <crate>`). If you hit `No space left on device`, stop and report. Never wipe another worktree's target.
-- **No Codex, no Cursor (user rule).** If you delegate subtasks, use only `claudeAgent` / `claude-haiku-5-5`. Never target the Codex or Cursor providers: they are out of usage and reserved for another project. Prefer doing the work yourself.
+- **No Codex (user rule).** Never target the Codex provider. If you delegate subtasks, prefer the `cursor` provider (`composer-2.5` or `grok-4.7`; Cursor runs only Grok and Composer models); Claude-plan usage (`claudeAgent`) is scarce, so use it only for small Haiku helpers.
 - **Never kill by pattern.** No `pkill -f`, `killall`, or `pgrep | kill`: ~25 agents run the same commands (`scripts/check.sh`, cargo) at once, so a pattern kill hits other agents' work. Kill only a PID you captured when you started the process. A build waiting for a throttle slot is not hung.
 - **Never search the whole disk.** No `find /`, `find ~`, or recursive grep
   over `/`, `$HOME`, `~/.bun`, `~/Library` (a watchdog kills them after 20s;

@@ -6,6 +6,13 @@ PM (Claude Opus 5.5) owns this file. Agents don't edit it; they report back.
 
 ## Roster and budget
 
+**Current policy (user, 2026-10-15 ~23:55 UTC; supersedes the table below):**
+- Claude-plan usage is scarce, Cursor usage is plentiful. Implementation goes through the `cursor` provider: `composer-2.5` (bulk ports), `grok-4.7` (backend). Cursor only runs Grok and Composer models. Sonnet (claudeAgent, scarce) only for the critical path; no cap otherwise.
+- `claudeAgent` Haiku: Workflow QC and small fixes only. PM (Opus) stays lean.
+- Never Codex. Pushing to GitHub (origin) is allowed. Cloud agents only if the Mac is truly resource-bound.
+- Never interrupt running threads to switch models; switch on the next continuation.
+- Builds: rustc-throttle (5 slots) + sccache shared cache (`sccache.noindex`, 20G).
+
 | Agent | Model | Cost | Use for |
 |---|---|---|---|
 | PM | Claude Opus 5.5 | $$$$ | Planning, briefs, merges, conflict calls. No implementation. |
@@ -169,3 +176,22 @@ Status: `todo` · `active` · `review` · `done` · `blocked`
 - QC running: T11, T13d, U3 (U3a+U3b combined on task/U3b-shell-state).
 - Active: T22a (live read path), DEDUP-1, T24b, T10c (QC fixes), T13c-F/D2/D4, T13e r2, T09d r2, T20d, U1/U2 (Sonnet), U3c (chat find/scripts/clipboard), U3d (thread actions/right panel), N1b (runtime async fs), T07 r4.
 
+
+## PM status 2026-10-15 23:50 UTC
+- Coverage (needed ≈ 421.6k upstream lines after cuts): on some branch 71.6% ported + 12.6% partial; on main 47.9% + 7.7%.
+- Merged since 23:30: U3a+U3b. QC: T11 FAIL (T11c fixing), T13d FAIL (fix round), U3 PASS (merged).
+- New logic bundles: R1 provider registry/auth/maintenance, R2 ACP session runtime + cursor accounts, R3 settings/theme logic, R4 composer/sidebar/client-runtime logic, R5 orchestration extras (context handoff, checkpoint rollback, workflow*) + storage cleanup.
+- Queued for Sonnet (after U1/U2): settings UI (theme editor etc.), chat UI leftovers (T16 tsx), ui primitives (T03 tsx), composer UI leftovers, N8 provider update UI, N7b routes, N9 native shell, N10/N11.
+
+## PM status 2026-10-16 00:05 UTC
+- Policy switch (see Roster): Cursor for implementation; continuations of critical-path Haiku tasks (T13c-F, T13e, T11c, T13d fix, T22a) move to cursor/claude-sonnet-5-5 when their current runs end (no interrupts).
+- New UI wave on Cursor: S1 settings UI leftovers (sonnet, from task/T20-settings), S2 chat UI leftovers (sonnet), S3 ui primitives + composer UI (sonnet), S4 provider update UI + prompt links + content search + open-in (composer-2.5).
+- Held for capacity: S5 app shell routes (N7b) + native macOS shell (N9), S6 PR/diff/sidebar leftovers (T19/T18/T15). Cloud agents only if the Mac is truly bound.
+
+## Definition of done (goal set 2026-10-16)
+1. Coverage: every KEEP upstream file in docs/inventory/upstream-coverage.md is ported on main (coverage script: `none` = 0, every `partial` resolved or logged as a deviation).
+2. QC: every merged branch has a QC PASS report in docs/qc/ (FAIL → fix → re-QC).
+3. App works end to end (T22): real data read path, send/stop/interrupt write path, each provider (Claude, Codex, Cursor, OpenCode) smoke-tested against fake CLIs/servers; `cargo run -p turin` with a seeded dev DB.
+4. UI QC: look-and-feel workflow over every screen (screenshots light/dark vs upstream classes), all UI bugs fixed, re-checked.
+5. Full gate on main: `cargo check --workspace`, per-crate `scripts/check.sh` all green.
+Capacity notes: rustc slots 4 (CPU was pinned at 97%), sccache on; cloud agents not useful for UI (macOS-only GPUI) — backend only if needed.

@@ -110,6 +110,7 @@ fn restores_file_bytes_after_deleting_and_undoing_its_chip() {
             attachment_id: "uploaded-file".into(),
         }],
     })
+    .unwrap()
     .unwrap();
     assert_eq!(context.records.len(), 1);
     let record = &context.records[0];
@@ -179,6 +180,7 @@ fn restores_an_annotation_and_its_screenshot_attachment_after_undo() {
             attachment_id: "uploaded-screenshot".into(),
         }],
     })
+    .unwrap()
     .unwrap();
     assert_eq!(context.records.len(), 2);
     assert_eq!(context.records[0].kind(), "preview-annotation");

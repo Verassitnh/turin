@@ -267,6 +267,7 @@ pub(super) async fn harness_with_settings(
         sessions: sessions.clone(),
         provider_instances: settings,
         switch_planner: planner.clone(),
+        ..DispatchSeams::default()
     });
     Steer {
         planner,

@@ -564,7 +564,7 @@ pub(super) fn restart_of(client: &C) -> Option<RunId> {
 }
 
 /// `delegatedCompletionWakeDetail`.
-fn delegated_completion_wake_detail(task_ids: &[NodeId]) -> String {
+pub(super) fn delegated_completion_wake_detail(task_ids: &[NodeId]) -> String {
     let list = task_ids
         .iter()
         .map(ToString::to_string)

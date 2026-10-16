@@ -14,6 +14,9 @@
 mod cohort;
 #[cfg(test)]
 mod cohort_tests;
+pub mod delegated_task;
+#[cfg(test)]
+mod delegated_task_tests;
 pub mod dispatch;
 #[cfg(test)]
 mod dispatch_limit_tests;

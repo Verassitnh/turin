@@ -17,13 +17,23 @@
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, Styled as _,
-    Subscription, Window, actions, div, px, rems,
+    AnyView, App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
+    Styled as _, Subscription, Window, actions, div, px, rems,
 };
 
+use super::branch_toolbar::mock_source::MockBranchBackend;
+use super::chat::chat_git_host::{ChatGitBackends, ChatGitHost, RoutedGitThread};
 use super::chat::panel_layout_controls::PanelLayoutControls;
 use super::chat_view::ChatView;
+use super::command_palette::command_palette_logic::SearchOverlayMode;
+use super::command_palette::mock_source::MockPaletteBackend;
+use super::command_palette::palette_source::PaletteContext;
+use super::command_palette::{
+    self, CommandPalette, CommandPaletteEvent, CommandPaletteOpenDetail, CycleAppearance,
+    SelectTheme, ToggleCommandPalette, ToggleFilePicker, ToggleProjectSearch,
+};
+use super::git_actions_control::mock_source::MockGitActionsBackend;
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
@@ -57,6 +67,8 @@ actions!(
         ToggleSidebar,
         /// `rightPanel.toggle` (mod+alt+b).
         ToggleRightPanel,
+        /// `threadDetails.toggle` (mod+shift+b).
+        ToggleThreadDetails,
         /// `usage.open` (mod+u).
         OpenUsage,
     ]
@@ -70,9 +82,11 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-b", ToggleSidebar, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-shift-b", ToggleThreadDetails, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-u", OpenUsage, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
+    command_palette::bind_keys(cx, KEY_CONTEXT);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,12 +126,22 @@ pub struct AppSidebarLayout {
     /// The last drag moved past [`RESIZE_CLICK_SLOP`]; the rail's
     /// double-click reset ignores it, as useResizeDrag suppresses the click.
     last_drag_moved: bool,
+    /// Replaces the chat column (the pull request page and the demo hooks).
+    main_content: Option<AnyView>,
+    /// Replaces the right panel's body.
+    right_panel_content: Option<AnyView>,
+    /// A modal layer over the whole window (dialogs).
+    overlay: Option<AnyView>,
     sidebar: Entity<Sidebar>,
     store: Entity<SidebarStore>,
+    palette: Entity<CommandPalette>,
+    git_host: Entity<ChatGitHost>,
+    thread_details_open: bool,
     /// The routed page when it is not a thread (upstream: the router).
     usage: Option<UsageRoute>,
     _appearance: Subscription,
     _sidebar_events: Subscription,
+    _palette_events: Subscription,
 }
 
 impl AppSidebarLayout {
@@ -131,9 +155,25 @@ impl AppSidebarLayout {
         let viewport_width = f32::from(window.viewport_size().width);
         // T14 replaces the mock store/backend with the client view model.
         let (store, backend) = mock_sidebar(cx);
+        let palette_backend =
+            std::rc::Rc::new(MockPaletteBackend::new(store.clone(), backend.clone()));
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
+        let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
+        let git_host = cx.new(|_| {
+            ChatGitHost::new(ChatGitBackends {
+                git: std::rc::Rc::new(MockGitActionsBackend::new()),
+                branch: std::rc::Rc::new(MockBranchBackend::new()),
+            })
+        });
+        let palette_events = cx.subscribe_in(&palette, window, Self::on_palette_event);
         sidebar.update(cx, |sidebar, cx| sidebar.apply_dev_overrides(window, cx));
+        if let Ok(spec) = std::env::var("TURIN_GIT_UI") {
+            git_host.update(cx, |host, cx| host.run_demo_steps(spec, window, cx));
+        }
+        if let Ok(spec) = std::env::var("TURIN_PALETTE") {
+            palette.update(cx, |palette, cx| palette.run_demo_steps(spec, window, cx));
+        }
         Self {
             focus_handle,
             sidebar_open: true,
@@ -143,11 +183,18 @@ impl AppSidebarLayout {
             right_panel_width: PREVIEW_PANEL_DEFAULT_WIDTH,
             resizing: None,
             last_drag_moved: false,
+            main_content: None,
+            right_panel_content: None,
+            overlay: None,
             sidebar,
             store,
+            palette,
+            git_host,
+            thread_details_open: std::env::var("TURIN_THREAD_DETAILS").is_ok_and(|v| v == "1"),
             usage: None,
             _appearance: appearance,
             _sidebar_events: sidebar_events,
+            _palette_events: palette_events,
         }
     }
 
@@ -180,6 +227,123 @@ impl AppSidebarLayout {
         self.open_usage(window, cx);
     }
 
+    /// Hands the palette the routed thread so its contextual items target it.
+    fn sync_palette_context(&mut self, cx: &mut Context<Self>) {
+        let active_thread_key = match self.sidebar.read(cx).route() {
+            Some(SidebarRoute::Thread(key)) => Some(key.clone()),
+            _ => None,
+        };
+        self.palette.update(cx, |palette, cx| {
+            palette.set_context(
+                PaletteContext {
+                    active_thread_key,
+                    active_draft_project_key: None,
+                },
+                cx,
+            )
+        });
+    }
+
+    /// The shell side of the palette's requests, handled like `SidebarEvent`s:
+    /// navigation that has a screen goes there; the rest wait for their tasks.
+    fn on_palette_event(
+        &mut self,
+        _: &Entity<CommandPalette>,
+        event: &CommandPaletteEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let unavailable = |label: &str, window: &mut Window, cx: &mut Context<Self>| {
+            window.push_notification(
+                Notification::info(format!("{label} is not available yet.")),
+                cx,
+            );
+        };
+        match event {
+            CommandPaletteEvent::Closed => window.focus(&self.focus_handle, cx),
+            CommandPaletteEvent::OpenThread(thread) => {
+                let key = thread.key();
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+                self.sync_palette_context(cx);
+                cx.notify();
+            }
+            CommandPaletteEvent::OpenProject { project_key } => {
+                // The project's most recent thread, else a new one.
+                let snapshot = self.store.read(cx).snapshot().clone();
+                let latest = snapshot
+                    .threads
+                    .iter()
+                    .filter(|thread| {
+                        thread.archived_at.is_none() && thread.project_key() == *project_key
+                    })
+                    .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+                    .map(|thread| thread.key());
+                match latest {
+                    Some(key) => {
+                        self.sidebar
+                            .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+                        self.sync_palette_context(cx);
+                        cx.notify();
+                    }
+                    None => unavailable("New thread", window, cx),
+                }
+            }
+            CommandPaletteEvent::NewThreadInProject { .. }
+            | CommandPaletteEvent::NewThreadFromContext => unavailable("New thread", window, cx),
+            CommandPaletteEvent::NewThreadWithoutProject => {
+                unavailable("New thread without a project", window, cx)
+            }
+            CommandPaletteEvent::FindInCurrentThread => unavailable("Find in thread", window, cx),
+            CommandPaletteEvent::LinkPullRequest => unavailable("Link pull request", window, cx),
+            CommandPaletteEvent::ShowLinkedPullRequests => {
+                self.right_panel_open = true;
+                cx.notify();
+            }
+            CommandPaletteEvent::OpenPullRequests => unavailable("Pull requests", window, cx),
+            CommandPaletteEvent::OpenUsage => self.open_usage(window, cx),
+            CommandPaletteEvent::OpenSettings | CommandPaletteEvent::OpenSetting { .. } => {
+                unavailable("Settings", window, cx)
+            }
+            CommandPaletteEvent::OpenProjectSettings { .. } => {
+                unavailable("Project settings", window, cx)
+            }
+            CommandPaletteEvent::ToggleThemeEditor => unavailable("Theme editor", window, cx),
+        }
+    }
+
+    /// `openCommandPalette(detail)` for the rest of the app.
+    #[allow(dead_code)]
+    pub fn open_command_palette(
+        &mut self,
+        detail: CommandPaletteOpenDetail,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_palette_context(cx);
+        self.palette
+            .update(cx, |palette, cx| palette.open_with(detail, window, cx));
+    }
+
+    /// Shows `content` where the chat column normally sits.
+    pub fn set_main_content(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.main_content = content;
+        cx.notify();
+    }
+
+    /// Shows `content` over the whole window (a dialog), or removes it.
+    pub fn set_overlay(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.overlay = content;
+        cx.notify();
+    }
+
+    /// Shows `content` as the right panel's body and opens the panel when it is set.
+    pub fn set_right_panel_content(&mut self, content: Option<AnyView>, cx: &mut Context<Self>) {
+        self.right_panel_open = content.is_some();
+        self.right_panel_content = content;
+        cx.notify();
+    }
+
     fn on_sidebar_event(
         &mut self,
         _: &Entity<Sidebar>,
@@ -194,6 +358,7 @@ impl AppSidebarLayout {
                 if std::env::var_os("TURIN_PAGE").is_none() {
                     self.usage = None;
                 }
+                self.sync_palette_context(cx);
                 cx.notify();
             }
             SidebarEvent::OpenUsage => self.open_usage(window, cx),
@@ -236,9 +401,102 @@ impl AppSidebarLayout {
         Some((project.into(), thread.title.clone().into()))
     }
 
+    /// The routed thread as the git surfaces read it.
+    fn routed_git_thread(&self, cx: &App) -> Option<RoutedGitThread> {
+        let Some(SidebarRoute::Thread(key)) = self.sidebar.read(cx).route() else {
+            return None;
+        };
+        let snapshot = self.store.read(cx).snapshot();
+        let thread = snapshot
+            .threads
+            .iter()
+            .find(|thread| &thread.key() == key)?;
+        let project = snapshot.project(&thread.project_key())?;
+        Some(RoutedGitThread {
+            environment_id: thread.environment_id.clone(),
+            thread_id: thread.id.clone(),
+            project_cwd: project.workspace_root.clone(),
+            branch: thread.branch.clone(),
+            worktree_path: thread.worktree_path.clone(),
+            has_session: thread.runtime.is_some(),
+            pull_requests: thread.pull_requests.clone(),
+            project_threads: snapshot
+                .threads
+                .iter()
+                .filter(|other| other.project_key() == thread.project_key())
+                .map(|other| super::branch_toolbar::backend::ProjectThreadInfo {
+                    branch: other.branch.clone(),
+                    worktree_path: other.worktree_path.clone(),
+                    updated_at: other.updated_at.clone(),
+                    archived_at: other.archived_at.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    fn toggle_thread_details(
+        &mut self,
+        _: &ToggleThreadDetails,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.thread_details_open = !self.thread_details_open;
+        cx.notify();
+    }
+
     /// Opens the right panel; used by the screenshot harness (`TURIN_SHELL_RIGHT_PANEL`).
     pub fn set_right_panel_open(&mut self, open: bool) {
         self.right_panel_open = open;
+    }
+
+    fn toggle_command_palette(
+        &mut self,
+        _: &ToggleCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_palette_context(cx);
+        self.palette.update(cx, |palette, cx| {
+            palette.toggle_mode(SearchOverlayMode::Command, window, cx)
+        });
+    }
+
+    fn toggle_file_picker(
+        &mut self,
+        _: &ToggleFilePicker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette.update(cx, |palette, cx| {
+            palette.toggle_mode(SearchOverlayMode::Files, window, cx)
+        });
+    }
+
+    fn toggle_project_search(
+        &mut self,
+        _: &ToggleProjectSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette.update(cx, |palette, cx| {
+            palette.toggle_mode(SearchOverlayMode::Content, window, cx)
+        });
+    }
+
+    fn select_theme(&mut self, _: &SelectTheme, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_palette_context(cx);
+        self.palette
+            .update(cx, |palette, cx| palette.open_change_theme(window, cx));
+    }
+
+    fn cycle_appearance(
+        &mut self,
+        _: &CycleAppearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.palette
+            .update(cx, |palette, cx| palette.cycle_appearance(window, cx));
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -334,6 +592,9 @@ impl Render for AppSidebarLayout {
         let maximized = right_panel_open && self.right_panel_maximized;
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
+        let routed_git = self.routed_git_thread(cx);
+        self.git_host
+            .update(cx, |host, cx| host.sync(routed_git, window, cx));
 
         let sidebar_rail = SidebarRail::new(px(sidebar_width))
             .active(resizing == Some(ResizeTarget::Sidebar))
@@ -434,6 +695,10 @@ impl Render for AppSidebarLayout {
             .flex()
             .items_center()
             .child(PanelLayoutControls {
+                thread_details_open: self.thread_details_open,
+                on_toggle_thread_details: Box::new(|_, window, cx| {
+                    window.dispatch_action(Box::new(ToggleThreadDetails), cx);
+                }),
                 right_panel_open,
                 right_panel_maximized: maximized,
                 on_toggle_right_panel: Box::new(|_, window, cx| {
@@ -458,7 +723,13 @@ impl Render for AppSidebarLayout {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_right_panel))
+            .on_action(cx.listener(Self::toggle_thread_details))
             .on_action(cx.listener(Self::open_usage_action))
+            .on_action(cx.listener(Self::toggle_command_palette))
+            .on_action(cx.listener(Self::toggle_file_picker))
+            .on_action(cx.listener(Self::toggle_project_search))
+            .on_action(cx.listener(Self::select_theme))
+            .on_action(cx.listener(Self::cycle_appearance))
             .on_modifiers_changed(cx.listener(
                 |this, event: &gpui_kit::ModifiersChangedEvent, _, cx| {
                     let modifiers = event.modifiers;
@@ -501,11 +772,16 @@ impl Render for AppSidebarLayout {
                             .with(|this| this.flex_row().h_full())
                             .when_some(usage_page.clone(), |this, page| this.child(page))
                             .when(!maximized && !on_usage, |this| {
-                                this.child(ChatView {
-                                    sidebar_open,
-                                    right_panel_open,
-                                    thread: routed_thread.clone(),
-                                })
+                                match self.main_content.clone() {
+                                    Some(content) => this.child(content),
+                                    None => this.child(ChatView {
+                                        sidebar_open,
+                                        right_panel_open,
+                                        thread: routed_thread.clone(),
+                                        git_host: self.git_host.clone(),
+                                        thread_details_open: self.thread_details_open,
+                                    }),
+                                }
                             })
                             .when(right_panel_open, |this| {
                                 this.child(
@@ -523,7 +799,10 @@ impl Render for AppSidebarLayout {
                                                 this.flex_shrink_0().w(px(right_panel_width))
                                             }
                                         })
-                                        .child(RightPanelTabs),
+                                        .child(match self.right_panel_content.clone() {
+                                            Some(content) => content.into_any_element(),
+                                            None => RightPanelTabs.into_any_element(),
+                                        }),
                                 )
                             }),
                     ),
@@ -534,6 +813,9 @@ impl Render for AppSidebarLayout {
             })
             .child(sidebar_toggle)
             .when(!on_usage, |this| this.child(layout_controls))
+            .children(self.overlay.clone())
+            // The ⌘K overlay renders last so it covers the whole window.
+            .child(self.palette.clone())
     }
 }
 

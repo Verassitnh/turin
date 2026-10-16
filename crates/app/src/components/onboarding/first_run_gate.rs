@@ -41,6 +41,8 @@ pub struct FirstRunGate {
     backend: Rc<dyn FirstRunBackend>,
     wizard_backend: Rc<dyn OnboardingBackend>,
     enabled: bool,
+    /// The shell the gate wraps; kept for dev hooks that target the layout directly.
+    layout: gpui_kit::Entity<crate::components::app_sidebar_layout::AppSidebarLayout>,
     child: AnyView,
     state: FirstRunGateState,
     timer_started: bool,
@@ -53,29 +55,44 @@ impl FirstRunGate {
         backend: Rc<dyn FirstRunBackend>,
         wizard_backend: Rc<dyn OnboardingBackend>,
         enabled: bool,
-        child: impl Into<AnyView>,
+        layout: gpui_kit::Entity<crate::components::app_sidebar_layout::AppSidebarLayout>,
     ) -> Self {
         let evidence = backend.evidence();
         // Within a session settings stay hydrated, so remounts resolve synchronously.
-        let decision =
+        let mut decision =
             if !enabled || (evidence.hydration == HydrationStatus::Ready && evidence.completed) {
                 FirstRunDecision::App
             } else {
                 FirstRunDecision::Pending
             };
+        let mut stalled = false;
+        if std::env::var("TURIN_SHOT").is_ok() {
+            match std::env::var("TURIN_FIRST_RUN").as_deref() {
+                Ok("stalled") => {
+                    decision = FirstRunDecision::Pending;
+                    stalled = true;
+                }
+                Ok("fresh") => decision = FirstRunDecision::Wizard,
+                _ => {}
+            }
+        }
         Self {
             backend,
             wizard_backend,
             enabled,
-            child: child.into(),
-            state: FirstRunGateState {
-                decision,
-                stalled: false,
-            },
+            layout: layout.clone(),
+            child: layout.into(),
+            state: FirstRunGateState { decision, stalled },
             timer_started: false,
             completion_requested: false,
             wizard_opened: false,
         }
+    }
+
+    pub fn layout(
+        &self,
+    ) -> &gpui_kit::Entity<crate::components::app_sidebar_layout::AppSidebarLayout> {
+        &self.layout
     }
 
     fn resolve(&self) -> (crate::onboarding::first_run_logic::FirstRunResolution, bool) {
@@ -161,23 +178,19 @@ impl FirstRunGate {
             self.wizard_opened = true;
             let backend = self.wizard_backend.clone();
             let gate = cx.entity().downgrade();
-            // Opened after this frame: a dialog cannot open while the gate renders.
-            cx.spawn_in(window, async move |_, cx| {
-                cx.update(|window, cx| {
-                    open_welcome_wizard(backend, window, cx, move |cx| {
-                        gate.update(cx, |gate, cx| {
-                            gate.state = FirstRunGateState {
-                                decision: FirstRunDecision::App,
-                                stalled: false,
-                            };
-                            cx.notify();
-                        })
-                        .ok();
-                    });
-                })
-                .ok();
-            })
-            .detach();
+            // Deferred, not async: the gate must finish this frame before the dialog opens.
+            window.defer(cx, move |window, cx| {
+                open_welcome_wizard(backend, window, cx, move |cx| {
+                    gate.update(cx, |gate, cx| {
+                        gate.state = FirstRunGateState {
+                            decision: FirstRunDecision::App,
+                            stalled: false,
+                        };
+                        cx.notify();
+                    })
+                    .ok();
+                });
+            });
         }
     }
 
@@ -270,8 +283,8 @@ pub fn first_run_gate(
     backend: Rc<dyn FirstRunBackend>,
     wizard_backend: Rc<dyn OnboardingBackend>,
     enabled: bool,
-    child: impl Into<AnyView>,
+    layout: gpui_kit::Entity<crate::components::app_sidebar_layout::AppSidebarLayout>,
     cx: &mut gpui_kit::App,
 ) -> gpui_kit::Entity<FirstRunGate> {
-    cx.new(|_| FirstRunGate::new(backend, wizard_backend, enabled, child))
+    cx.new(|_| FirstRunGate::new(backend, wizard_backend, enabled, layout))
 }

@@ -26,15 +26,15 @@ use crate::projection::shared::pending_background_work::{
     DerivePendingBackgroundWorkInput, PendingBackgroundWorkItem,
     PendingBackgroundWorkProviderThread, PendingBackgroundWorkRun, derive_pending_background_work,
 };
-use crate::projection::shared::thread_error::{
-    ThreadErrorSummary, latest_root_provider_failure, latest_unheld_run, thread_error_summary,
-    usage_limit_run_presented_as_latest,
-};
 use crate::projection::shared::thread_pull_requests::thread_pull_requests_of;
 use crate::projection::sql::{CauseResult, decode, id_list, query_map};
 use crate::projection::store::ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION;
 use crate::projection::store::canonical::active_local_turn_items;
 use crate::projection::turn_item;
+use turin_shared::orchestration_v2_thread_error::{
+    ThreadErrorSummary, latest_root_provider_failure, latest_unheld_run, thread_error_summary,
+    usage_limit_run_presented_as_latest,
+};
 
 /// `ShellSnapshotOptions.location`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

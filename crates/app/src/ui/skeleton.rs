@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use gpui_kit::{
-    Animation, AnimationExt as _, App, ElementId, IntoElement, RenderOnce, StyleRefinement,
-    Styled as _, Window, div,
+    Animation, AnimationExt as _, AnyElement, App, Div, ElementId, IntoElement, RenderOnce,
+    StyleRefinement, Styled as _, Window, div,
 };
 
 use crate::theme::ActiveAppTheme;
@@ -38,6 +38,28 @@ pub fn skeleton_opacity(progress: f32) -> f32 {
         p if p < 0.92 => LOW,
         p => steps(LOW, 1., (p - 0.92) / 0.08),
     }
+}
+
+/// One bar; size it with `w`/`h` on the returned div.
+pub fn skeleton(shape: SkeletonShape, cx: &App) -> Div {
+    let color = with_alpha(cx.app_theme().muted_foreground, 0.15);
+    let bar = div().bg(color);
+    match shape {
+        SkeletonShape::Block => bar.rounded(RADIUS_SM),
+        SkeletonShape::Card => bar.rounded(RADIUS_LG),
+        SkeletonShape::Pill => bar.rounded_full(),
+    }
+}
+
+/// Wraps a group of bars in the single shared pulse.
+pub fn skeleton_group(id: impl Into<ElementId>, content: Div) -> AnyElement {
+    content
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(2400)).repeat(),
+            |el, progress| el.opacity(skeleton_opacity(progress)),
+        )
+        .into_any_element()
 }
 
 /// Size it with the styled refinements (`.w(..)`, `.h(..)`), like the

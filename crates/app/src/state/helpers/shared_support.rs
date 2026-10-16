@@ -15,7 +15,7 @@ use regex::Regex;
 use turin_contracts::js_trim;
 use url::Url;
 
-use crate::state::support::path::strip_slash_prefixed_windows_drive;
+use turin_shared::path::strip_slash_prefixed_windows_drive;
 
 /// The members of JS `\s` (ECMAScript WhiteSpace and LineTerminator), as the inside of a regex
 /// character class. Rust's `\s` differs: it has U+0085 and lacks U+FEFF.

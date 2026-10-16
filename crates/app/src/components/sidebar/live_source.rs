@@ -309,8 +309,16 @@ impl SidebarBackend for LiveSidebarBackend {
         self.thread_command(&thread, "thread.delete", json!({}), cx)
     }
 
-    /// Drafts are not persisted yet (new threads are created at once).
-    fn discard_draft(&self, _draft_id: String, _cx: &mut App) {}
+    fn discard_draft(&self, draft_id: String, cx: &mut App) {
+        if let Some(global) = cx.try_global::<crate::shell::composer_draft_host::ComposerDraftHostGlobal>()
+        {
+            global.0.update(cx, |host, cx| {
+                host.discard_draft_id(&draft_id);
+                cx.notify();
+            });
+        }
+        self.local(cx, |ui| ui.drafts.retain(|draft| draft.draft_id != draft_id));
+    }
 
     fn set_project_scope(&self, project_key: Option<String>, cx: &mut App) {
         self.local(cx, |ui| ui.project_scope_key = project_key);

@@ -29,6 +29,7 @@ turin-hooks = { path = "crates/hooks" }
 turin-runtime = { path = "crates/runtime" }
 turin-projects = { path = "crates/projects" }
 turin-review = { path = "crates/review" }
+turin-usage = { path = "crates/usage" }
 
 anyhow = "1"
 async-trait = "0.1"

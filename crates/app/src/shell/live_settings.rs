@@ -25,14 +25,14 @@ pub fn build_live_settings_services(
     let rt = commands.runtime();
     Some(LiveSettingsServices {
         bus,
-        server_settings: Arc::clone(rt.server_settings.as_ref()?),
-        keybindings: Arc::clone(rt.keybindings.as_ref()?),
-        provider_auth: Arc::clone(rt.provider_auth.as_ref()?),
-        provider_installation: Arc::clone(rt.provider_installation.as_ref()?),
-        source_control: Arc::clone(rt.source_control.as_ref()?),
-        storage_cleanup: Arc::clone(rt.storage_cleanup.as_ref()?),
+        server_settings: Arc::clone(&rt.server_settings),
+        keybindings: Arc::clone(&rt.keybindings),
+        provider_auth: Arc::clone(&rt.provider_auth),
+        provider_installation: Arc::clone(&rt.provider_installation),
+        source_control: Arc::clone(&rt.source_control_discovery),
+        storage_cleanup: Arc::clone(&rt.storage_cleanup),
         provider_registry: Arc::clone(&rt.providers.registry),
-        provider_maintenance: Arc::clone(rt.provider_maintenance.as_ref()?),
+        provider_maintenance: Arc::clone(&rt.provider_maintenance),
         environment: environment_info(&rt),
         platform: settings_platform(cx),
     })

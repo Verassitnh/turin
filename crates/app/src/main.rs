@@ -55,6 +55,7 @@ use gpui_kit::*;
 
 use components::app_sidebar_layout::{self, AppSidebarLayout};
 use components::onboarding::first_run_gate::FirstRunGate;
+use components::onboarding::live_source::LiveOnboarding;
 use components::onboarding::mock_source::{FirstRunScenario, MockOnboardingBackend};
 use desktop::desktop_client_settings::client_settings_path_for_home;
 use shell::client_settings_persistence::DesktopFileClientSettingsPersistence;
@@ -266,9 +267,21 @@ fn main() {
                         }
                         layout
                     });
-                    // T22 swaps the mock backend for the live settings and workspace state.
-                    let backend = MockOnboardingBackend::shared(FirstRunScenario::from_env());
-                    cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
+                    if std::env::var("TURIN_MOCK_UI").ok().as_deref() == Some("1") {
+                        let backend =
+                            MockOnboardingBackend::shared(FirstRunScenario::from_env());
+                        cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
+                    } else {
+                        let store = cx.global::<state::store::ClientStoreGlobal>().0.clone();
+                        let backend = LiveOnboarding::start(
+                            store,
+                            command_bus.clone(),
+                            app_runtime::data_dir::resolve_data_dir()
+                                .unwrap_or_else(|| std::path::PathBuf::from("/")),
+                            cx,
+                        );
+                        cx.new(|_| FirstRunGate::new(backend.clone(), backend, true, layout))
+                    }
                 },
             )
             .expect("failed to open window");

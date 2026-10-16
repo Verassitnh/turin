@@ -13,5 +13,8 @@ pub mod client_settings_persistence;
 pub mod live;
 pub mod live_settings;
 pub mod pr_preferences;
+pub mod usage_commands;
+pub mod composer_draft_host;
+pub mod keybindings_warning;
 
 pub use chat_route_shortcuts::bind_chat_route_keys;

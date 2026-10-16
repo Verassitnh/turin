@@ -1,0 +1,96 @@
+## T20 — 13923 lines, 68 files
+  1313 apps/web/src/components/settings/ThemeEditorPanel.tsx
+  1148 apps/web/src/components/settings/CodexSetupSection.tsx
+   816 apps/web/src/hooks/useSettings.ts
+   780 apps/web/src/openVsxThemes.ts
+   679 apps/web/src/hooks/useTheme.ts
+   561 apps/web/src/components/settings/ThemeImportDialog.tsx
+   538 apps/web/src/vscodeThemeImport.ts
+   504 apps/web/src/components/settings/scopedSettings.ts
+   501 apps/web/src/components/settings/themeInspector.ts
+   475 apps/web/src/components/settings/ProviderAuthenticationSection.tsx
+   457 apps/web/src/components/settings/ThemeSearchSection.tsx
+   389 apps/web/src/components/settings/CustomModelEditor.tsx
+   369 apps/web/src/components/settings/ThemeColorPicker.tsx
+   328 apps/web/src/components/settings/ProviderSetupSection.tsx
+   318 apps/web/src/components/settings/SettingInheritance.tsx
+   307 apps/server/src/environmentTheme.ts
+   273 apps/web/src/components/settings/SettingsFontPreviews.tsx
+   254 apps/web/src/components/settings/ProjectIconPickerDialog.tsx
+   244 apps/web/src/components/settings/FontFamilyPicker.tsx
+   225 apps/web/src/components/settings/SettingsScopeSentence.tsx
+   217 apps/web/src/components/settings/ProviderAccentColorPicker.tsx
+   206 apps/web/src/components/settings/useProjectScriptSettings.ts
+   162 apps/web/src/components/settings/useScopedSettings.ts
+   156 apps/web/src/components/settings/AddUsageLimitSourceDialog.tsx
+   156 apps/web/src/components/settings/settingsScope.ts
+   151 apps/web/src/components/settings/AddCodexAccountDialog.tsx
+   143 apps/web/src/components/settings/ProjectFaviconPickerDialog.tsx
+   137 apps/web/src/components/settings/SettingsScopeContext.tsx
+   131 apps/web/src/components/settings/ThemeEditorHost.tsx
+   127 apps/web/src/components/settings/GitHubRoutingSettings.tsx
+   125 apps/web/src/hooks/useEnvironmentTheme.ts
+   123 apps/web/src/shortcutModifierState.ts
+   115 apps/web/src/hooks/useDefaultTheme.ts
+   101 apps/web/src/components/settings/ProviderWizardAuthenticationStep.tsx
+    98 apps/web/src/components/settings/FoldedSettingsSection.tsx
+    90 apps/web/src/components/settings/SettingsScopeNotice.tsx
+    84 apps/web/src/components/settings/SourceControlHostSettings.tsx
+    83 apps/web/src/components/settings/ChatGptWelcomeCoordinator.tsx
+    78 apps/web/src/components/settings/CliCommandSettingsRow.tsx
+    77 apps/web/src/components/settings/settingsScopeAxis.ts
+    76 apps/web/src/components/settings/useAvailableSettingsSearchItems.ts
+    74 apps/web/src/components/settings/ChatGptAccountPicker.tsx
+    68 apps/web/src/components/settings/themeEditorStore.ts
+    57 apps/web/src/components/settings/useScopedModelAvailability.ts
+    54 apps/web/src/components/KeybindingsConfigWarning.tsx
+    52 apps/web/src/components/settings/PanelAnimationsPreview.tsx
+    50 apps/web/src/components/settings/ProviderAuthCallbackCoordinator.tsx
+    50 apps/web/src/lib/archivedThreadsState.ts
+    50 apps/web/src/routes/settings.providers.tsx
+    49 apps/web/src/components/settings/ExpandableText.tsx
+    45 apps/web/src/components/KeybindingsUpdateToast.logic.ts
+    39 apps/web/src/components/settings/SecretInput.tsx
+    39 apps/web/src/components/settings/SettingsBreadcrumb.tsx
+    32 apps/web/src/components/settings/settingsScopeNavigation.ts
+    24 apps/web/src/components/settings/useSettingsProjectGroups.ts
+    19 apps/web/src/components/settings/ChatGptUsageButton.tsx
+    19 apps/web/src/components/settings/ScopedSwitch.tsx
+    12 apps/web/src/components/settings/ChatGptConnectionButton.tsx
+    11 apps/web/src/routes/settings.appearance.tsx
+    11 apps/web/src/routes/settings.general.tsx
+     9 apps/web/src/hooks/useCustomThemes.ts
+     8 apps/web/src/components/settings/CodexSetupSection.logic.ts
+     7 apps/web/src/routes/settings.archived.tsx
+     7 apps/web/src/routes/settings.keybindings.tsx
+     7 apps/web/src/routes/settings.source-control.tsx
+     6 apps/web/src/routes/settings.projects.tsx
+     5 apps/web/src/components/settings/itemRows.ts
+     4 apps/web/src/routes/settings.storage.tsx
+## T20 — 15862 lines, 26 files
+  3662 apps/web/src/components/settings/SettingsPanels.tsx  <- ['T20-settings']
+  1541 apps/web/src/components/settings/KeybindingsSettings.tsx  <- ['T20-settings']
+  1349 apps/web/src/components/settings/ProviderInstanceCard.tsx  <- ['T20-settings']
+  1339 apps/web/src/components/settings/ProviderSettingsPanel.tsx  <- ['T20-settings']
+  1045 apps/web/src/components/settings/ThemeSettings.tsx  <- ['T20-settings']
+   714 apps/web/src/components/settings/AddProviderInstanceDialog.tsx  <- ['T20-settings']
+   653 apps/web/src/components/settings/ProviderModelsSection.tsx  <- ['T20-settings']
+   647 apps/web/src/components/settings/SourceControlSettings.tsx  <- ['T20-settings']
+   647 apps/web/src/components/settings/StorageSettings.tsx  <- ['T20-settings']
+   607 apps/web/src/components/settings/SourceControlWritingSettings.tsx  <- ['T20-settings']
+   603 apps/web/src/components/settings/ProjectSettingsPanel.tsx  <- ['T20-settings']
+   587 apps/web/src/components/settings/ProviderSettingsForm.tsx  <- ['T20-settings']
+   537 apps/web/src/components/settings/ProjectDefaultsSettings.tsx  <- ['T20-settings']
+   351 apps/web/src/providerInstances.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+   235 apps/web/src/components/settings/ProjectActionsSettings.tsx  <- ['T20-settings']
+   230 apps/web/src/components/settings/GitHubAccountSettings.tsx  <- ['T20-settings']
+   230 apps/web/src/components/settings/ThemePreviewCircles.tsx  <- ['T20-settings']
+   174 apps/web/src/components/settings/UsageProviderSettings.tsx  <- ['T20-settings']
+   161 apps/web/src/components/settings/BranchNamingSettings.tsx  <- ['T20-settings']
+   141 apps/web/src/components/settings/GitHubTokenSettings.tsx  <- ['T20-settings']
+   136 apps/web/src/components/settings/ThemeWireframe.tsx  <- ['T20-settings']
+    83 apps/web/src/components/settings/NotificationSettings.tsx  <- ['T20-settings']
+    75 apps/web/src/components/settings/ProjectActionsList.tsx  <- ['T20-settings']
+    49 apps/web/src/components/settings/AddProviderInstanceWizardSteps.tsx  <- ['T20-settings']
+    36 apps/web/src/components/settings/ProjectsSettings.tsx  <- ['T20-settings']
+    30 apps/web/src/components/settings/SettingsGroup.tsx  <- ['T20-settings']

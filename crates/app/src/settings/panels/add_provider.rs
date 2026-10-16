@@ -1,10 +1,11 @@
-//! Port of AddProviderInstanceDialog.tsx and AddProviderInstanceWizardSteps.tsx
-//! (the three-step wizard) with `ui/wizard.tsx`.
+//! Port of upstream/apps/web/src/components/settings/AddProviderInstanceDialog.tsx
+//! (the three-step wizard; its steps live in `super::super::wizard`).
 //!
-//! Not ported (PORTING.md Deviations): the ACP registry branch, the managed
-//! ChatGPT account flow (`ChatGptConnectionButton`) and the post-create
-//! sign-in step; the new instance is added enabled and the Account row of
-//! its card starts the sign-in.
+//! Not ported (PORTING.md Deviations): the ACP registry branch (search,
+//! manual and local configuration). The post-create sign-in step
+//! (`ProviderWizardAuthenticationStep`) is reachable only for that branch
+//! upstream, so here it only shows for an instance the wizard created with a
+//! `created_instance_id`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px, rems,
+    rems,
 };
 use serde_json::{Value, json};
 use turin_contracts::settings::ProviderSettingsFormControl;
@@ -23,17 +24,21 @@ use super::super::add_provider_instance_logic::{
     resolve_wizard_navigation, update_provider_identity_draft,
 };
 use super::super::controls::{FieldSize, SelectWidth, password_field, switch, text_field};
-use super::super::dialog::{Dialog, dialog_frame, dialog_header, dialog_panel};
+use super::super::dialog::Dialog;
 use super::super::layout::SettingsRow;
 use super::super::provider_form::{
     FieldValue, derive_provider_settings_fields, next_provider_config_with_field_value,
     read_provider_config_boolean, read_provider_config_string,
 };
 use super::super::provider_meta::{PROVIDER_CLIENTS, driver_label};
-use super::super::view::SettingsView;
+use super::super::view::{SettingsToastKind, SettingsView};
+use super::super::wizard::{
+    AddProviderWizardSteps, WizardSize, add_provider_wizard_steps, wizard_footer, wizard_header,
+    wizard_panel, wizard_popup,
+};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{RADIUS_LG, RADIUS_XL, TEXT_SM};
+use crate::theme::tokens::{RADIUS_LG, TEXT_SM};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
 
 pub struct AddProviderState {
@@ -42,6 +47,8 @@ pub struct AddProviderState {
     pub identity: HashMap<String, ProviderIdentityDraft>,
     pub config: HashMap<String, Value>,
     pub attempted: bool,
+    /// `createdInstanceId`: the saved instance whose sign-in step is showing.
+    pub created_instance_id: Option<String>,
 }
 
 impl Default for AddProviderState {
@@ -52,6 +59,7 @@ impl Default for AddProviderState {
             identity: HashMap::new(),
             config: HashMap::new(),
             attempted: false,
+            created_instance_id: None,
         }
     }
 }
@@ -148,6 +156,9 @@ impl SettingsView {
     }
 
     fn wizard_navigate(&mut self, requested: isize, cx: &mut Context<Self>) {
+        if self.panels.providers.wizard.created_instance_id.is_some() {
+            return;
+        }
         let (_, _, instance_id) = self.wizard_identity(cx);
         let error = validate_instance_id(&instance_id, &self.wizard_existing_ids(cx));
         let validation = WizardValidation {
@@ -206,9 +217,15 @@ impl SettingsView {
             instance.insert("config".into(), config);
         }
         self.write_provider_instance(&instance_id, Some(Value::Object(instance)), false, cx);
-        self.panels.providers.selected = Some(instance_id);
+        self.panels.providers.selected = Some(instance_id.clone());
+        let driver_name = driver_label(&driver);
         self.dialog = None;
-        cx.notify();
+        self.toast(
+            SettingsToastKind::Success,
+            "Provider instance added",
+            format!("{driver_name} instance '{instance_id}' was added."),
+            cx,
+        );
     }
 
     pub(in crate::settings) fn render_add_provider_dialog(
@@ -224,109 +241,19 @@ impl SettingsView {
         let id_error = validate_instance_id(&instance_id, &self.wizard_existing_ids(cx));
         let show_error = self.panels.providers.wizard.attempted && id_error.is_some();
 
-        // Step pills (`WizardSteps`).
-        let mut pills = div()
-            .flex()
-            .gap_1()
-            .p_1()
-            .rounded(RADIUS_XL)
-            .bg(if theme.is_dark() {
-                with_alpha(gpui_kit::white(), 0.04).into()
-            } else {
-                theme.background
-            })
-            .border_1()
-            .border_color(if theme.is_dark() {
-                with_alpha(gpui_kit::white(), 0.05)
-            } else {
-                with_alpha(gpui_kit::black(), 0.05)
-            });
-        for (index, name) in ADD_PROVIDER_WIZARD_STEPS.iter().enumerate() {
-            let current = index == step;
-            let done = index < step;
-            let badge = div()
-                .flex()
-                .size_5()
-                .flex_shrink_0()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .text_size(TEXT_SM.size)
-                .font_weight(FontWeight::MEDIUM)
-                .border_1()
-                .when(done, |this| {
-                    this.bg(theme.primary)
-                        .text_color(theme.primary_foreground)
-                        .border_color(theme.primary)
-                })
-                .when(current, |this| {
-                    this.bg(with_alpha(theme.primary, 0.1))
-                        .text_color(theme.primary)
-                        .border_color(with_alpha(theme.primary, 0.3))
-                })
-                .when(!done && !current, |this| {
-                    this.bg(theme.card)
-                        .text_color(theme.muted_foreground)
-                        .border_color(with_alpha(theme.foreground, 0.1))
-                })
-                .child(if done {
-                    Icon::new(IconName::Check)
-                        .size(rems(1.))
-                        .color(theme.primary_foreground)
-                        .into_any_element()
-                } else {
-                    div().child((index + 1).to_string()).into_any_element()
-                });
-            pills = pills.child(
-                div()
-                    .id(SharedString::from(format!("wizard-step-{index}")))
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .items_center()
-                    .gap_2()
-                    .rounded(RADIUS_LG)
-                    .px(px(10.))
-                    .py_2()
-                    .cursor(CursorStyle::PointingHand)
-                    .when(current, |this| {
-                        this.bg(theme.card)
-                            .border_1()
-                            .border_color(with_alpha(theme.foreground, 0.05))
-                    })
-                    .when(!current, |this| this.hover(|style| style.bg(theme.card)))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.wizard_navigate(index as isize, cx)),
-                    )
-                    .child(badge)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(TEXT_SM.size)
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if current {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(*name),
-                    ),
-            );
-        }
-
         // Panel body by step.
         let body: AnyElement = match step {
             0 => {
-                let mut grid = div().flex().flex_wrap().w_full().gap_2();
+                let dark = theme.is_dark();
+                let mut grid = div().grid().grid_cols(2).gap_3();
                 for (kind, name) in PROVIDER_CLIENTS {
                     let selected = *kind == driver;
                     let kind = (*kind).to_owned();
                     grid = grid.child(
                         div()
                             .id(SharedString::from(format!("wizard-driver-{kind}")))
+                            .relative()
                             .flex()
-                            .w(gpui_kit::relative(0.495))
                             .items_center()
                             .gap_3()
                             .rounded(RADIUS_LG)
@@ -334,20 +261,35 @@ impl SettingsView {
                             .py_3()
                             .cursor(CursorStyle::PointingHand)
                             .bg(if selected {
-                                with_alpha(theme.primary, if theme.is_dark() { 0.15 } else { 0.08 })
-                                    .into()
-                            } else if theme.is_dark() {
+                                with_alpha(theme.primary, if dark { 0.15 } else { 0.08 }).into()
+                            } else if dark {
                                 with_alpha(gpui_kit::white(), 0.03).into()
                             } else {
                                 theme.card
                             })
+                            .text_color(if selected {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
                             .border_1()
                             .border_color(if selected {
                                 theme.primary
+                            } else if dark {
+                                with_alpha(gpui_kit::white(), 0.05).into()
                             } else {
-                                with_alpha(theme.foreground, 0.05).into()
+                                with_alpha(gpui_kit::black(), 0.05).into()
                             })
-                            .when(!selected, |this| this.hover(|style| style.bg(theme.muted)))
+                            .when(selected, |this| this.border_2())
+                            .when(!selected, |this| {
+                                this.hover(|style| {
+                                    style.bg(if dark {
+                                        with_alpha(gpui_kit::white(), 0.05).into()
+                                    } else {
+                                        theme.muted
+                                    })
+                                })
+                            })
                             .on_click({
                                 let kind = kind.clone();
                                 cx.listener(move |this, _, _, cx| {
@@ -447,22 +389,31 @@ impl SettingsView {
                         }
                     },
                 );
-                let accent_input =
-                    self.input_live("add-provider-accent", &accent, "#2563eb", window, cx, {
-                        let driver = driver.clone();
-                        move |this, text, _, cx| {
-                            let wizard = &mut this.panels.providers.wizard;
-                            wizard.identity = update_provider_identity_draft(
-                                &wizard.identity,
-                                &driver,
-                                ProviderIdentityDraftUpdate {
-                                    accent_color: Some(text),
-                                    ..Default::default()
-                                },
-                            );
-                            cx.notify();
-                        }
-                    });
+                let accent_driver = driver.clone();
+                let accent_picker = self.provider_accent_color_picker(
+                    "add-provider",
+                    &(if label.is_empty() {
+                        driver_label(&driver)
+                    } else {
+                        label.clone()
+                    }),
+                    Some(accent.as_str()).filter(|accent| !accent.is_empty()),
+                    0,
+                    window,
+                    cx,
+                    move |this, hex, cx| {
+                        let wizard = &mut this.panels.providers.wizard;
+                        wizard.identity = update_provider_identity_draft(
+                            &wizard.identity,
+                            &accent_driver,
+                            ProviderIdentityDraftUpdate {
+                                accent_color: Some(hex),
+                                ..Default::default()
+                            },
+                        );
+                        cx.notify();
+                    },
+                );
                 // The label draft starts from the driver's label; a typed label replaces it.
                 let mut error_status = None;
                 if show_error {
@@ -498,13 +449,7 @@ impl SettingsView {
                     .child(
                         SettingsRow::new("Accent color")
                             .description("Optional marker shown in the picker.")
-                            .control(div().w(rems(14.)).child(text_field(
-                                &accent_input,
-                                None,
-                                FieldSize::Sm,
-                                true,
-                                cx,
-                            ))),
+                            .control(accent_picker),
                     )
                     .into_any_element()
             }
@@ -669,81 +614,114 @@ impl SettingsView {
             this.dialog = None;
             cx.notify();
         });
-        let last = step + 1 == ADD_PROVIDER_WIZARD_STEPS.len();
-        let back = Button::new("wizard-back")
-            .variant(if step == 0 {
-                ButtonVariant::GhostMuted
-            } else {
-                ButtonVariant::Outline
-            })
-            .size(ButtonSize::Sm)
-            .label(if step == 0 { "Cancel" } else { "Back" })
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.panels.providers.wizard.step == 0 {
-                    this.dialog = None;
-                } else {
-                    this.panels.providers.wizard.step -= 1;
-                }
-                cx.notify();
-            }));
-        let next = if last {
-            Button::new("wizard-add")
-                .size(ButtonSize::Sm)
-                .label("Add instance")
-                .on_click(cx.listener(|this, _, _, cx| this.wizard_save(cx)))
-        } else {
-            Button::new("wizard-next")
-                .size(ButtonSize::Sm)
-                .label("Next")
-                .on_click(
-                    cx.listener(move |this, _, _, cx| this.wizard_navigate(step as isize + 1, cx)),
-                )
-        };
         let environment = vm.environment.label.clone();
-        let panel_body = div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .min_w_0()
-            .child(pills)
-            .child(
-                div()
-                    .min_w_0()
-                    .rounded(RADIUS_LG)
-                    .bg(if theme.is_dark() {
-                        gpui_kit::Hsla::from(with_alpha(gpui_kit::white(), 0.02))
-                    } else {
-                        gpui_kit::Hsla::from(with_alpha(theme.background, 0.8))
-                    })
-                    .border_1()
-                    .border_color(with_alpha(theme.foreground, 0.05))
-                    .px_6()
-                    .py_5()
-                    .child(body),
-            );
-        dialog_frame(
+        let driver_option_label = driver_label(&driver);
+        let preview_label = if label.trim().is_empty() {
+            format!("{driver_option_label} Workspace")
+        } else {
+            label.trim().to_owned()
+        };
+        let summaries = [Some(driver_option_label), Some(preview_label), None];
+        let steps = add_provider_wizard_steps(
             &theme,
-            rems(48.),
-            vec![
-                dialog_header(
-                    "Add provider",
-                    Some(
-                        format!("Add an account or configure a provider on {environment}.").into(),
-                    ),
-                    &theme,
-                ),
-                dialog_panel("wizard-body", panel_body),
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .px_6()
-                    .pb_6()
-                    .child(back)
-                    .child(next)
-                    .into_any_element(),
-            ],
-            dismiss,
-        )
+            AddProviderWizardSteps {
+                disabled: self.panels.providers.wizard.created_instance_id.is_some(),
+                ..AddProviderWizardSteps::new(step, &summaries, id_error.clone())
+            },
+            {
+                let entity = cx.entity().downgrade();
+                move |navigation, _, cx| {
+                    entity
+                        .update(cx, |this, cx| {
+                            this.wizard_apply_navigation(navigation, cx);
+                        })
+                        .ok();
+                }
+            },
+        );
+        let header = wizard_header(
+            &theme,
+            "Add provider",
+            Some(format!("Add an account or configure a provider on {environment}.").into()),
+            vec![steps],
+        );
+        let mut children = vec![header];
+        if let Some(created) = self.panels.providers.wizard.created_instance_id.clone() {
+            children.extend(self.provider_wizard_authentication_step(&created, window, cx));
+        } else {
+            let last = step + 1 == ADD_PROVIDER_WIZARD_STEPS.len();
+            let back = Button::new("wizard-back")
+                .variant(if step == 0 {
+                    ButtonVariant::GhostMuted
+                } else {
+                    ButtonVariant::Outline
+                })
+                .size(ButtonSize::Sm)
+                .label(if step == 0 { "Cancel" } else { "Back" })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.panels.providers.wizard.step == 0 {
+                        this.dialog = None;
+                    } else {
+                        this.panels.providers.wizard.step -= 1;
+                    }
+                    cx.notify();
+                }));
+            let mut footer: Vec<AnyElement> = vec![back.into_any_element()];
+            if step == 0 && driver == "codex" {
+                footer.push(
+                    Button::new("wizard-configure-manually")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Sm)
+                        .label("Configure manually")
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_navigate(1, cx)))
+                        .into_any_element(),
+                );
+                footer.push(self.chat_gpt_connection_button(
+                    "wizard-chatgpt",
+                    ButtonSize::Sm,
+                    ButtonVariant::Default,
+                    None,
+                    false,
+                    cx,
+                    |this, _, cx| this.open_add_codex_account(cx),
+                ));
+            } else if !last {
+                footer.push(
+                    Button::new("wizard-next")
+                        .size(ButtonSize::Sm)
+                        .label("Next")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.wizard_navigate(step as isize + 1, cx)
+                        }))
+                        .into_any_element(),
+                );
+            } else {
+                footer.push(
+                    Button::new("wizard-add")
+                        .size(ButtonSize::Sm)
+                        .label("Add instance")
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_save(cx)))
+                        .into_any_element(),
+                );
+            }
+            children.push(wizard_panel(&theme, None, body));
+            children.push(wizard_footer(None, footer));
+        }
+        wizard_popup(&theme, WizardSize::Wide, children, dismiss)
+    }
+
+    /// `applyWizardNavigation`.
+    fn wizard_apply_navigation(&mut self, navigation: WizardNavigation, cx: &mut Context<Self>) {
+        if self.panels.providers.wizard.created_instance_id.is_some() {
+            return;
+        }
+        match navigation {
+            WizardNavigation::Navigate { step } => self.panels.providers.wizard.step = step,
+            WizardNavigation::Blocked { step, .. } => {
+                self.panels.providers.wizard.attempted = true;
+                self.panels.providers.wizard.step = step;
+            }
+        }
+        cx.notify();
     }
 }

@@ -18,17 +18,23 @@ use gpui_kit::{
     IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, px, rems,
 };
-use serde_json::{Map, Value, json};
-use turin_contracts::provider_instance::ProviderInstanceConfig;
-use turin_contracts::settings::{ProviderSettingsFormControl, resolve_provider_instance_enabled};
+use serde_json::{Value, json};
+use turin_contracts::base_schemas::ProjectId;
+use turin_contracts::provider_instance::{ProviderInstanceConfig, ProviderInstanceId};
+use turin_contracts::settings::{
+    ProviderSettingsFormControl, resolve_project_provider_instance_enabled,
+    resolve_provider_instance_enabled,
+};
 use turin_provider_core::server_provider::{
     ServerProvider, ServerProviderAuthStatus, ServerProviderState,
 };
 
+use super::super::add_provider_instance_logic::{CodexSetupMode, read_codex_setup_mode};
 use super::super::controls::{
     FieldSize, PopupAlign, SelectWidth, password_field, redacted_sensitive_text, switch,
-    text_field, with_popup,
+    text_field, toggle_menu, with_popup,
 };
+use super::super::folded_settings_section::{FoldedHeaderPlacement, FoldedSection};
 use super::super::layout::{SettingsRow, SettingsSection, setting_reset_button, settings_group};
 use super::super::panels_logic::{
     BackgroundActivityOverridePatch, PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
@@ -45,15 +51,25 @@ use super::super::provider_form::{
     read_provider_config_string, read_provider_environment_variable, redact_saved_environment,
 };
 use super::super::provider_meta::driver_label;
+use super::super::provider_settings_logic::build_provider_instance_override_patch;
 use super::super::provider_status::{
     AdvisoryEmphasis, get_provider_summary, get_provider_version_advisory_presentation,
     get_provider_version_label,
 };
+use super::super::scope::LOCAL_ENVIRONMENT_ID;
 use super::super::search::searchable_setting;
 use super::super::time_format::{RelativeTimeState, get_relative_time_state};
-use super::super::view::{SettingsView, Which};
-use crate::theme::color::{color, with_alpha};
-use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_SM, TEXT_XS};
+use super::super::view::{SettingsToastKind, SettingsView, Which};
+use super::super::view_model::ProviderInstanceMutation;
+use crate::components::provider_update_launch_notification_logic::is_provider_update_active;
+use crate::components::provider_updates_action::{
+    ProviderUpdateEnvironmentInput, provider_update_action_tooltip, provider_update_machines,
+    show_provider_updates_action,
+};
+use crate::pull_request::presentation_view::Spinner;
+use crate::state::contracts::EnvironmentId;
+use crate::theme::color::with_alpha;
+use crate::theme::tokens::{self, RADIUS_LG, RADIUS_MD, TEXT_2XS, TEXT_3XS, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip, scroll_area};
 use turin_shared::model::CustomModelDefinition;
@@ -62,6 +78,8 @@ use turin_shared::model::CustomModelDefinition;
 #[derive(Default)]
 pub struct ProvidersState {
     pub selected: Option<String>,
+    /// `targetInstanceId`: the instance a link or search asked to open.
+    pub target: Option<String>,
     /// Instance rows whose account email is revealed (`RedactedSensitiveText`).
     pub revealed_emails: std::collections::HashSet<String>,
     pub model_filter: String,
@@ -71,20 +89,69 @@ pub struct ProvidersState {
     pub model_input: String,
     pub model_error: Option<String>,
     pub editing_model: Option<String>,
+    pub custom_model_draft: Option<super::super::custom_model_editor_logic::CustomModelDraft>,
+    pub custom_model_editor_error: Option<String>,
+    /// `ProviderAuthenticationSection` state per instance.
+    pub auth_ui: std::collections::HashMap<
+        String,
+        super::super::provider_authentication::ProviderAuthUiState,
+    >,
+    /// `ManagedCodexSetup` state per instance.
+    pub codex:
+        std::collections::HashMap<String, super::super::codex_setup_logic::ManagedCodexState>,
+    /// `ProviderAccentColorPicker` state per picker.
+    pub accent: super::super::provider_accent_color_picker::AccentPickerStates,
+    /// `AddCodexAccountDialog` state.
+    pub add_codex: super::super::add_codex_account_dialog::AddCodexAccountState,
+    /// `ProviderAuthCallbackCoordinator`'s `started` ref.
+    pub auth_delivery_started: bool,
     pub wizard: super::add_provider::AddProviderState,
     pub env_drafts:
         std::collections::HashMap<String, Vec<super::super::provider_form::EnvironmentVariable>>,
 }
 
-struct InstanceRow {
-    id: String,
-    driver: String,
-    is_default: bool,
-    is_dirty: bool,
-    instance: ProviderInstanceConfig,
+/// `updateProgress` of `ProviderInstanceCard`: the running update's message,
+/// "Starting update" before the server's first report, `None` when idle.
+fn update_progress_message(provider: &ServerProvider) -> Option<String> {
+    use turin_provider_core::server_provider::ServerProviderUpdateStatus as UpdateStatus;
+    if !is_provider_update_active(provider) {
+        return None;
+    }
+    let state = provider.update_state.as_ref()?;
+    Some(
+        matches!(state.status, UpdateStatus::Queued | UpdateStatus::Running)
+            .then(|| {
+                state
+                    .message
+                    .as_ref()
+                    .map(|message| message.as_str().to_owned())
+            })
+            .flatten()
+            .unwrap_or_else(|| "Starting update".to_owned()),
+    )
 }
 
-fn instance_enabled(row: &InstanceRow) -> bool {
+/// `ProjectOverrideControl`: what the card needs when a project is in scope.
+struct ProviderProjectOverride {
+    /// Every checkout of the project shares the same choice.
+    project_ids: Vec<ProjectId>,
+    /// The project's explicit choice (`None` inherits the device).
+    value: Option<bool>,
+    /// What the switch shows.
+    effective: bool,
+    /// The device's own setting.
+    device: bool,
+}
+
+pub(crate) struct InstanceRow {
+    pub(crate) id: String,
+    pub(crate) driver: String,
+    is_default: bool,
+    is_dirty: bool,
+    pub(crate) instance: ProviderInstanceConfig,
+}
+
+pub(crate) fn instance_enabled(row: &InstanceRow) -> bool {
     resolve_provider_instance_enabled(&row.instance)
 }
 
@@ -116,65 +183,99 @@ pub(super) fn provider_brand_icon(driver: &str, size: gpui_kit::Rems, tint: Hsla
     }
 }
 
-impl SettingsView {
-    fn instance_rows(&self, cx: &gpui_kit::App) -> Vec<InstanceRow> {
-        let vm = self.vm(cx);
-        let instances = &vm.server.provider_instances;
-        let mut rows: Vec<InstanceRow> = Vec::new();
-        let visible_drivers = ["codex", "claudeAgent", "cursor", "opencode"];
-        for driver in visible_drivers {
-            let default_id = driver;
-            let explicit = instances
-                .iter()
-                .find(|(id, _)| id.as_str() == default_id)
-                .map(|(_, instance)| instance.clone());
-            let is_dirty = explicit.is_some();
-            let effective = explicit.unwrap_or_else(|| {
-                serde_json::from_value(json!({ "driver": driver })).expect("driver envelope")
+/// The instance rows of `ProviderSettingsPanel`: the default slots worth
+/// showing, each followed by its custom instances, then instances of drivers
+/// without a slot. Codex and Claude always show; another default slot shows
+/// once configured, enabled, or asked for by `target_instance_id`.
+pub(crate) fn build_instance_rows(
+    instances: &turin_contracts::provider_instance::ProviderInstanceConfigMap,
+    live: &[ServerProvider],
+    target_instance_id: Option<&str>,
+) -> Vec<InstanceRow> {
+    let mut rows: Vec<InstanceRow> = Vec::new();
+    let visible_drivers = ["codex", "claudeAgent", "cursor", "opencode"];
+    for driver in visible_drivers {
+        let default_id = driver;
+        let explicit = instances
+            .iter()
+            .find(|(id, _)| id.as_str() == default_id)
+            .map(|(_, instance)| instance.clone());
+        let is_dirty = explicit.is_some();
+        // An unconfigured default slot runs with the driver's default config.
+        let effective = explicit.unwrap_or_else(|| {
+            serde_json::from_value(json!({ "driver": driver })).expect("driver envelope")
+        });
+        // Cursor appears once the server reports its default instance.
+        let has_default_slot = driver != "cursor"
+            || live.iter().any(|p| p.instance_id.as_str() == default_id)
+            || is_dirty;
+        if has_default_slot
+            && (driver == "codex"
+                || driver == "claudeAgent"
+                || is_dirty
+                || resolve_provider_instance_enabled(&effective)
+                || target_instance_id == Some(default_id))
+        {
+            rows.push(InstanceRow {
+                id: default_id.to_owned(),
+                driver: driver.to_owned(),
+                is_default: true,
+                is_dirty,
+                instance: effective,
             });
-            // Cursor appears once the server reports its default instance.
-            let has_default_slot = driver != "cursor"
-                || vm
-                    .providers
-                    .iter()
-                    .any(|p| p.instance_id.as_str() == default_id)
-                || is_dirty;
-            let enabled = resolve_provider_instance_enabled(&effective);
-            if has_default_slot
-                && (driver == "codex" || driver == "claudeAgent" || is_dirty || enabled)
-            {
-                rows.push(InstanceRow {
-                    id: default_id.to_owned(),
-                    driver: driver.to_owned(),
-                    is_default: true,
-                    is_dirty,
-                    instance: effective,
-                });
-            }
-            for (id, instance) in instances {
-                if id.as_str() != default_id && instance.driver.as_str() == driver {
-                    rows.push(InstanceRow {
-                        id: id.as_str().to_owned(),
-                        driver: driver.to_owned(),
-                        is_default: false,
-                        is_dirty: false,
-                        instance: instance.clone(),
-                    });
-                }
-            }
         }
         for (id, instance) in instances {
-            if !visible_drivers.contains(&instance.driver.as_str()) {
+            if id.as_str() != default_id && instance.driver.as_str() == driver {
                 rows.push(InstanceRow {
                     id: id.as_str().to_owned(),
-                    driver: instance.driver.as_str().to_owned(),
+                    driver: driver.to_owned(),
                     is_default: false,
                     is_dirty: false,
                     instance: instance.clone(),
                 });
             }
         }
-        rows
+    }
+    for (id, instance) in instances {
+        if !visible_drivers.contains(&instance.driver.as_str()) {
+            rows.push(InstanceRow {
+                id: id.as_str().to_owned(),
+                driver: instance.driver.as_str().to_owned(),
+                is_default: visible_drivers.contains(&id.as_str()),
+                is_dirty: false,
+                instance: instance.clone(),
+            });
+        }
+    }
+    rows
+}
+
+/// The row the editor shows: the selected one, else the first, except that a
+/// requested instance that is gone leaves the editor empty
+/// (`targetInstanceMissing`) rather than showing another account.
+pub(crate) fn selected_instance_row<'a>(
+    rows: &'a [InstanceRow],
+    selected: Option<&str>,
+    target_instance_id: Option<&str>,
+) -> Option<&'a InstanceRow> {
+    let target_missing = target_instance_id.is_some()
+        && selected == target_instance_id
+        && !rows
+            .iter()
+            .any(|row| Some(row.id.as_str()) == target_instance_id);
+    selected
+        .and_then(|selected| rows.iter().find(|row| row.id == selected))
+        .or_else(|| if target_missing { None } else { rows.first() })
+}
+
+impl SettingsView {
+    pub(crate) fn instance_rows(&self, cx: &gpui_kit::App) -> Vec<InstanceRow> {
+        let vm = self.vm(cx);
+        build_instance_rows(
+            &vm.server.provider_instances,
+            &vm.providers,
+            self.panels.providers.target.as_deref(),
+        )
     }
 
     pub(super) fn render_providers(
@@ -193,35 +294,31 @@ impl SettingsView {
 
     /// Writes one instance (or removes it) with the `providerInstances` map
     /// replacement the settings service expects.
-    pub(super) fn write_provider_instance(
+    pub(in crate::settings) fn write_provider_instance(
         &mut self,
         id: &str,
         next: Option<Value>,
         clear_text_generation: bool,
         cx: &mut Context<Self>,
     ) {
-        let vm = self.vm(cx);
-        let mut map: Map<String, Value> = serde_json::to_value(&vm.server.provider_instances)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
-        match next {
-            Some(next) => {
-                map.insert(id.to_owned(), next);
-            }
-            None => {
-                map.remove(id);
-            }
-        }
-        let mut patch = json!({ "providerInstances": Value::Object(map) });
-        if clear_text_generation {
+        let mutation = match next {
+            Some(instance) => ProviderInstanceMutation::Upsert {
+                instance_id: id.to_owned(),
+                instance,
+            },
+            None => ProviderInstanceMutation::Remove {
+                instance_id: id.to_owned(),
+            },
+        };
+        let patch = clear_text_generation.then(|| {
             let default = self
                 .json(cx)
                 .default_of(Which::Server, "textGenerationModelSelection")
                 .clone();
-            patch["textGenerationModelSelection"] = default;
-        }
-        self.update_server(patch, cx);
+            json!({ "textGenerationModelSelection": default })
+        });
+        let source = self.store.read(cx).source();
+        source.mutate_provider_instance(mutation, patch, cx);
     }
 
     fn instance_value(row: &InstanceRow) -> Value {
@@ -229,7 +326,7 @@ impl SettingsView {
     }
 
     /// Replaces keys of an instance's envelope: `Some` sets, `None` removes.
-    fn update_instance(
+    pub(crate) fn update_instance(
         &mut self,
         row: &InstanceRow,
         patch: Vec<(&str, Option<Value>)>,
@@ -269,13 +366,13 @@ impl SettingsView {
         let theme = cx.app_theme().clone();
         let vm = self.vm(cx);
         let rows = self.instance_rows(cx);
-        let selected_id = self
-            .panels
-            .providers
-            .selected
-            .clone()
-            .filter(|id| rows.iter().any(|row| &row.id == id))
-            .or_else(|| rows.first().map(|row| row.id.clone()));
+        let selected_id = selected_instance_row(
+            &rows,
+            self.panels.providers.selected.as_deref(),
+            self.panels.providers.target.as_deref(),
+        )
+        .map(|row| row.id.clone());
+        let target_missing = selected_id.is_none() && self.panels.providers.target.is_some();
 
         let last_checked = vm.providers.iter().map(|p| p.checked_at.clone()).max();
         let checked_label =
@@ -287,16 +384,59 @@ impl SettingsView {
                     None => format!("Checked {}", parts.value),
                 },
             };
+        // `disabled={isRefreshingProviders}`; the label turns into "Refreshing providers".
+        let refreshing = vm.providers_refreshing;
         let refresh = Button::new("refresh-providers")
             .variant(ButtonVariant::GhostMuted)
             .size(ButtonSize::Xs)
             .icon(IconName::RefreshCw)
-            .label(checked_label)
+            .disabled(refreshing)
+            .label(if refreshing {
+                "Refreshing providers".to_owned()
+            } else {
+                checked_label
+            })
             .tooltip(Tooltip::new("Refresh provider status"))
             .on_click(cx.listener(|this, _, _, cx| {
                 let source = this.store.read(cx).source();
                 source.refresh_providers(cx);
             }));
+        // `ProviderUpdatesAction`: every outdated provider with a one-click
+        // update; it stays while the updates run, since candidates leave the
+        // list once their servers report them queued.
+        let update_machines = provider_update_machines(&[ProviderUpdateEnvironmentInput {
+            environment_id: EnvironmentId::new(LOCAL_ENVIRONMENT_ID).expect("environment id"),
+            label: vm.environment.label.clone(),
+            connected: true,
+            providers: vm.providers.clone(),
+        }]);
+        let updates_pending = vm.providers.iter().any(is_provider_update_active);
+        let update_all =
+            show_provider_updates_action(&update_machines, updates_pending).then(|| {
+                let instance_ids: Vec<String> = update_machines
+                    .iter()
+                    .flat_map(|machine| machine.candidates.iter())
+                    .map(|candidate| candidate.instance_id.as_str().to_owned())
+                    .collect();
+                Button::new("update-all-providers")
+                    .variant(ButtonVariant::GhostMuted)
+                    .size(ButtonSize::Xs)
+                    .disabled(updates_pending)
+                    .label(if updates_pending {
+                        "Updating…"
+                    } else {
+                        "Update all"
+                    })
+                    .tooltip(Tooltip::new(provider_update_action_tooltip(
+                        &update_machines,
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let source = this.store.read(cx).source();
+                        for instance_id in &instance_ids {
+                            source.update_provider(instance_id, None, cx);
+                        }
+                    }))
+            });
         let add_button = Button::new("add-provider-title")
             .variant(ButtonVariant::GhostMuted)
             .size(ButtonSize::IconXs)
@@ -355,7 +495,11 @@ impl SettingsView {
                 .p_6()
                 .text_size(TEXT_SM.size)
                 .text_color(theme.muted_foreground)
-                .child("No providers configured.")
+                .child(if target_missing {
+                    "This provider instance is no longer available on this device."
+                } else {
+                    "No providers configured."
+                })
                 .into_any_element(),
         };
 
@@ -420,7 +564,15 @@ impl SettingsView {
             .id(id)
             .plain()
             .title_action(add_button)
-            .header_action(refresh)
+            .header_action(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .children(update_all)
+                    .child(refresh),
+            )
             .child(card)
             .into_any_element()
     }
@@ -429,8 +581,11 @@ impl SettingsView {
         &self,
         row: &InstanceRow,
         live: Option<&ServerProvider>,
+        project: Option<&ProviderProjectOverride>,
     ) -> (bool, ProviderStatus) {
-        let enabled = instance_enabled(row);
+        let enabled = project
+            .map(|project| project.effective)
+            .unwrap_or_else(|| instance_enabled(row));
         let status = if enabled {
             match live.map(|p| p.status) {
                 Some(ServerProviderState::Ready) => ProviderStatus::Ready,
@@ -464,7 +619,8 @@ impl SettingsView {
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
         let live = providers.iter().find(|p| p.instance_id.as_str() == row.id);
-        let (enabled, status) = self.provider_status_of(row, live);
+        let project = self.provider_project_override(row, cx);
+        let (enabled, status) = self.provider_status_of(row, live, project.as_ref());
         let summary = {
             let mut provider = live.cloned();
             if let (true, Some(provider)) = (enabled, provider.as_mut()) {
@@ -492,34 +648,8 @@ impl SettingsView {
                 enabled,
             )
         });
-        let has_compat_warning = live
-            .and_then(|p| p.compatibility_advisory.as_ref())
-            .is_some_and(|c| {
-                use turin_provider_core::server_provider::ServerProviderCompatibilityStatus as S;
-                enabled && !matches!(c.status, S::Supported | S::Unknown)
-            });
-        let advisory_icon = advisory.as_ref().map(|advisory| {
-            div()
-                .id(SharedString::from(format!("advisory-{id}")))
-                .flex()
-                .flex_shrink_0()
-                .tooltip({
-                    let tooltip = Tooltip::new(advisory.title.clone());
-                    move |window, cx| tooltip.clone().build(window, cx)
-                })
-                .child(
-                    Icon::new(if has_compat_warning {
-                        IconName::TriangleAlert
-                    } else {
-                        IconName::CircleArrowUp
-                    })
-                    .size(rems(0.875))
-                    .color(if has_compat_warning {
-                        theme.warning
-                    } else {
-                        theme.muted_foreground
-                    }),
-                )
+        let advisory_icon = advisory.map(|advisory| {
+            self.version_advisory_popover(&id, &display_name, advisory, live, true, cx)
         });
 
         let inline_detail = if needs_attention {
@@ -527,6 +657,7 @@ impl SettingsView {
         } else {
             None
         };
+        let update_progress = live.and_then(update_progress_message);
         let status_line = div()
             .mt(px(2.))
             .flex()
@@ -550,14 +681,20 @@ impl SettingsView {
                         ),
                 )
             })
-            .child(div().min_w_0().child(match inline_detail {
-                Some(detail) => format!("{} · {detail}", summary.headline),
-                None => summary.headline.clone(),
-            }));
+            .child(
+                div()
+                    .min_w_0()
+                    .child(match (&update_progress, inline_detail) {
+                        (Some(progress), _) => format!("Updating · {progress}"),
+                        (None, Some(detail)) => format!("{} · {detail}", summary.headline),
+                        (None, None) => summary.headline.clone(),
+                    }),
+            );
 
         let toggle = {
             let entity = cx.entity();
             let row_id = row.id.clone();
+            let project_ids = project.as_ref().map(|project| project.project_ids.clone());
             switch(
                 SharedString::from(format!("provider-enable-{id}")),
                 enabled,
@@ -565,6 +702,17 @@ impl SettingsView {
                 cx,
                 move |next, _, cx| {
                     entity.update(cx, |this, cx| {
+                        // `updateEnabled`: with a project in scope the switch
+                        // writes that project's override.
+                        if let Some(project_ids) = &project_ids {
+                            this.write_provider_project_override(
+                                project_ids,
+                                &row_id,
+                                Some(next),
+                                cx,
+                            );
+                            return;
+                        }
                         let rows = this.instance_rows(cx);
                         if let Some(row) = rows.iter().find(|row| row.id == row_id) {
                             this.update_instance(
@@ -577,6 +725,41 @@ impl SettingsView {
                 },
             )
         };
+        // `projectOverride?.value !== undefined`: the layers icon and the reset.
+        let override_controls = project
+            .as_ref()
+            .filter(|project| project.value.is_some())
+            .map(|project| {
+                let reset = {
+                    let entity = cx.entity();
+                    let row_id = row.id.clone();
+                    let project_ids = project.project_ids.clone();
+                    setting_reset_button(
+                        SharedString::from(format!("reset-provider-override-{id}")),
+                        "Reset to the device setting",
+                        move |_, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.write_provider_project_override(
+                                    &project_ids,
+                                    &row_id,
+                                    None,
+                                    cx,
+                                );
+                            });
+                        },
+                    )
+                };
+                div()
+                    .flex()
+                    .items_center()
+                    .child(self.project_override_inheritance(
+                        &id,
+                        project.value.unwrap_or(project.effective),
+                        project.device,
+                        cx,
+                    ))
+                    .child(reset)
+            });
 
         div()
             .id(SharedString::from(format!("provider-row-{id}")))
@@ -661,9 +844,168 @@ impl SettingsView {
                     .flex_shrink_0()
                     .items_center()
                     .gap_1()
+                    .children(override_controls)
                     .child(toggle),
             )
             .into_any_element()
+    }
+
+    // ── project override ────────────────────────────────────────────────
+
+    /// `projectOverride` of `ProviderSettingsPanel`: present when a project is
+    /// in scope, `None` for environment-wide editing.
+    fn provider_project_override(
+        &self,
+        row: &InstanceRow,
+        cx: &gpui_kit::App,
+    ) -> Option<ProviderProjectOverride> {
+        let context = self.scope_context(cx);
+        if !context.is_project_scope() {
+            return None;
+        }
+        let project_ids: Vec<ProjectId> = context
+            .targets
+            .iter()
+            .filter_map(|target| target.project_id.clone())
+            .collect();
+        let representative = project_ids.first()?;
+        let instance_id = ProviderInstanceId::new(&row.id).ok()?;
+        let server = &self.vm(cx).server;
+        let value = server
+            .project_settings_overrides
+            .get(representative)
+            .and_then(|overrides| overrides.provider_instances.as_ref())
+            .and_then(|instances| instances.get(&instance_id))
+            .and_then(|instance| instance.enabled);
+        Some(ProviderProjectOverride {
+            effective: resolve_project_provider_instance_enabled(
+                &server.provider_instances,
+                &server.project_settings_overrides,
+                Some(representative),
+                &instance_id,
+            ),
+            device: instance_enabled(row),
+            value,
+            project_ids,
+        })
+    }
+
+    /// `writeProjectOverride`: `Some` sets the project's choice, `None` resets
+    /// it back to the device's.
+    fn write_provider_project_override(
+        &mut self,
+        project_ids: &[ProjectId],
+        row_id: &str,
+        next: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(instance_id) = ProviderInstanceId::new(row_id) else {
+            return;
+        };
+        let patch = build_provider_instance_override_patch(
+            &self.vm(cx).server,
+            project_ids,
+            &instance_id,
+            next,
+        );
+        if let Ok(overrides) = serde_json::to_value(&patch) {
+            self.update_server(json!({ "projectSettingsOverrides": overrides }), cx);
+        }
+    }
+
+    /// `ProjectOverrideInheritance`: the layers icon; open it for the project
+    /// and device values side by side.
+    fn project_override_inheritance(
+        &mut self,
+        row_id: &str,
+        project_enabled: bool,
+        device_enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.app_theme().clone();
+        let menu_id = SharedString::from(format!("provider-override-{row_id}"));
+        let open = self.menus.is_open(&menu_id);
+        let trigger = Button::new(SharedString::from(format!(
+            "provider-override-trigger-{row_id}"
+        )))
+        .variant(ButtonVariant::GhostMuted)
+        .size(ButtonSize::IconMicro)
+        .tooltip(Tooltip::new("Overridden for this project"))
+        .child(
+            Icon::new(IconName::Layers)
+                .size(rems(0.75))
+                .color(theme.primary),
+        )
+        .on_click(toggle_menu(cx, |this| &mut this.menus, menu_id.clone()));
+        let popup = open.then(|| {
+            let layers = [
+                ("Project", project_enabled, true),
+                ("Device", device_enabled, false),
+            ];
+            let mut list = div().flex().flex_col().px_3().py(rems(0.625));
+            for (label, enabled, effective) in layers {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .rounded(RADIUS_MD)
+                        .px_2()
+                        .py_1()
+                        .text_size(TEXT_SM.size)
+                        .when(effective, |this| {
+                            this.bg(with_alpha(theme.foreground, 0.06))
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .when(effective, |this| {
+                                    this.font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.foreground)
+                                })
+                                .when(!effective, |this| this.text_color(theme.muted_foreground))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(rems(0.375))
+                                .text_color(if effective {
+                                    theme.foreground
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(if enabled { "On" } else { "Off" })
+                                .child(if effective {
+                                    Icon::new(IconName::Check)
+                                        .size(rems(0.875))
+                                        .color(theme.primary)
+                                        .into_any_element()
+                                } else {
+                                    div().size(rems(0.875)).into_any_element()
+                                }),
+                        ),
+                );
+            }
+            div()
+                .id(SharedString::from(format!(
+                    "provider-override-popup-{row_id}"
+                )))
+                .occlude()
+                .w(rems(16.))
+                .rounded(RADIUS_LG)
+                .border_1()
+                .border_color(crate::ui::tooltip::dropdown_glass_border(&theme))
+                .bg(theme.popover)
+                .shadow(tokens::shadow_popover(theme.is_dark()))
+                .text_color(theme.popover_foreground)
+                .child(list)
+                .into_any_element()
+        });
+        with_popup(trigger, popup, PopupAlign::End, px(20.)).into_any_element()
     }
 
     // ── editor ──────────────────────────────────────────────────────────
@@ -680,7 +1022,8 @@ impl SettingsView {
             .iter()
             .find(|p| p.instance_id.as_str() == row.id)
             .cloned();
-        let (enabled, status) = self.provider_status_of(row, live.as_ref());
+        let project = self.provider_project_override(row, cx);
+        let (enabled, status) = self.provider_status_of(row, live.as_ref(), project.as_ref());
         let display_name = Self::display_name(row);
         let version = get_provider_version_label(
             live.as_ref()
@@ -697,8 +1040,16 @@ impl SettingsView {
                 enabled,
             )
         });
-        let advisory_node = advisory
-            .map(|advisory| self.version_advisory_popover(&row.id, &display_name, advisory, cx));
+        let advisory_node = advisory.map(|advisory| {
+            self.version_advisory_popover(
+                &row.id,
+                &display_name,
+                advisory,
+                live.as_ref(),
+                false,
+                cx,
+            )
+        });
         let delete = (!row.is_default).then(|| {
             let id = row.id.clone();
             Button::new(SharedString::from(format!("delete-instance-{id}")))
@@ -908,13 +1259,35 @@ impl SettingsView {
                 .and_then(|v| v.get("environment").cloned())
                 .as_ref(),
         );
-        let can_authenticate = live
-            .as_ref()
-            .is_some_and(|p| p.setup.as_ref().is_some_and(|s| s.can_authenticate));
-        if can_authenticate || !env_fields.is_empty() {
+        let codex_managed = row.driver == "codex"
+            && read_codex_setup_mode(config.as_ref()) == CodexSetupMode::Managed;
+        let setup_node: Option<AnyElement> = if codex_managed {
+            Some(self.codex_setup_section(row, live.as_ref(), false, window, cx))
+        } else if let Some(provider) = live.as_ref().filter(|provider| {
+            provider
+                .setup
+                .as_ref()
+                .is_some_and(|setup| setup.can_authenticate)
+        }) {
+            Some(self.provider_authentication_section(&row.id, provider, false, window, cx))
+        } else if row.driver == "cursor"
+            && live
+                .as_ref()
+                .and_then(|provider| provider.setup.as_ref())
+                .is_some_and(|setup| !setup.can_authenticate)
+        {
+            Some(
+                SettingsRow::new("Cursor account")
+                    .description("Using CURSOR_API_KEY. Remove it from this provider's environment to use browser sign-in.")
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        if setup_node.is_some() || !env_fields.is_empty() {
             let mut setup = SettingsSection::new("Setup");
-            if can_authenticate {
-                setup = setup.child(self.account_row(row, live.as_ref(), cx));
+            if let Some(node) = setup_node {
+                setup = setup.child(node);
             }
             for field in env_fields {
                 let variable =
@@ -932,14 +1305,31 @@ impl SettingsView {
         }
 
         // Runtime: the driver's settings form.
-        let fields = derive_provider_settings_fields(&row.driver);
-        if !fields.is_empty() {
-            let mut runtime = SettingsSection::new("Runtime");
-            for field in &fields {
-                runtime =
-                    runtime.child(self.provider_field_row(row, field, config.as_ref(), window, cx));
+        if codex_managed {
+            let fields = self.codex_managed_runtime_fields(&row.id, cx);
+            sections.push(
+                self.folded_settings_section(
+                    FoldedSection::new(format!("provider-instance-{}-runtime", row.id), "Runtime")
+                        .placement(FoldedHeaderPlacement::Outside),
+                    fields,
+                    cx,
+                ),
+            );
+        } else {
+            let fields = derive_provider_settings_fields(&row.driver);
+            if !fields.is_empty() {
+                let mut runtime = SettingsSection::new("Runtime");
+                for field in &fields {
+                    runtime = runtime.child(self.provider_field_row(
+                        row,
+                        field,
+                        config.as_ref(),
+                        window,
+                        cx,
+                    ));
+                }
+                sections.push(runtime.into_any_element());
             }
-            sections.push(runtime.into_any_element());
         }
 
         // Environment.
@@ -974,38 +1364,95 @@ impl SettingsView {
         id: &str,
         display_name: &str,
         advisory: super::super::provider_status::VersionAdvisoryPresentation,
+        live: Option<&ServerProvider>,
+        list_mode: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use turin_provider_core::server_provider::ServerProviderUpdateStatus as UpdateStatus;
         let theme = cx.app_theme().clone();
         let menu_id = SharedString::from(format!("advisory-{id}"));
         let open = self.menus.is_open(&menu_id);
         let toggle_id = menu_id.clone();
         let has_warning = advisory.emphasis == AdvisoryEmphasis::Strong;
+        // `isUpdating`, `updateProgress` and `updateProblem` of the card: the
+        // server reports each update step; an active update with no message
+        // yet reads "Starting update".
+        let update_state = live.and_then(|provider| provider.update_state.as_ref());
+        let updating = live.is_some_and(is_provider_update_active);
+        let state_message = update_state
+            .and_then(|state| state.message.as_ref())
+            .map(|message| message.as_str().to_owned());
+        let progress = updating.then(|| {
+            update_state
+                .filter(|state| {
+                    matches!(state.status, UpdateStatus::Queued | UpdateStatus::Running)
+                })
+                .and_then(|_| state_message.clone())
+                .unwrap_or_else(|| "Starting update".to_owned())
+        });
+        let problem = (!updating)
+            .then(|| {
+                update_state
+                    .filter(|state| {
+                        matches!(state.status, UpdateStatus::Failed | UpdateStatus::Unchanged)
+                    })
+                    .and(state_message.clone())
+            })
+            .flatten();
+        let trigger_tooltip = if progress.is_some() {
+            "Updating".to_owned()
+        } else {
+            advisory.title.clone()
+        };
         let trigger = Button::new(SharedString::from(format!("advisory-trigger-{id}")))
             .variant(ButtonVariant::GhostMuted)
-            .size(ButtonSize::IconXs)
-            .icon(if has_warning {
-                IconName::TriangleAlert
+            .size(if list_mode {
+                ButtonSize::IconMicro
             } else {
-                IconName::CircleArrowUp
+                ButtonSize::IconXs
             })
-            .tooltip(Tooltip::new(advisory.title.clone()))
+            .tooltip(Tooltip::new(trigger_tooltip))
+            .child(if progress.is_some() {
+                Spinner::new(SharedString::from(format!("advisory-spin-{id}")))
+                    .size(rems(if list_mode { 0.875 } else { 1. }))
+                    .color(theme.muted_foreground)
+                    .into_any_element()
+            } else {
+                Icon::new(if has_warning {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::CircleArrowUp
+                })
+                .size(rems(if list_mode { 0.875 } else { 1. }))
+                .color(if has_warning {
+                    theme.warning
+                } else {
+                    theme.muted_foreground
+                })
+                .into_any_element()
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menus.toggle(toggle_id.clone());
                 cx.notify();
             }));
         let popup = open.then(|| {
-            let update_label = match &advisory.target_version {
-                Some(version) => format!(
-                    "Install {}",
-                    get_provider_version_label(Some(version)).unwrap_or_default()
-                ),
-                None => "Update now".to_owned(),
+            let update_label = if updating {
+                "Updating".to_owned()
+            } else {
+                match &advisory.target_version {
+                    Some(version) => format!(
+                        "Install {}",
+                        get_provider_version_label(Some(version)).unwrap_or_default()
+                    ),
+                    None => "Update now".to_owned(),
+                }
             };
+            let has_command = advisory.update_command.is_some();
             let instance_id = id.to_owned();
             let target = advisory.target_version.clone();
             let command = advisory.update_command.clone();
             let name = display_name.to_owned();
+            let copy_name = display_name.to_owned();
             div()
                 .id(SharedString::from(format!("advisory-popup-{id}")))
                 .occlude()
@@ -1031,30 +1478,54 @@ impl SettingsView {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(advisory.title.clone()),
                         )
-                        .child(
-                            div()
-                                .text_size(TEXT_XS.size)
-                                .line_height(rems(1.))
-                                .text_color(if has_warning {
-                                    theme.warning
-                                } else {
-                                    theme.muted_foreground
-                                })
-                                .child(advisory.detail.clone()),
-                        ),
+                        .child(self.expandable_text(
+                            &format!("advisory-detail-{id}"),
+                            &advisory.detail,
+                            "Show full error",
+                            false,
+                            cx,
+                        )),
                 )
                 .child(
                     Button::new(SharedString::from(format!("advisory-update-{id}")))
                         .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
-                        .icon(IconName::Download)
+                        .icon(if updating {
+                            IconName::LoaderCircle
+                        } else {
+                            IconName::Download
+                        })
                         .label(update_label)
+                        .disabled(updating)
                         .w_full()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let source = this.store.read(cx).source();
                             source.update_provider(&instance_id, target.clone(), cx);
                         })),
                 )
+                .children((progress.is_some() || problem.is_some()).then(|| {
+                    div()
+                        .text_size(TEXT_XS.size)
+                        .line_height(rems(1.))
+                        .text_color(if problem.is_some() {
+                            theme.warning
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(progress.clone().or(problem.clone()).unwrap_or_default())
+                }))
+                .children(has_command.then(|| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(TEXT_3XS.size)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
+                        .child(div().h(px(1.)).flex_1().bg(theme.border))
+                        .child("OR, UPDATE MANUALLY USING")
+                        .child(div().h(px(1.)).flex_1().bg(theme.border))
+                }))
                 .children(command.map(|command| {
                     div()
                         .flex()
@@ -1084,11 +1555,17 @@ impl SettingsView {
                                 .icon(IconName::Copy)
                                 .icon_size(rems(0.75))
                                 .tooltip(Tooltip::new("Copy command"))
-                                .on_click(move |_, _, cx| {
+                                .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         command.clone(),
                                     ));
-                                }),
+                                    this.toast(
+                                        SettingsToastKind::Success,
+                                        format!("{copy_name} update command copied"),
+                                        "Run it in a terminal when you are ready to update.",
+                                        cx,
+                                    );
+                                })),
                         )
                 }))
                 .into_any_element()
@@ -1102,7 +1579,8 @@ impl SettingsView {
         .into_any_element()
     }
 
-    /// Accent colour: a swatch button opening preset swatches and a hex field.
+    /// `ProviderAccentColorPicker layout="inline" commitDelayMs={120}` of the
+    /// instance card.
     fn accent_picker(
         &mut self,
         id: &str,
@@ -1111,153 +1589,25 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.app_theme().clone();
-        let menu_id = SharedString::from(format!("accent-{id}"));
-        let open = self.menus.is_open(&menu_id);
-        let toggle_id = menu_id.clone();
-        let swatch = value.map(color);
-        let trigger = div()
-            .id(SharedString::from(format!("accent-trigger-{id}")))
-            .flex()
-            .size_7()
-            .items_center()
-            .justify_center()
-            .rounded(RADIUS_MD)
-            .cursor(CursorStyle::PointingHand)
-            .when_some(swatch, |this, swatch| this.bg(swatch))
-            .when(swatch.is_none(), |this| {
-                this.hover(|style| style.bg(theme.accent))
-            })
-            .tooltip({
-                let tooltip = Tooltip::new(format!(
-                    "{} accent color for {display_name}",
-                    if value.is_some() { "Change" } else { "Add" }
-                ));
-                move |window, cx| tooltip.clone().build(window, cx)
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.menus.toggle(toggle_id.clone());
-                cx.notify();
-            }))
-            .when(swatch.is_none(), |this| {
-                this.child(
-                    Icon::new(IconName::Plus)
-                        .size(rems(1.))
-                        .color(theme.muted_foreground),
-                )
-            });
-        let popup = open.then(|| {
-            const PRESETS: [&str; 8] = [
-                "#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#ca8a04", "#16a34a",
-                "#0d9488",
-            ];
-            let row_id = id.to_owned();
-            let swatches = PRESETS.iter().map(|hex| {
-                let hex = (*hex).to_owned();
-                let row_id = row_id.clone();
-                div()
-                    .id(SharedString::from(format!("accent-swatch-{row_id}-{hex}")))
-                    .size_6()
-                    .rounded_full()
-                    .bg(color(&hex))
-                    .cursor(CursorStyle::PointingHand)
-                    .border_2()
-                    .border_color(if value.is_some_and(|v| v.eq_ignore_ascii_case(&hex)) {
-                        theme.ring
-                    } else {
-                        theme.popover
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let rows = this.instance_rows(cx);
-                        if let Some(row) = rows.iter().find(|row| row.id == row_id) {
-                            this.update_instance(
-                                row,
-                                vec![("accentColor", Some(Value::String(hex.clone())))],
-                                cx,
-                            );
-                        }
-                    }))
-            });
-            let clear_id = id.to_owned();
-            div()
-                .id(SharedString::from(format!("accent-popup-{id}")))
-                .occlude()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .w(rems(14.))
-                .p_3()
-                .rounded(RADIUS_LG)
-                .border_1()
-                .border_color(crate::ui::tooltip::dropdown_glass_border(&theme))
-                .bg(theme.popover)
-                .shadow(tokens::shadow_popover(theme.is_dark()))
-                .child(div().flex().flex_wrap().gap_2().children(swatches))
-                .children(value.map(|_| {
-                    Button::new(SharedString::from(format!("accent-clear-{clear_id}")))
-                        .variant(ButtonVariant::GhostMuted)
-                        .size(ButtonSize::Compact)
-                        .icon(IconName::X)
-                        .icon_size(rems(0.875))
-                        .label("Clear accent color")
-                        .w_full()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let rows = this.instance_rows(cx);
-                            if let Some(row) = rows.iter().find(|row| row.id == clear_id) {
-                                this.update_instance(row, vec![("accentColor", None)], cx);
-                            }
-                            this.menus.close();
-                            cx.notify();
-                        }))
-                }))
-                .into_any_element()
-        });
-        let _ = window;
-        with_popup(
-            trigger,
-            popup,
-            PopupAlign::Start,
-            rems(1.75).to_pixels(px(16.)),
+        let row_id = id.to_owned();
+        self.provider_accent_color_picker(
+            id,
+            display_name,
+            value,
+            120,
+            window,
+            cx,
+            move |this, hex, cx| {
+                let rows = this.instance_rows(cx);
+                if let Some(row) = rows.iter().find(|row| row.id == row_id) {
+                    this.update_instance(
+                        row,
+                        vec![("accentColor", (!hex.is_empty()).then(|| Value::String(hex)))],
+                        cx,
+                    );
+                }
+            },
         )
-        .into_any_element()
-    }
-
-    fn account_row(
-        &mut self,
-        row: &InstanceRow,
-        live: Option<&ServerProvider>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let signed_in =
-            live.is_some_and(|p| p.auth.status == ServerProviderAuthStatus::Authenticated);
-        let id = row.id.clone();
-        let button = if signed_in {
-            Button::new(SharedString::from(format!("provider-signout-{id}")))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Sm)
-                .label("Sign out")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let source = this.store.read(cx).source();
-                    source.logout_provider(&id, cx);
-                }))
-        } else {
-            Button::new(SharedString::from(format!("provider-signin-{id}")))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Sm)
-                .label("Sign in")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let source = this.store.read(cx).source();
-                    source.start_provider_auth(&id, cx);
-                }))
-        };
-        SettingsRow::new("Account")
-            .description(if signed_in {
-                "Signed in.".to_owned()
-            } else {
-                "Sign in on this device.".to_owned()
-            })
-            .control(button)
-            .into_any_element()
     }
 
     fn environment_field_row(
@@ -2069,6 +2419,27 @@ impl SettingsView {
             if model.is_custom {
                 let id = id.clone();
                 let slug = slug.clone();
+                if let Some(entry) = custom_models.iter().find(|entry| entry.slug == slug) {
+                    let entry = entry.clone();
+                    let slug_toggle = slug.clone();
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!("model-edit-{id}-{slug}")))
+                            .variant(ButtonVariant::GhostMuted)
+                            .size(ButtonSize::IconMicro)
+                            .icon(IconName::SquarePen)
+                            .icon_size(rems(0.75))
+                            .tooltip(Tooltip::new("Edit name and options"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.panels.providers.editing_model.as_deref()
+                                    == Some(slug_toggle.as_str())
+                                {
+                                    this.cancel_custom_model_edit(cx);
+                                } else {
+                                    this.begin_custom_model_edit(&entry, cx);
+                                }
+                            })),
+                    );
+                }
                 let remove_row = row.id.clone();
                 let remaining: Vec<Value> = custom_models
                     .iter()
@@ -2108,6 +2479,14 @@ impl SettingsView {
                         })),
                 );
             }
+            // `pickerTooltip`: the switch sits in a wrapper span that owns the tooltip.
+            let picker_tooltip = if model.is_custom {
+                "Custom models are always shown in the picker"
+            } else if hidden_now {
+                "Hidden from picker"
+            } else {
+                "Shown in picker"
+            };
             let picker_switch = {
                 let id = id.clone();
                 let slug = slug.clone();
@@ -2185,13 +2564,37 @@ impl SettingsView {
                     )
                     .child(actions)
                     .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .child(picker_switch),
+                        div().flex().flex_shrink_0().items_center().child(
+                            div()
+                                .id(SharedString::from(format!("model-visible-tip-{id}-{slug}")))
+                                .flex()
+                                .flex_shrink_0()
+                                .items_center()
+                                .tooltip({
+                                    let tooltip = Tooltip::new(picker_tooltip);
+                                    move |window, cx| tooltip.clone().build(window, cx)
+                                })
+                                .child(picker_switch),
+                        ),
                     ),
             );
+            if model.is_custom
+                && self.panels.providers.editing_model.as_deref() == Some(slug.as_str())
+            {
+                let built_in_live = live
+                    .map(|provider| provider.models.as_slice())
+                    .unwrap_or(&[]);
+                if let Some(editor) = self.render_custom_model_editor(
+                    &id,
+                    &row.id,
+                    &row.driver,
+                    built_in_live,
+                    window,
+                    cx,
+                ) {
+                    list = list.child(editor);
+                }
+            }
         }
 
         // Add custom model input.
@@ -2282,6 +2685,49 @@ impl SettingsView {
                     .children(error),
             )
             .into_any_element()
+    }
+
+    pub(crate) fn save_custom_model_draft(&mut self, row_id: &str, cx: &mut Context<Self>) {
+        use super::super::custom_model_editor_logic::{definition_from_draft, validate_draft};
+        let Some(draft) = self.panels.providers.custom_model_draft.clone() else {
+            return;
+        };
+        if let Some(problem) = validate_draft(&draft) {
+            self.panels.providers.custom_model_editor_error = Some(problem);
+            cx.notify();
+            return;
+        }
+        let definition = definition_from_draft(&draft);
+        let rows = self.instance_rows(cx);
+        let Some(row) = rows.iter().find(|row| row.id == row_id) else {
+            return;
+        };
+        let custom_models = read_config_custom_models(row.instance.config.as_ref());
+        let next: Vec<Value> = custom_models
+            .iter()
+            .map(|entry| {
+                if entry.slug == definition.slug {
+                    json!({
+                        "slug": definition.slug,
+                        "name": definition.name,
+                        "capabilities": definition.capabilities,
+                    })
+                } else {
+                    json!({
+                        "slug": entry.slug,
+                        "name": entry.name,
+                        "capabilities": entry.capabilities,
+                    })
+                }
+            })
+            .collect();
+        let config = next_config_blob_with_value(
+            row.instance.config.as_ref(),
+            "customModels",
+            Value::Array(next),
+        );
+        self.update_instance(row, vec![("config", Some(config))], cx);
+        self.cancel_custom_model_edit(cx);
     }
 
     /// `handleAdd`: validates and appends a custom model slug.
@@ -2600,5 +3046,119 @@ fn custom_model_placeholder(driver: &str) -> &'static str {
         "cursor" => "claude-sonnet-4-6",
         "opencode" => "openai/gpt-5",
         _ => "model-slug",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Port of the row-visibility and target cases of
+    //! upstream/apps/web/src/components/settings/ProviderSettingsPanel.environment.test.tsx
+    //! (the cases that do not depend on React rendering or auth-session scopes).
+
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+    use turin_contracts::provider_instance::ProviderInstanceConfigMap;
+
+    use super::*;
+
+    fn instances(value: Value) -> ProviderInstanceConfigMap {
+        serde_json::from_value(value).expect("provider instances decode")
+    }
+
+    fn ids(rows: &[InstanceRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.id.as_str()).collect()
+    }
+
+    #[test]
+    fn shows_codex_and_claude_while_hiding_untouched_disabled_provider_slots() {
+        let rows = build_instance_rows(&instances(json!({})), &[], None);
+        assert_eq!(ids(&rows), vec!["codex", "claudeAgent"]);
+        for hidden in ["cursor", "grok", "pi", "opencode", "antigravity"] {
+            assert!(!ids(&rows).contains(&hidden), "{hidden}");
+        }
+    }
+
+    #[test]
+    fn keeps_explicitly_configured_providers_visible_when_disabled() {
+        let rows = build_instance_rows(
+            &instances(json!({ "opencode": { "driver": "opencode", "enabled": false } })),
+            &[],
+            None,
+        );
+        assert!(ids(&rows).contains(&"opencode"));
+        assert!(
+            rows.iter()
+                .find(|row| row.id == "opencode")
+                .unwrap()
+                .is_dirty
+        );
+    }
+
+    #[test]
+    fn keeps_legacy_provider_configuration_visible_when_disabled() {
+        let rows = build_instance_rows(
+            &instances(json!({
+                "opencode": {
+                    "driver": "opencode",
+                    "enabled": false,
+                    "config": { "binaryPath": "/custom/opencode" }
+                }
+            })),
+            &[],
+            None,
+        );
+        assert!(ids(&rows).contains(&"opencode"));
+    }
+
+    #[test]
+    fn lists_an_untouched_slot_only_when_it_is_the_requested_instance() {
+        let rows = build_instance_rows(&instances(json!({})), &[], Some("opencode"));
+        assert!(ids(&rows).contains(&"opencode"));
+    }
+
+    #[test]
+    fn follows_each_default_slot_with_its_custom_instances() {
+        let rows = build_instance_rows(
+            &instances(json!({ "codex_work": { "driver": "codex", "enabled": true } })),
+            &[],
+            None,
+        );
+        assert_eq!(ids(&rows), vec!["codex", "codex_work", "claudeAgent"]);
+        assert!(rows[0].is_default);
+        assert!(!rows[1].is_default);
+    }
+
+    #[test]
+    fn opens_the_requested_provider_instance_instead_of_the_first_provider() {
+        let rows = build_instance_rows(
+            &instances(json!({ "codex_work": { "driver": "codex", "enabled": true } })),
+            &[],
+            Some("codex_work"),
+        );
+        let selected = selected_instance_row(&rows, Some("codex_work"), Some("codex_work"));
+        assert_eq!(selected.map(|row| row.id.as_str()), Some("codex_work"));
+    }
+
+    #[test]
+    fn does_not_substitute_another_account_when_the_requested_instance_was_removed() {
+        let rows = build_instance_rows(&instances(json!({})), &[], Some("codex_work"));
+        assert_eq!(
+            selected_instance_row(&rows, Some("codex_work"), Some("codex_work")).map(|r| &r.id),
+            None
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_first_row_when_nothing_was_requested() {
+        let rows = build_instance_rows(&instances(json!({})), &[], None);
+        assert_eq!(
+            selected_instance_row(&rows, None, None).map(|row| row.id.as_str()),
+            Some("codex")
+        );
+        // A selection that vanished after a delete falls back too.
+        assert_eq!(
+            selected_instance_row(&rows, Some("gone"), None).map(|row| row.id.as_str()),
+            Some("codex")
+        );
     }
 }

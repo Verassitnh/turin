@@ -142,6 +142,7 @@ impl SettingsView {
         menu_id: &'static str,
         providers: &[ServerProvider],
         selection: &Value,
+        mixed: bool,
         on_change: impl Fn(&mut Self, Value, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
@@ -157,10 +158,15 @@ impl SettingsView {
         let active = options
             .iter()
             .find(|option| option.instance_id == instance_id && option.slug == model);
-        let label: SharedString = active
-            .map(|option| option.name.clone())
-            .unwrap_or_else(|| model.clone())
-            .into();
+        // `triggerLabel: "Mixed"` when the targets disagree.
+        let label: SharedString = if mixed {
+            "Mixed".into()
+        } else {
+            active
+                .map(|option| option.name.clone())
+                .unwrap_or_else(|| model.clone())
+                .into()
+        };
         let open = self.menus.is_open(menu_id);
 
         let trigger = picker_trigger(
@@ -234,8 +240,8 @@ impl SettingsView {
             rems(1.75).to_pixels(px(16.)),
         );
 
-        // TraitsPicker: the selected model's option descriptors.
-        let traits = active.and_then(|option| {
+        // TraitsPicker: the selected model's option descriptors (hidden when mixed).
+        let traits = active.filter(|_| !mixed).and_then(|option| {
             if option.descriptors.is_empty() {
                 return None;
             }
@@ -376,42 +382,110 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// `modelRow` of ProjectDefaultsSettings.
     pub(super) fn default_model_row(
         &mut self,
         json: &super::rows::Json,
-        description: &'static str,
+        project_scope: bool,
+        unavailable: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use crate::settings_logic::scoped_settings::{ScopedSettingSource, scoped_settings_source};
         let vm = self.vm(cx);
+        let context = self.scope_context(cx);
         let selection = json.get(Which::Server, "defaultModelSelection").clone();
         let is_automatic = selection.is_null();
+        let source = scoped_settings_source(&context.targets, &["defaultModelSelection"]);
+        let row = super::layout::SettingsRow::new("Model")
+            .id("default-model")
+            .description(if project_scope {
+                "Model for new threads in this project."
+            } else {
+                "Default model for new threads. Projects can override it."
+            });
+        let (mut row, mixed) = self.scoped_row(
+            cx,
+            json,
+            row,
+            "default-model",
+            "defaultModelSelection",
+            "default model",
+            "Reset to default",
+        );
         let control = self.model_selection_control(
             cx,
             "default-model",
             &vm.providers,
             &selection,
-            |this, value, cx| this.update_server(json!({ "defaultModelSelection": value }), cx),
+            mixed,
+            |this, value, cx| this.set_default_model(value, cx),
         );
-        let reset = (!is_automatic).then(|| {
-            let action = self.cb(cx, |this, _, cx| {
-                this.update_server(json!({ "defaultModelSelection": Value::Null }), cx)
-            });
-            super::layout::setting_reset_button(
-                "reset-default-model",
-                "Reset to default",
-                move |w, c| action(w, c),
-            )
-            .into_any_element()
-        });
-        let mut row = super::layout::SettingsRow::new("Model")
-            .id("default-model")
-            .description(description)
-            .reset_action(reset)
-            .control(control);
-        if is_automatic {
+        // "Automatic" names the null default while no project override hides it.
+        if !unavailable && !mixed && source != ScopedSettingSource::Project && is_automatic {
             row = row.status("Automatic");
         }
-        row.into_any_element()
+        row.control(control).into_any_element()
+    }
+
+    /// `setModel`: refuses a model a selected target cannot run, else saves it.
+    pub(super) fn set_default_model(&mut self, value: Value, cx: &mut Context<Self>) {
+        if let Some((instance_id, model)) = selection_fields(&value)
+            && let Some(reason) = self.model_disabled_reason(&instance_id, &model, cx)
+        {
+            self.toast(
+                super::view::SettingsToastKind::Error,
+                "Default model not saved",
+                reason,
+                cx,
+            );
+            return;
+        }
+        self.update(Which::Server, json!({ "defaultModelSelection": value }), cx);
+    }
+
+    /// `modelDisabledReason`: why a selected target cannot run `model` of
+    /// `instance_id`, if one cannot.
+    pub(super) fn model_disabled_reason(
+        &self,
+        instance_id: &str,
+        model: &str,
+        cx: &gpui_kit::App,
+    ) -> Option<String> {
+        use turin_contracts::provider_instance::ProviderInstanceId;
+        let vm = self.vm(cx);
+        let context = self.scope_context(cx);
+        let provider = vm
+            .providers
+            .iter()
+            .find(|provider| provider.instance_id.as_str() == instance_id);
+        for target in &context.targets {
+            let enabled_for_target =
+                match (&target.project_id, ProviderInstanceId::new(instance_id)) {
+                    (Some(_), Ok(id)) => {
+                        turin_contracts::settings::resolve_project_provider_instance_enabled(
+                            &target.settings.provider_instances,
+                            &target.settings.project_settings_overrides,
+                            target.project_id.as_ref(),
+                            &id,
+                        )
+                    }
+                    _ => provider.is_some_and(|provider| provider.enabled),
+                };
+            let runnable = provider.is_some_and(|provider| {
+                provider_is_selectable(provider)
+                    && provider
+                        .models
+                        .iter()
+                        .any(|candidate| candidate.slug.as_str() == model)
+            });
+            if !enabled_for_target || !runnable {
+                return Some(format!(
+                    "This model is unavailable on {}. Select that environment to choose its model separately.",
+                    target.label
+                ));
+            }
+        }
+        None
     }
 
     pub(super) fn text_generation_model_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -438,8 +512,13 @@ impl SettingsView {
                 "text-generation-model",
                 &text_providers,
                 &selection,
+                false,
                 |this, value, cx| {
-                    this.update_server(json!({ "textGenerationModelSelection": value }), cx)
+                    this.update(
+                        Which::Server,
+                        json!({ "textGenerationModelSelection": value }),
+                        cx,
+                    )
                 },
             )
         };

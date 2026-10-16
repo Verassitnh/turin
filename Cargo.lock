@@ -7543,6 +7543,7 @@ dependencies = [
  "turin-shared",
  "turin-text-generation",
  "unicode-normalization",
+ "unicode-segmentation",
  "url",
  "uuid",
  "zip",

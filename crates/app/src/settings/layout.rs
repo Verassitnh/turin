@@ -2,9 +2,8 @@
 //! SettingsGroup.tsx: the section / group / row frame every panel is built
 //! from.
 //!
-//! Not ported: the scope machinery (`SettingInheritance`, `ScopedSwitch`,
-//! scope sentence), which only exists to retarget settings at remote
-//! environments and projects; see PORTING.md Deviations.
+//! The scope machinery plugs in through [`SettingsRow::inheritance`] and
+//! [`SettingsRow::inert`] (see `scope.rs` and `setting_inheritance.rs`).
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -236,6 +235,9 @@ pub struct SettingsRow {
     description: Option<AnyElement>,
     status: Option<AnyElement>,
     reset_action: Option<AnyElement>,
+    inheritance: Option<AnyElement>,
+    inert: Option<SharedString>,
+    compact: bool,
     control: Option<AnyElement>,
     disabled: bool,
     children: Vec<AnyElement>,
@@ -249,6 +251,9 @@ impl SettingsRow {
             description: None,
             status: None,
             reset_action: None,
+            inheritance: None,
+            inert: None,
+            compact: false,
             control: None,
             disabled: false,
             children: Vec::new(),
@@ -272,6 +277,25 @@ impl SettingsRow {
 
     pub fn reset_action(mut self, action: Option<impl IntoElement>) -> Self {
         self.reset_action = action.map(IntoElement::into_any_element);
+        self
+    }
+
+    /// The inheritance indicator beside the title (`SettingInheritance`).
+    pub fn inheritance(mut self, inheritance: Option<AnyElement>) -> Self {
+        self.inheritance = inheritance;
+        self
+    }
+
+    /// `className="py-2"`: a denser row (lists of items).
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// `inertControl(message)`: the control is shown at half strength and takes
+    /// no input; `message` is the tooltip explaining why.
+    pub fn inert(mut self, message: Option<SharedString>) -> Self {
+        self.inert = message;
         self
     }
 
@@ -335,8 +359,7 @@ impl RenderOnce for SettingsRow {
                             .text_color(theme.foreground)
                             .child(self.title),
                     )
-                    // The inheritance indicator slot, empty without scopes.
-                    .child(slot(None))
+                    .child(slot(self.inheritance))
                     .child(slot(self.reset_action)),
             )
             .children(self.description.map(|description| {
@@ -357,7 +380,23 @@ impl RenderOnce for SettingsRow {
                     .child(status)
             }));
 
+        let inert = self.inert.clone();
         let control = self.control.map(|control| {
+            let control = match inert {
+                Some(message) => {
+                    use gpui_kit::StatefulInteractiveElement as _;
+                    div()
+                        .id("settings-row-inert")
+                        .occlude()
+                        .opacity(0.5)
+                        .tooltip(move |window, cx| {
+                            crate::ui::Tooltip::new(message.clone()).build(window, cx)
+                        })
+                        .child(control)
+                        .into_any_element()
+                }
+                None => control,
+            };
             div()
                 .flex()
                 .min_w_0()
@@ -394,7 +433,8 @@ impl RenderOnce for SettingsRow {
             .flex_col()
             .px_4()
             .when(has_children, |this| this.pt_3().pb_1())
-            .when(!has_children, |this| this.py_3())
+            .when(!has_children && !self.compact, |this| this.py_3())
+            .when(!has_children && self.compact, |this| this.py_2())
             .when(self.disabled, |this| this.opacity(0.64))
             .when(pulsing, |this| {
                 this.border_2().border_color(pulse_ring(theme))

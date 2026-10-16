@@ -10,7 +10,7 @@ use gpui_kit::{
 
 use super::search::{
     SettingsPath, SettingsSearchAvailability, filter_available_settings_search_items,
-    search_settings,
+    is_settings_overview_visible, search_settings,
 };
 use super::view::{SettingsRoute, SettingsView};
 use crate::theme::color::with_alpha;
@@ -142,6 +142,14 @@ impl SettingsView {
                 Kbd::new("/").into_any_element()
             });
 
+        let context = self.scope_context(cx);
+        let nav_paths: Vec<SettingsPath> = SettingsPath::ALL
+            .into_iter()
+            .filter(|path| {
+                *path != SettingsPath::Projects
+                    || is_settings_overview_visible(context.search_kind())
+            })
+            .collect();
         let list: AnyElement = if searching {
             if results.is_empty() {
                 div()
@@ -212,7 +220,7 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .children(SettingsPath::ALL.into_iter().map(|path| {
+                .children(nav_paths.into_iter().map(|path| {
                     let route = SettingsRoute::Section(path);
                     let active = self.route == route
                         || (path == SettingsPath::General

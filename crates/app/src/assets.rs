@@ -470,7 +470,11 @@ impl AssetSource for AppAssets {
         if let Some(bytes) = crate::settings::theme_ui::icons::ThemeUiIcons.load(path)? {
             return Ok(Some(bytes));
         }
-        Assets.load(path)
+        if let Some(bytes) = Assets.load(path).ok().flatten() {
+            return Ok(Some(bytes));
+        }
+        // `lucide-react/dynamic`: project icons name any Lucide icon.
+        gpui_kit::assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {

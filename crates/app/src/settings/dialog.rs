@@ -14,7 +14,7 @@ use super::view::SettingsView;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_2XL, TEXT_SM};
 use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::{Button, ButtonSize, ButtonVariant};
+use crate::ui::{Button, ButtonSize, ButtonVariant, IconName};
 
 type DialogAction = Rc<dyn Fn(&mut SettingsView, &mut Window, &mut Context<SettingsView>)>;
 
@@ -37,6 +37,17 @@ pub enum Dialog {
     BackgroundActivity,
     /// The Add provider wizard.
     AddProvider,
+    /// `AddCodexAccountDialog` (through `AddManagedCodexAccountDialog`).
+    AddCodexAccount,
+    /// `ProjectIconPickerDialog` (state in `panels.projects.icon_picker`).
+    ProjectIconPicker,
+    /// `ProjectFaviconPickerDialog` (state in `panels.projects.favicon_picker`).
+    ProjectFaviconPicker,
+    /// `ChatGptAccountPicker` for a Codex instance, with the chosen method.
+    ChatGptAccountPicker {
+        instance_id: String,
+        selection: Option<String>,
+    },
 }
 
 /// `DialogPopup` chrome around `children` (header / panel / footer).
@@ -46,6 +57,8 @@ pub fn dialog_frame(
     children: Vec<AnyElement>,
     on_dismiss: impl Fn(&mut Window, &mut gpui_kit::App) + 'static,
 ) -> AnyElement {
+    let on_dismiss = Rc::new(on_dismiss);
+    let dismiss_close = on_dismiss.clone();
     let dark = theme.is_dark();
     let backdrop = with_alpha(theme.background, if dark { 0.64 } else { 0.60 });
     // GPUI has no backdrop blur, so the glass fill is painted opaque.
@@ -87,7 +100,17 @@ pub fn dialog_frame(
                     .text_color(theme.popover_foreground)
                     // Clicks inside the popup must not reach the dismiss layer.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .children(children),
+                    .children(children)
+                    // `DialogPopup showCloseButton`: `absolute end-2 top-2`.
+                    .child(
+                        div().absolute().right(rems(0.5)).top(rems(0.5)).child(
+                            Button::new("dialog-close")
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::Icon)
+                                .icon(IconName::X)
+                                .on_click(move |_, window, cx| dismiss_close(window, cx)),
+                        ),
+                    ),
             ),
     )
     .with_priority(10)
@@ -164,6 +187,23 @@ impl SettingsView {
         if matches!(self.dialog, Some(Dialog::AddProvider)) {
             return Some(self.render_add_provider_dialog(window, cx));
         }
+        if matches!(self.dialog, Some(Dialog::ProjectFaviconPicker)) {
+            return self.render_project_favicon_picker(window, cx);
+        }
+        if matches!(self.dialog, Some(Dialog::ProjectIconPicker)) {
+            return self.render_project_icon_picker(window, cx);
+        }
+        if matches!(self.dialog, Some(Dialog::AddCodexAccount)) {
+            return self.render_add_codex_account_dialog(window, cx);
+        }
+        if let Some(Dialog::ChatGptAccountPicker {
+            instance_id,
+            selection,
+        }) = self.dialog.as_ref()
+        {
+            let (instance_id, selection) = (instance_id.clone(), selection.clone());
+            return Some(self.render_chat_gpt_account_picker(instance_id, selection, window, cx));
+        }
         if matches!(self.dialog, Some(Dialog::BackgroundActivity)) {
             return Some(self.render_background_activity_dialog(window, cx));
         }
@@ -171,6 +211,13 @@ impl SettingsView {
             return Some(self.render_script_editor_dialog(window, cx));
         }
         let Some(Dialog::Confirm(spec)) = &self.dialog else {
+            // `ChatGptWelcomeCoordinator` shows between dialogs.
+            if self.dialog.is_none() {
+                let vm = self.vm(cx);
+                if let Some(profile) = self.next_chat_gpt_welcome(&vm) {
+                    return Some(self.render_chat_gpt_welcome_dialog(profile, window, cx));
+                }
+            }
             return None;
         };
         let on_confirm = spec.on_confirm.clone();

@@ -287,6 +287,8 @@ pub struct SelectItem {
     pub label: AnyElement,
     pub selected: bool,
     pub disabled: bool,
+    /// `MenuSeparator`: a rule instead of a row.
+    pub separator: bool,
 }
 
 impl SelectItem {
@@ -296,6 +298,18 @@ impl SelectItem {
             label: label.into_any_element(),
             selected: false,
             disabled: false,
+            separator: false,
+        }
+    }
+
+    /// `MenuSeparator`.
+    pub fn separator() -> Self {
+        Self {
+            id: SharedString::from("--separator"),
+            label: div().into_any_element(),
+            selected: false,
+            disabled: true,
+            separator: true,
         }
     }
 
@@ -347,6 +361,15 @@ pub fn popup_list(
         .children(items.into_iter().map(move |item| {
             let pick = on_pick.clone();
             let item_id = item.id.clone();
+            if item.separator {
+                return div()
+                    .id(SharedString::from(format!("{id:?}-separator")))
+                    .mx(px(-4.))
+                    .my_1()
+                    .h(px(1.))
+                    .bg(theme.border)
+                    .into_any_element();
+            }
             div()
                 .id(SharedString::from(format!("{id:?}-{}", item.id)))
                 .flex()
@@ -367,6 +390,7 @@ pub fn popup_list(
                         .on_click(move |_, window, cx| pick(item_id.clone(), window, cx))
                 })
                 .child(div().min_w_0().flex_1().child(item.label))
+                .into_any_element()
         }))
 }
 
@@ -539,6 +563,46 @@ pub fn text_field_leading(
                 .appearance(false)
                 .bordered(false)
                 .focus_bordered(false),
+        )
+}
+
+/// A disabled `Input` showing `value` (or `placeholder` when empty): `Input`'s
+/// frame at `opacity-64`, with the placeholder in `muted-foreground`.
+pub fn static_text_field(value: &str, placeholder: &str, width: Option<Pixels>, cx: &App) -> Div {
+    let theme = cx.app_theme();
+    let shown_text_color = if value.is_empty() {
+        with_alpha(theme.muted_foreground, 0.72).into()
+    } else {
+        theme.foreground
+    };
+    div()
+        .flex()
+        .items_center()
+        .h(px(32.))
+        .when_some(width, |this, width| this.w(width))
+        .when(width.is_none(), |this| this.w_full())
+        .min_w_0()
+        .rounded(RADIUS_LG)
+        .border_1()
+        .border_color(theme.input)
+        .bg(if theme.is_dark() {
+            with_alpha(theme.input, 0.32).into()
+        } else {
+            theme.background
+        })
+        .opacity(0.64)
+        .text_size(TEXT_SM.size)
+        .px(px(9.))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(shown_text_color)
+                .child(if value.is_empty() {
+                    placeholder.to_owned()
+                } else {
+                    value.to_owned()
+                }),
         )
 }
 

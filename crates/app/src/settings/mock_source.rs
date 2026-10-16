@@ -7,8 +7,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui_kit::{App, AppContext as _, Entity};
+use indexmap::IndexMap;
 use serde_json::{Value, json};
+use turin_contracts::TrimmedNonEmptyString;
 use turin_contracts::keybindings::KeybindingRule;
+use turin_contracts::provider_setup::{
+    ProviderAuthPhase, ProviderAuthRespondInput, ProviderAuthState, ProviderInstallState,
+};
 use turin_contracts::settings::{
     ClientSettings, ServerSettings, ServerSettingsPatch, default_client_settings,
     default_server_settings,
@@ -22,12 +27,46 @@ use turin_shared::server_settings::apply_server_settings_patch;
 
 use super::view_model::{
     ArchivedThread, CleanupEntry, CleanupReport, EnvironmentInfo, KeybindingsViewModel,
-    LicenseEntry, RemoveKeybinding, SettingsProject, SettingsSource, SettingsStore,
-    SettingsViewModel, UpsertKeybinding,
+    LicenseEntry, ProviderInstanceMutation, RemoveKeybinding, SettingsSource, SettingsStore,
+    SettingsViewModel, SetupResult, UpsertKeybinding,
 };
 
 fn provider(value: Value) -> turin_provider_core::server_provider::ServerProvider {
     serde_json::from_value(value).expect("mock provider decodes")
+}
+
+fn mock_provider_auth() -> IndexMap<String, ProviderAuthState> {
+    let state: ProviderAuthState = serde_json::from_value(json!({
+        "instanceId": "cursor",
+        "phase": "idle",
+        "methods": [{
+            "id": "browser",
+            "name": "Browser",
+            "type": "agent"
+        }]
+    }))
+    .expect("mock provider auth");
+    let codex_work: ProviderAuthState = serde_json::from_value(json!({
+        "instanceId": "codex_work",
+        "phase": "idle",
+        "methods": [
+            { "id": "chatgpt", "name": "ChatGPT", "type": "agent" },
+            { "id": "chatgpt-profile:work", "name": "work@example.com", "type": "agent", "accountEmail": "work@example.com" }
+        ]
+    }))
+    .expect("mock codex auth");
+    IndexMap::from([("cursor".into(), state), ("codex_work".into(), codex_work)])
+}
+
+fn mock_provider_install() -> IndexMap<String, ProviderInstallState> {
+    let state: ProviderInstallState = serde_json::from_value(json!({
+        "driver": "codex", "operationId": null, "phase": "idle", "downloadedBytes": 0,
+        "totalBytes": 48_000_000, "version": "0.136.2", "installedVersion": null,
+        "executablePath": null, "source": "managed", "canRemove": false,
+        "message": "T3 Code downloads and manages Codex for you."
+    }))
+    .expect("mock codex install");
+    IndexMap::from([("codex_work".into(), state)])
 }
 
 fn mock_providers() -> Vec<turin_provider_core::server_provider::ServerProvider> {
@@ -55,6 +94,15 @@ fn mock_providers() -> Vec<turin_provider_core::server_provider::ServerProvider>
             "slashCommands": [], "skills": [],
             "versionAdvisory": { "status": "behind_latest", "currentVersion": "0.134.0", "latestVersion": "0.136.2", "updateCommand": "npm install -g @openai/codex@latest", "canUpdate": true, "checkedAt": "2026-10-15T10:00:00.000Z", "message": null },
             "setup": { "canAuthenticate": true, "canInstall": true }
+        })),
+        provider(json!({
+            "instanceId": "codex_work", "driver": "codex", "enabled": true, "installed": false,
+            "displayName": "ChatGPT - Work", "version": null, "status": "warning",
+            "auth": { "status": "unauthenticated" },
+            "checkedAt": "2026-10-15T10:00:00.000Z",
+            "models": [], "slashCommands": [], "skills": [],
+            "setup": { "canAuthenticate": true, "canInstall": true },
+            "runtimePaths": { "homePath": "/Users/dev/.codex", "shadowHomePath": "/Users/dev/.t3/codex-shadow/codex_work" }
         })),
         provider(json!({
             "instanceId": "claudeAgent", "driver": "claudeAgent", "enabled": true, "installed": true,
@@ -89,39 +137,40 @@ fn mock_providers() -> Vec<turin_provider_core::server_provider::ServerProvider>
     ]
 }
 
-fn mock_projects() -> Vec<SettingsProject> {
-    vec![
-        SettingsProject {
-            id: "project-turin".into(),
-            key: "turin".into(),
-            display_name: "turin".into(),
-            workspace_root: "/Users/dev/code/turin".into(),
-            favicon_color: 0x155dfc,
-            monogram: "T".into(),
-            remote_url: Some("github.com/example/turin".into()),
-            checkout_count: 3,
-        },
-        SettingsProject {
-            id: "project-t3code".into(),
-            key: "t3code".into(),
-            display_name: "t3code".into(),
-            workspace_root: "/Users/dev/code/t3code".into(),
-            favicon_color: 0x009966,
-            monogram: "T3".into(),
-            remote_url: Some("github.com/pingdotgg/t3code".into()),
-            checkout_count: 1,
-        },
-        SettingsProject {
-            id: "project-notes".into(),
-            key: "notes".into(),
-            display_name: "notes".into(),
-            workspace_root: "/Users/dev/notes".into(),
-            favicon_color: 0xe17100,
-            monogram: "N".into(),
-            remote_url: None,
-            checkout_count: 1,
-        },
-    ]
+/// The mock projects as the sidebar's `EnvironmentProject`s: id, name, root.
+const MOCK_PROJECTS: [(&str, &str, &str); 3] = [
+    ("project-turin", "turin", "/Users/dev/code/turin"),
+    ("project-t3code", "t3code", "/Users/dev/code/t3code"),
+    ("project-notes", "notes", "/Users/dev/notes"),
+];
+
+fn mock_environment_projects() -> Vec<crate::state::models::EnvironmentProject> {
+    use crate::state::contracts::{EnvironmentId, ProjectId};
+    MOCK_PROJECTS
+        .into_iter()
+        .map(
+            |(id, title, root)| crate::state::models::EnvironmentProject {
+                environment_id: EnvironmentId::new("local").expect("environment id"),
+                id: ProjectId::new(id).expect("project id"),
+                title: title.to_owned(),
+                workspace_root: root.to_owned(),
+                favicon_path: None,
+                project_icon: None,
+                created_at: Some("2026-10-01T09:00:00.000Z".into()),
+                updated_at: Some("2026-10-14T18:22:00.000Z".into()),
+                is_scratch: false,
+                source: None,
+            },
+        )
+        .collect()
+}
+
+fn mock_project_thread_counts() -> IndexMap<String, usize> {
+    IndexMap::from([
+        ("project-turin".to_owned(), 14),
+        ("project-t3code".to_owned(), 3),
+        ("project-notes".to_owned(), 0),
+    ])
 }
 
 fn mock_archived_threads() -> Vec<ArchivedThread> {
@@ -176,6 +225,13 @@ fn mock_view_model() -> SettingsViewModel {
                 { "id": "setup", "name": "Install", "command": "bun install", "icon": "configure", "runOnWorktreeCreate": true },
             ]))
             .expect("mock project scripts");
+            server.provider_instances = serde_json::from_value(json!({
+                "codex_work": {
+                    "driver": "codex", "displayName": "ChatGPT - Work", "enabled": true,
+                    "config": { "enabled": true, "setupMode": "managed" }
+                }
+            }))
+            .expect("mock provider instances");
             server
         },
         platform: "MacIntel".into(),
@@ -192,9 +248,17 @@ fn mock_view_model() -> SettingsViewModel {
             config_path: "/Users/dev/.turin/keybindings.json".into(),
         },
         providers: mock_providers(),
+        providers_refreshing: false,
+        provider_auth: mock_provider_auth(),
+        provider_install: mock_provider_install(),
+        chat_gpt_welcome_acknowledged: Vec::new(),
+        pending_provider_auth_delivery: None,
         source_control: mock_source_control(),
-        projects: mock_projects(),
+        project_thread_counts: mock_project_thread_counts(),
+        environment_projects: mock_environment_projects(),
         archived_threads: mock_archived_threads(),
+        archived_threads_loading: false,
+        archived_threads_error: None,
         storage_cleanup: None,
         licenses: mock_licenses(),
     }
@@ -210,23 +274,32 @@ struct MockState {
     vm: SettingsViewModel,
     custom_keybindings: Vec<KeybindingRule>,
     secrets: SecretStore,
+    /// Bumped by every install request so a cancelled run's timers stop.
+    install_generation: u64,
 }
 
 pub struct MockSettingsSource {
-    state: RefCell<MockState>,
-    store: RefCell<Option<Entity<SettingsStore>>>,
+    state: Rc<RefCell<MockState>>,
+    store: Rc<RefCell<Option<Entity<SettingsStore>>>>,
 }
 
 impl MockSettingsSource {
+    /// The fixture view model, for logic tests.
+    #[cfg(test)]
+    pub fn view_model_for_tests() -> SettingsViewModel {
+        mock_view_model()
+    }
+
     /// Builds the source and its store.
     pub fn store(cx: &mut App) -> Entity<SettingsStore> {
         let source = Rc::new(Self {
-            state: RefCell::new(MockState {
+            state: Rc::new(RefCell::new(MockState {
                 vm: mock_view_model(),
                 custom_keybindings: Vec::new(),
                 secrets: SecretStore::new(),
-            }),
-            store: RefCell::new(None),
+                install_generation: 0,
+            })),
+            store: Rc::new(RefCell::new(None)),
         });
         let vm = source.state.borrow().vm.clone();
         let store = cx.new(|_| SettingsStore::new(vm, source.clone()));
@@ -235,11 +308,7 @@ impl MockSettingsSource {
     }
 
     fn publish(&self, cx: &mut App) {
-        let vm = self.state.borrow().vm.clone();
-        apply_appearance(&vm, cx);
-        if let Some(store) = self.store.borrow().clone() {
-            store.update(cx, |store, cx| store.publish(vm, cx));
-        }
+        publish_parts(&self.state, &self.store, cx);
     }
 
     fn rebuild_keybindings(&self) {
@@ -250,6 +319,34 @@ impl MockSettingsSource {
             .filter_map(compile_resolved_keybinding_rule)
             .collect();
         state.vm.keybindings.rules = merge_with_default_keybindings(&custom);
+    }
+}
+
+/// Merges `patch` into one instance's install state.
+fn set_install(vm: &mut SettingsViewModel, instance_id: &str, patch: Value) {
+    let Some(current) = vm.provider_install.get(instance_id) else {
+        return;
+    };
+    let mut value = serde_json::to_value(current).expect("install state encodes");
+    if let (Some(object), Some(patch)) = (value.as_object_mut(), patch.as_object()) {
+        for (key, entry) in patch {
+            object.insert(key.clone(), entry.clone());
+        }
+    }
+    if let Ok(next) = serde_json::from_value(value) {
+        vm.provider_install.insert(instance_id.to_owned(), next);
+    }
+}
+
+fn publish_parts(
+    state: &RefCell<MockState>,
+    store: &RefCell<Option<Entity<SettingsStore>>>,
+    cx: &mut App,
+) {
+    let vm = state.borrow().vm.clone();
+    apply_appearance(&vm, cx);
+    if let Some(store) = store.borrow().clone() {
+        store.update(cx, |store, cx| store.publish(vm, cx));
     }
 }
 
@@ -374,6 +471,28 @@ impl SettingsSource for MockSettingsSource {
         self.publish(cx);
     }
 
+    fn mutate_provider_instance(
+        &self,
+        mutation: ProviderInstanceMutation,
+        patch: Option<Value>,
+        cx: &mut App,
+    ) {
+        let patch = {
+            let state = self.state.borrow();
+            let mut map = serde_json::to_value(&state.vm.server.provider_instances)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            apply_provider_instance_mutation(&mut map, mutation);
+            let mut next = patch
+                .and_then(|patch| patch.as_object().cloned())
+                .unwrap_or_default();
+            next.insert("providerInstances".to_owned(), Value::Object(map));
+            Value::Object(next)
+        };
+        self.update_server(patch, cx);
+    }
+
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App) {
         {
             let mut state = self.state.borrow_mut();
@@ -446,12 +565,284 @@ impl SettingsSource for MockSettingsSource {
         tracing::info!(instance_id, "mock settings: update provider");
     }
 
-    fn start_provider_auth(&self, instance_id: &str, _cx: &mut App) {
-        tracing::info!(instance_id, "mock settings: start provider auth");
+    fn start_provider_auth(
+        &self,
+        instance_id: &str,
+        method_id: Option<&str>,
+        cx: &mut App,
+    ) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            let methods = state
+                .vm
+                .provider_auth
+                .get(instance_id)
+                .and_then(|s| s.methods.clone());
+            tracing::info!(
+                instance_id,
+                ?method_id,
+                "mock settings: start provider auth"
+            );
+            state.vm.provider_auth.insert(
+                instance_id.to_owned(),
+                serde_json::from_value(json!({
+                    "instanceId": instance_id,
+                    "phase": "waiting",
+                    "flowId": "mock-flow",
+                    "authorizationUrl": "https://example.com/oauth",
+                    "message": "Complete sign-in in your browser.",
+                    "methods": methods,
+                    "interaction": {
+                        "type": "browser",
+                        "id": "mock-interaction",
+                        "url": "https://example.com/oauth",
+                        "requiresConsent": false,
+                        "acceptsCallback": true
+                    }
+                }))
+                .expect("mock waiting auth"),
+            );
+        }
+        self.publish(cx);
+        Ok(())
     }
 
-    fn logout_provider(&self, instance_id: &str, _cx: &mut App) {
+    fn cancel_provider_auth(&self, instance_id: &str, _flow_id: &str, cx: &mut App) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(entry) = state.vm.provider_auth.get_mut(instance_id) {
+                entry.phase = ProviderAuthPhase::Cancelled;
+                entry.flow_id = None;
+                entry.interaction = None;
+            }
+        }
+        self.publish(cx);
+        Ok(())
+    }
+
+    fn respond_provider_auth(&self, input: ProviderAuthRespondInput, _cx: &mut App) -> SetupResult {
+        tracing::info!(instance_id = %input.instance_id.as_str(), "mock settings: respond provider auth");
+        Ok(())
+    }
+
+    fn complete_provider_auth(
+        &self,
+        instance_id: &str,
+        _flow_id: &str,
+        _callback_url: &str,
+        cx: &mut App,
+    ) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            let methods = state
+                .vm
+                .provider_auth
+                .get(instance_id)
+                .and_then(|s| s.methods.clone());
+            state.vm.provider_auth.insert(
+                instance_id.to_owned(),
+                serde_json::from_value(json!({
+                    "instanceId": instance_id,
+                    "phase": "succeeded",
+                    "methods": methods,
+                }))
+                .expect("mock succeeded auth"),
+            );
+            if let Some(provider) = state
+                .vm
+                .providers
+                .iter_mut()
+                .find(|p| p.instance_id.as_str() == instance_id)
+            {
+                provider.auth.status =
+                    turin_provider_core::server_provider::ServerProviderAuthStatus::Authenticated;
+                provider.auth.label =
+                    Some(TrimmedNonEmptyString::new("Signed in (mock)").expect("label"));
+                provider.auth.email =
+                    Some(TrimmedNonEmptyString::new("work@example.com").expect("email"));
+                if provider.driver.as_str() == "codex" {
+                    provider.auth.subscription_sharing = Some(true);
+                }
+            }
+        }
+        self.publish(cx);
+        Ok(())
+    }
+
+    fn open_external_url(&self, url: &str, _cx: &mut App) {
+        tracing::info!(url, "mock settings: open external url");
+    }
+
+    fn logout_provider(&self, instance_id: &str, cx: &mut App) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(provider) = state
+                .vm
+                .providers
+                .iter_mut()
+                .find(|p| p.instance_id.as_str() == instance_id)
+            {
+                provider.auth.status =
+                    turin_provider_core::server_provider::ServerProviderAuthStatus::Unauthenticated;
+                provider.auth.email = None;
+                provider.auth.subscription_sharing = None;
+            }
+            state.vm.provider_auth.shift_remove(instance_id);
+        }
         tracing::info!(instance_id, "mock settings: provider logout");
+        self.publish(cx);
+        Ok(())
+    }
+
+    fn start_provider_install(&self, instance_id: &str, cx: &mut App) -> SetupResult {
+        const TOTAL: u64 = 48_000_000;
+        let generation = {
+            let mut state = self.state.borrow_mut();
+            state.install_generation += 1;
+            let generation = state.install_generation;
+            set_install(
+                &mut state.vm,
+                instance_id,
+                json!({
+                    "operationId": "mock-install", "phase": "downloading",
+                    "downloadedBytes": 0, "totalBytes": TOTAL, "message": null
+                }),
+            );
+            generation
+        };
+        self.publish(cx);
+        let state = self.state.clone();
+        let store = self.store.clone();
+        let instance_id = instance_id.to_owned();
+        cx.spawn(async move |cx| {
+            let step = |ms: u64| {
+                let cx = cx.clone();
+                async move {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(ms))
+                        .await;
+                }
+            };
+            let alive =
+                |state: &RefCell<MockState>| state.borrow().install_generation == generation;
+            let mut downloaded = 0;
+            while downloaded < TOTAL {
+                step(250).await;
+                downloaded = (downloaded + 12_000_000).min(TOTAL);
+                if !alive(&state) {
+                    return;
+                }
+                set_install(
+                    &mut state.borrow_mut().vm,
+                    &instance_id,
+                    json!({ "downloadedBytes": downloaded }),
+                );
+                cx.update(|cx| publish_parts(&state, &store, cx));
+            }
+            for phase in ["extracting", "verifying"] {
+                step(400).await;
+                if !alive(&state) {
+                    return;
+                }
+                set_install(
+                    &mut state.borrow_mut().vm,
+                    &instance_id,
+                    json!({ "phase": phase }),
+                );
+                cx.update(|cx| publish_parts(&state, &store, cx));
+            }
+            step(400).await;
+            if !alive(&state) {
+                return;
+            }
+            {
+                let mut state = state.borrow_mut();
+                set_install(
+                    &mut state.vm,
+                    &instance_id,
+                    json!({
+                        "phase": "succeeded", "operationId": null,
+                        "installedVersion": "0.136.2",
+                        "executablePath": "/Users/dev/.t3/runtimes/codex/0.136.2/codex",
+                        "canRemove": true, "message": null
+                    }),
+                );
+                if let Some(provider) = state
+                    .vm
+                    .providers
+                    .iter_mut()
+                    .find(|p| p.instance_id.as_str() == instance_id)
+                {
+                    provider.installed = true;
+                }
+            }
+            cx.update(|cx| publish_parts(&state, &store, cx));
+        })
+        .detach();
+        Ok(())
+    }
+
+    fn cancel_provider_install(
+        &self,
+        instance_id: &str,
+        _operation_id: &str,
+        cx: &mut App,
+    ) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            state.install_generation += 1;
+            set_install(
+                &mut state.vm,
+                instance_id,
+                json!({ "phase": "cancelled", "operationId": null, "message": "Installation cancelled." }),
+            );
+        }
+        self.publish(cx);
+        Ok(())
+    }
+
+    fn remove_provider_installation(&self, instance_id: &str, cx: &mut App) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            set_install(
+                &mut state.vm,
+                instance_id,
+                json!({
+                    "phase": "idle", "installedVersion": null, "executablePath": null,
+                    "canRemove": false, "downloadedBytes": 0
+                }),
+            );
+            if let Some(provider) = state
+                .vm
+                .providers
+                .iter_mut()
+                .find(|p| p.instance_id.as_str() == instance_id)
+            {
+                provider.installed = false;
+            }
+        }
+        self.publish(cx);
+        Ok(())
+    }
+
+    fn acknowledge_chat_gpt_welcome(&self, key: &str, cx: &mut App) {
+        {
+            let mut state = self.state.borrow_mut();
+            if !state
+                .vm
+                .chat_gpt_welcome_acknowledged
+                .iter()
+                .any(|k| k == key)
+            {
+                state.vm.chat_gpt_welcome_acknowledged.push(key.to_owned());
+            }
+        }
+        self.publish(cx);
+    }
+
+    fn clear_provider_auth_delivery(&self, cx: &mut App) {
+        self.state.borrow_mut().vm.pending_provider_auth_delivery = None;
+        self.publish(cx);
     }
 
     fn set_theme(&self, theme: String, cx: &mut App) {
@@ -492,11 +883,11 @@ impl SettingsSource for MockSettingsSource {
             .state
             .borrow_mut()
             .vm
-            .projects
+            .environment_projects
             .iter_mut()
-            .find(|p| p.id == project_id)
+            .find(|p| p.id.as_str() == project_id)
         {
-            project.display_name = title.to_owned();
+            project.title = title.to_owned();
         }
         self.publish(cx);
     }
@@ -505,9 +896,56 @@ impl SettingsSource for MockSettingsSource {
         self.state
             .borrow_mut()
             .vm
-            .projects
-            .retain(|p| p.id != project_id);
+            .environment_projects
+            .retain(|p| p.id.as_str() != project_id);
         self.publish(cx);
+    }
+
+    fn set_project_icon(
+        &self,
+        project_ids: &[String],
+        favicon_path: Option<String>,
+        project_icon: Option<crate::state::models::ProjectIcon>,
+        cx: &mut App,
+    ) -> SetupResult {
+        {
+            let mut state = self.state.borrow_mut();
+            for project in &mut state.vm.environment_projects {
+                if project_ids.iter().any(|id| id == project.id.as_str()) {
+                    project.favicon_path = favicon_path.clone();
+                    project.project_icon = project_icon.clone();
+                }
+            }
+        }
+        self.publish(cx);
+        Ok(())
+    }
+
+    fn search_project_files(
+        &self,
+        _cwd: &str,
+        query: &str,
+        _cx: &mut App,
+    ) -> Result<Vec<super::project_file_picker_logic::ProjectEntry>, String> {
+        use super::project_file_picker_logic::{ProjectEntry, ProjectEntryKind};
+        let query = query.trim().to_lowercase();
+        Ok([
+            "assets/icon.png",
+            "assets/logo.svg",
+            "docs/screenshots/overview.png",
+            "public/favicon.ico",
+        ]
+        .into_iter()
+        .filter(|path| query.is_empty() || path.contains(query.as_str()))
+        .map(|path| ProjectEntry {
+            kind: ProjectEntryKind::File,
+            path: path.to_owned(),
+        })
+        .collect())
+    }
+
+    fn pick_project_favicon(&self, _cwd: &str, _cx: &mut App) -> Result<Option<String>, String> {
+        Ok(None)
     }
 
     fn run_storage_cleanup(&self, cx: &mut App) {
@@ -644,12 +1082,127 @@ fn mock_licenses() -> Vec<LicenseEntry> {
     ]
 }
 
+/// Applies `mutation` to the stored `providerInstances` map.
+fn apply_provider_instance_mutation(
+    map: &mut serde_json::Map<String, Value>,
+    mutation: ProviderInstanceMutation,
+) {
+    match mutation {
+        ProviderInstanceMutation::Upsert {
+            instance_id,
+            instance,
+        } => {
+            map.insert(instance_id, instance);
+        }
+        ProviderInstanceMutation::Remove { instance_id } => {
+            map.remove(&instance_id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use turin_contracts::usage_limit_source_id::UsageLimitSourceId;
     use turin_runtime::settings_secrets::{SECRET_REDACTED, source_control_host_secret_name};
+
+    /// Port of "deletes and resets provider configuration without erasing
+    /// shared preferences" and "updates one provider instance without sending
+    /// a stale whole map"
+    /// (upstream/apps/web/src/components/settings/ProviderSettingsPanel.environment.test.tsx).
+    fn instance_map(server: &ServerSettings) -> serde_json::Map<String, Value> {
+        serde_json::to_value(&server.provider_instances)
+            .unwrap()
+            .as_object()
+            .cloned()
+            .unwrap()
+    }
+
+    fn server_with_two_codex_instances() -> ServerSettings {
+        apply_server_patch(
+            &default_server_settings(),
+            json!({
+                "providerInstances": {
+                    "codex": { "driver": "codex", "enabled": false },
+                    "codex_work": { "driver": "codex", "enabled": true, "displayName": "Work" }
+                },
+                "providerModelPreferences": {
+                    "codex_work": { "hiddenModels": ["hidden"], "modelOrder": ["model"] }
+                },
+                "favorites": [{ "provider": "codex_work", "model": "favorite" }]
+            }),
+        )
+    }
+
+    #[test]
+    fn removing_an_instance_leaves_shared_preferences_alone() {
+        let server = server_with_two_codex_instances();
+        for removed in ["codex_work", "codex"] {
+            let mut map = instance_map(&server);
+            apply_provider_instance_mutation(
+                &mut map,
+                ProviderInstanceMutation::Remove {
+                    instance_id: removed.to_owned(),
+                },
+            );
+            let next = apply_server_patch(&server, json!({ "providerInstances": map }));
+            assert!(
+                !instance_map(&next).contains_key(removed),
+                "{removed} removed"
+            );
+            assert_eq!(next.favorites, server.favorites);
+            assert_eq!(
+                next.provider_model_preferences,
+                server.provider_model_preferences
+            );
+        }
+    }
+
+    #[test]
+    fn upserting_one_instance_keeps_the_others() {
+        let server = server_with_two_codex_instances();
+        let mut map = instance_map(&server);
+        apply_provider_instance_mutation(
+            &mut map,
+            ProviderInstanceMutation::Upsert {
+                instance_id: "codex_work".to_owned(),
+                instance: json!({ "driver": "codex", "enabled": false, "displayName": "Work" }),
+            },
+        );
+        let next = apply_server_patch(&server, json!({ "providerInstances": map }));
+        let next_map = instance_map(&next);
+        assert_eq!(next_map["codex_work"]["enabled"], json!(false));
+        assert_eq!(next_map["codex_work"]["displayName"], json!("Work"));
+        assert_eq!(next_map["codex"], instance_map(&server)["codex"]);
+    }
+
+    #[test]
+    fn failures_reach_the_store_once() {
+        let source = Rc::new(MockSettingsSource {
+            state: Rc::new(RefCell::new(MockState {
+                vm: mock_view_model(),
+                custom_keybindings: Vec::new(),
+                secrets: SecretStore::new(),
+                install_generation: 0,
+            })),
+            store: Rc::new(RefCell::new(None)),
+        });
+        let store = SettingsStore::new(mock_view_model(), source);
+        assert!(store.take_failures().is_empty());
+        store.push_failure_for_tests(
+            "Could not update provider instance",
+            "The settings update failed.",
+        );
+        assert_eq!(
+            store.take_failures(),
+            vec![crate::settings::view_model::SettingsFailure {
+                title: "Could not update provider instance".to_owned(),
+                description: "The settings update failed.".to_owned(),
+            }]
+        );
+        assert!(store.take_failures().is_empty());
+    }
 
     /// One save: the patch applied to `server`, then its secrets persisted.
     fn save(store: &mut SecretStore, server: &ServerSettings, patch: Value) -> ServerSettings {

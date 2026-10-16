@@ -10,7 +10,7 @@ mod general;
 mod keybindings;
 mod licenses;
 mod projects;
-mod providers;
+pub(crate) mod providers;
 mod source_control;
 mod storage;
 
@@ -20,6 +20,7 @@ use gpui_kit::{
 
 use super::search::SettingsPath;
 use super::view::{SettingsRoute, SettingsView, Which};
+use crate::theme::ActiveAppTheme;
 
 /// Per-page UI state that is not part of the settings.
 #[derive(Default)]
@@ -36,6 +37,12 @@ pub struct PanelState {
     /// renders left to apply it (the first layouts clamp it to zero).
     pub demo_scroll: Option<(f32, u8)>,
     pub page_scroll: gpui_kit::ScrollHandle,
+    /// [`super::expandable_text`] toggle state (element id → expanded).
+    pub expanded_text: std::collections::HashSet<String>,
+    /// [`super::folded_settings_section`] ids that are open, and the ones a
+    /// search target already opened.
+    pub folded_open: std::collections::HashSet<String>,
+    pub folded_opened_for_target: std::collections::HashSet<String>,
 }
 
 /// `max-w-4xl`.
@@ -54,7 +61,48 @@ impl SettingsView {
             self.panels.demo_scroll = (frames > 1).then_some((offset, frames - 1));
             cx.notify();
         }
-        let sections: Vec<AnyElement> = match self.route {
+        let context = self.scope_context(cx);
+        let boundary = super::scope::scope_boundary(
+            self.route,
+            &context.scope.kind,
+            &context.scope.label,
+            context.targets.len(),
+        );
+        let mut sections: Vec<AnyElement> = match boundary {
+            super::scope::ScopeBoundary::Unavailable(message)
+            | super::scope::ScopeBoundary::Reconnect(message) => {
+                let theme = cx.app_theme().clone();
+                vec![
+                    div()
+                        .text_size(crate::theme::tokens::TEXT_SM.size)
+                        .text_color(theme.muted_foreground)
+                        .child(message)
+                        .into_any_element(),
+                ]
+            }
+            super::scope::ScopeBoundary::Content => self.render_route_sections(window, cx),
+        };
+        // `SettingsPageContainer` puts the scope sentence above every page.
+        if let Some(sentence) = self.settings_scope_sentence(cx) {
+            sections.insert(0, sentence);
+        }
+        // `ProjectSettingsPanel`'s container is `gap-6`.
+        let gap = if self.route == SettingsRoute::Section(SettingsPath::Projects)
+            && context.is_project_scope()
+        {
+            px(24.)
+        } else {
+            px(32.)
+        };
+        self.page_container(sections, gap, cx)
+    }
+
+    fn render_route_sections(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        match self.route {
             SettingsRoute::Section(SettingsPath::General) => self.render_general(window, cx),
             SettingsRoute::Section(SettingsPath::Appearance) => self.render_appearance(window, cx),
             SettingsRoute::Section(SettingsPath::Keybindings) => {
@@ -68,8 +116,7 @@ impl SettingsView {
             SettingsRoute::Section(SettingsPath::SourceControl) => {
                 self.render_source_control(window, cx)
             }
-        };
-        self.page_container(sections, cx)
+        }
     }
 
     /// `SettingsPageContainer` + `WorkspacePageContainer`: a scrolling column,
@@ -77,6 +124,7 @@ impl SettingsView {
     pub(super) fn page_container(
         &mut self,
         children: Vec<AnyElement>,
+        gap: gpui_kit::Pixels,
         _cx: &mut Context<Self>,
     ) -> AnyElement {
         use gpui_kit::component::scroll::ScrollableElement as _;
@@ -98,7 +146,7 @@ impl SettingsView {
                             .mx_auto()
                             .flex()
                             .flex_col()
-                            .gap_8()
+                            .gap(gap)
                             .w_full()
                             .max_w(px(READABLE_WIDTH))
                             .px_6()

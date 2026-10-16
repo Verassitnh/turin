@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use gpui_kit::{App, AppContext as _, Entity, Task};
 use turin_contracts::agent_sessions::AgentSessionScanResult;
@@ -48,7 +49,7 @@ impl LiveOnboarding {
         cx: &mut App,
     ) -> Rc<LiveOnboardingBackend> {
         let providers = Rc::new(RefCell::new(None::<Vec<OnboardingProvider>>));
-        let server_settings = Rc::new(RefCell::new(ServerSettings::default()));
+        let server_settings = Arc::new(Mutex::new(ServerSettings::default()));
         let evidence = Rc::new(RefCell::new(first_run_evidence(
             client.read(cx).state(),
             &get_client_settings(),
@@ -110,7 +111,7 @@ pub struct LiveOnboardingBackend {
     bus: CommandBus,
     data_dir: PathBuf,
     providers: Rc<RefCell<Option<Vec<OnboardingProvider>>>>,
-    server_settings: Rc<RefCell<ServerSettings>>,
+    server_settings: Arc<Mutex<ServerSettings>>,
     evidence: Rc<RefCell<FirstRunEvidence>>,
     known_projects: Rc<RefCell<Vec<OnboardingKnownProject>>>,
     refresh_in_flight: Arc<AtomicBool>,
@@ -118,19 +119,21 @@ pub struct LiveOnboardingBackend {
 
 impl LiveOnboardingBackend {
     fn warm_settings(&self) {
-        let server_settings = self.server_settings.clone();
+        let server_settings = Arc::clone(&self.server_settings);
         self.bus.spawn(
             move |commands| async move {
-                Ok(commands
+                commands
                     .runtime()
-                    .providers
-                    .settings
-                    .settings()
-                    .await)
+                    .server_settings
+                    .get_settings()
+                    .await
+                    .map_err(|error| CommandError::new(error.to_string()))
             },
             move |result| {
                 if let Ok(settings) = result {
-                    *server_settings.borrow_mut() = settings;
+                    if let Ok(mut guard) = server_settings.lock() {
+                        *guard = settings;
+                    }
                 }
             },
         );
@@ -191,18 +194,22 @@ impl OnboardingBackend for LiveOnboardingBackend {
             return Task::ready(());
         }
         let bus = self.bus.clone();
-        let server_settings = self.server_settings.clone();
+        let server_settings = Arc::clone(&self.server_settings);
         let refresh_in_flight = Arc::clone(&self.refresh_in_flight);
-        cx.spawn(async move |cx| {
-            let settings = bus
-                .task(cx, |commands| async move {
-                    let runtime = commands.runtime();
-                    runtime.providers.registry.refresh(None).await;
-                    runtime.providers.settings.settings().await
-                })
-                .await;
-            if let Ok(settings) = settings {
-                *server_settings.borrow_mut() = settings;
+        let task = bus.task(cx, |commands| async move {
+            let runtime = commands.runtime();
+            runtime.providers.registry.refresh(None).await;
+            runtime
+                .server_settings
+                .get_settings()
+                .await
+                .map_err(|error| CommandError::new(error.to_string()))
+        });
+        cx.spawn(async move |_| {
+            if let Ok(settings) = task.await {
+                if let Ok(mut guard) = server_settings.lock() {
+                    *guard = settings;
+                }
             }
             refresh_in_flight.store(false, Ordering::SeqCst);
         })
@@ -229,20 +236,22 @@ impl OnboardingBackend for LiveOnboardingBackend {
     }
 
     fn instance_config(&self, instance_id: &str) -> Option<serde_json::Value> {
-        instance_config_from_map(&self.server_settings.borrow().provider_instances, instance_id)
+        self.server_settings
+            .lock()
+            .ok()
+            .and_then(|settings| {
+                instance_config_from_map(&settings.provider_instances, instance_id)
+            })
     }
 
     fn scan_projects(&self, cx: &mut App) -> Task<Result<AgentSessionScanResult, String>> {
         let bus = self.bus.clone();
         let data_dir = self.data_dir.clone();
-        cx.spawn(async move |cx| {
-            bus.task(cx, move |commands| {
-                let live = AgentSessionLive::new(commands.runtime(), &data_dir);
-                async move { live.scan().await.map_err(CommandError::new) }
-            })
-            .await
-            .map_err(|error| error.message)
-        })
+        let task = bus.task(cx, move |commands| async move {
+            let live = AgentSessionLive::new(commands.runtime(), &data_dir);
+            live.scan().await.map_err(CommandError::new)
+        });
+        cx.spawn(async move |_| task.await.map_err(|error| error.message))
     }
 
     fn known_projects(&self) -> Vec<OnboardingKnownProject> {
@@ -258,16 +267,13 @@ impl OnboardingBackend for LiveOnboardingBackend {
         let project_id = input.project_id;
         let title = input.title;
         let root = input.workspace_root;
-        cx.spawn(async move |cx| {
-            bus.task(cx, move |commands| async move {
-                commands
-                    .create_project_with_id(project_id, &title, &root)
-                    .await?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| error.message)
-        })
+        let task = bus.task(cx, move |commands| async move {
+            commands
+                .create_project_with_id(project_id, &title, &root)
+                .await?;
+            Ok(())
+        });
+        cx.spawn(async move |_| task.await.map_err(|error| error.message))
     }
 
     fn import_agent_sessions(
@@ -278,19 +284,14 @@ impl OnboardingBackend for LiveOnboardingBackend {
     ) -> Task<Result<AgentSessionImportCounts, String>> {
         let bus = self.bus.clone();
         let data_dir = self.data_dir.clone();
-        cx.spawn(async move |cx| {
-            bus.task(cx, move |commands| {
-                let live = AgentSessionLive::new(commands.runtime(), &data_dir);
-                async move {
-                    live.import(project_id, expected_workspace_root)
-                        .await
-                        .map(|(imported, skipped)| AgentSessionImportCounts { imported, skipped })
-                        .map_err(CommandError::new)
-                }
-            })
-            .await
-            .map_err(|error| error.message)
-        })
+        let task = bus.task(cx, move |commands| async move {
+            let live = AgentSessionLive::new(commands.runtime(), &data_dir);
+            live.import(project_id, expected_workspace_root)
+                .await
+                .map(|(imported, skipped)| AgentSessionImportCounts { imported, skipped })
+                .map_err(CommandError::new)
+        });
+        cx.spawn(async move |_| task.await.map_err(|error| error.message))
     }
 
     fn t3_database(&self) -> Option<T3DatabaseCandidate> {

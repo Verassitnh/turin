@@ -12,6 +12,7 @@ pub mod draft_input;
 pub mod empty;
 pub mod group;
 pub mod icon;
+pub mod input_group;
 pub mod kbd;
 pub mod label;
 pub mod menu;

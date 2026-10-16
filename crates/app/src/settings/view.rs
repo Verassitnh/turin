@@ -107,6 +107,10 @@ enum InputKind {
     Secret,
 }
 
+fn input_kind_is_masked(kind: InputKind) -> bool {
+    kind == InputKind::Secret
+}
+
 pub struct SettingsView {
     pub(super) store: Entity<SettingsStore>,
     pub(super) route: SettingsRoute,
@@ -279,6 +283,28 @@ impl SettingsView {
         self.input_with(id, value, placeholder, InputKind::Draft, window, cx, commit)
     }
 
+    /// Like [`Self::input`], but masked (`type="password"`) with autocomplete off
+    /// at the native layer (`ProviderSettingsFormControl::Password`).
+    pub(super) fn password_input(
+        &mut self,
+        id: &str,
+        value: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        commit: impl Fn(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Entity<InputState> {
+        self.input_with(
+            id,
+            value,
+            placeholder,
+            InputKind::Secret,
+            window,
+            cx,
+            commit,
+        )
+    }
+
     /// Like [`Self::input`] but `commit` also runs on every change.
     pub(super) fn input_live(
         &mut self,
@@ -408,6 +434,10 @@ impl SettingsView {
             // The placeholder follows the caller, as an upstream prop does (a saved
             // secret swaps "Not set" for the stored-secret hint after save).
             self.follow_placeholder(&key, &state, placeholder, window, cx);
+            let masked = input_kind_is_masked(kind);
+            if state.read(cx).presentation().is_masked() != masked {
+                state.update(cx, |state, cx| state.set_masked(masked, window, cx));
+            }
             let focused = state.read(cx).focus_handle(cx).is_focused(window);
             if !focused && state.read(cx).value() != value {
                 state.update(cx, |state, cx| {
@@ -642,3 +672,15 @@ pub(super) fn section_title(text: &'static str) -> AnyElement {
 
 #[allow(dead_code)]
 fn _search_target_marker(_: SettingsSearchTarget) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputKind, input_kind_is_masked};
+
+    #[test]
+    fn input_mask_follows_kind_on_reuse() {
+        assert!(!input_kind_is_masked(InputKind::Draft));
+        assert!(!input_kind_is_masked(InputKind::Live));
+        assert!(input_kind_is_masked(InputKind::Secret));
+    }
+}

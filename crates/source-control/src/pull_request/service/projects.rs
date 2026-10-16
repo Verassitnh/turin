@@ -233,7 +233,7 @@ impl Inner {
                     }
                     let resolved = inner
                         .repository_identities
-                        .resolve(project.workspace_root.as_str())
+                        .resolve(project.workspace_root.as_str(), false)
                         .await;
                     OrchestrationProjectShell {
                         repository_identity: Some(resolved),

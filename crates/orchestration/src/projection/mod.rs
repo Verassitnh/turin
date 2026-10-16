@@ -4,7 +4,6 @@ pub mod assistant_streaming;
 pub mod error;
 pub mod event;
 pub mod maintenance;
-pub mod project_commands;
 pub mod project_store;
 pub mod queued_run_order;
 pub mod shared;

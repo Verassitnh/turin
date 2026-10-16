@@ -29,11 +29,12 @@ pub trait PullRequestProjectSource: Send + Sync {
     ) -> Result<Option<OrchestrationProjectShell>, Cause>;
 }
 
-/// `RepositoryIdentityResolver.resolve(cwd)`: the identity of the checkout's remote, for a project
-/// whose shell has none cached. `None` when the directory has no usable remote.
+/// `RepositoryIdentityResolver.resolve(cwd, { refresh })`: the identity of the checkout's remote,
+/// for a project whose shell has none cached. `None` when the directory has no usable remote.
+/// `refresh` bypasses the resolver's cache.
 #[async_trait]
 pub trait RepositoryIdentityResolver: Send + Sync {
-    async fn resolve(&self, workspace_root: &str) -> Option<RepositoryIdentity>;
+    async fn resolve(&self, workspace_root: &str, refresh: bool) -> Option<RepositoryIdentity>;
 }
 
 /// `ServerSettingsService.getSettings` followed by

@@ -16,6 +16,8 @@ type Handler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct PanelLayoutControls {
+    pub thread_details_open: bool,
+    pub on_toggle_thread_details: Handler,
     pub right_panel_open: bool,
     pub right_panel_maximized: bool,
     pub on_toggle_right_panel: Handler,
@@ -33,18 +35,22 @@ fn toggle(id: &'static str, icon: IconName, pressed: bool, tooltip: Tooltip) -> 
 
 impl RenderOnce for PanelLayoutControls {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let on_toggle_thread_details = self.on_toggle_thread_details;
         let on_toggle_right_panel = self.on_toggle_right_panel;
         let on_toggle_maximize = self.on_toggle_maximize;
         div()
             .flex()
             .items_center()
             .gap_1()
-            .child(toggle(
-                "toggle-thread-details",
-                IconName::SquareMenu,
-                false,
-                Tooltip::new("Toggle thread details").shortcut("⇧⌘B"),
-            ))
+            .child(
+                toggle(
+                    "toggle-thread-details",
+                    IconName::SquareMenu,
+                    self.thread_details_open,
+                    Tooltip::new("Toggle thread details").shortcut("⇧⌘B"),
+                )
+                .on_click(move |event, window, cx| on_toggle_thread_details(event, window, cx)),
+            )
             .child(
                 toggle(
                     "toggle-right-panel",

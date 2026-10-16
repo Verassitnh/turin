@@ -7,20 +7,27 @@ mod components;
 #[allow(dead_code)]
 mod composer;
 mod diff;
+#[cfg(target_os = "macos")]
+mod dock_icon;
 mod hooks;
 mod project_icon_colors;
 mod project_identity;
 mod pull_request;
+mod pull_request_reference;
 // The view-model layer is a library until the orchestrator and views are wired
 // to it; every upstream selector is ported ahead of its callers.
 #[allow(dead_code)]
 mod state;
+// Pure settings logic is ported ahead of the views that consume it.
+#[allow(dead_code)]
+mod settings;
 mod theme;
 mod timestamp_format;
 // The ui primitives are a library: every upstream variant and size is ported
 // ahead of its callers.
 #[allow(dead_code)]
 mod ui;
+mod utils;
 
 use gpui_kit::*;
 
@@ -85,11 +92,17 @@ fn main() {
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            #[cfg(target_os = "macos")]
+            dock_icon::set_unbundled_app_icon();
             theme::init(cx);
             let store = state::store::bind_client_store(client_state.handle.clone(), cx);
             cx.set_global(state::store::ClientStoreGlobal(store));
             app_sidebar_layout::bind_keys(cx);
             let right_panel = dev_overrides(cx);
+            // Dev hook: `TURIN_SETTINGS=<page>` shows the settings window on mock data.
+            if settings::demo::open_if_requested(window_options(cx), cx) {
+                return;
+            }
             let handle = gpui_kit::open_window(window_options(cx), cx, |window, cx| {
                 cx.new(|cx| {
                     let mut layout = AppSidebarLayout::new(window, cx);

@@ -714,28 +714,32 @@ impl ThemeStore {
         self.set_appearance_mode(next_mode)
     }
 
+    fn write_theme_half(
+        &self,
+        appearance: ThemeAppearance,
+        theme_id: Option<&str>,
+    ) -> Result<(), String> {
+        let mut next = self.read_stored_theme_halves_raw();
+        next.set(appearance, theme_id.map(str::to_string));
+        if next.is_empty() {
+            return self.storage.remove_item(THEME_HALVES_STORAGE_KEY);
+        }
+        let mut record = serde_json::Map::new();
+        if let Some(light) = &next.light {
+            record.insert("light".into(), light.clone().into());
+        }
+        if let Some(dark) = &next.dark {
+            record.insert("dark".into(), dark.clone().into());
+        }
+        self.storage.set_item(
+            THEME_HALVES_STORAGE_KEY,
+            &serde_json::Value::Object(record).to_string(),
+        )
+    }
+
     /// `setThemeHalf`: `None` removes that appearance's half.
     pub fn set_theme_half(&self, appearance: ThemeAppearance, theme_id: Option<&str>) -> bool {
-        let result = (|| -> Result<(), String> {
-            let mut next = self.read_stored_theme_halves_raw();
-            next.set(appearance, theme_id.map(str::to_string));
-            if next.is_empty() {
-                self.storage.remove_item(THEME_HALVES_STORAGE_KEY)
-            } else {
-                let mut record = serde_json::Map::new();
-                if let Some(light) = &next.light {
-                    record.insert("light".into(), light.clone().into());
-                }
-                if let Some(dark) = &next.dark {
-                    record.insert("dark".into(), dark.clone().into());
-                }
-                self.storage.set_item(
-                    THEME_HALVES_STORAGE_KEY,
-                    &serde_json::Value::Object(record).to_string(),
-                )
-            }
-        })();
-        if let Err(cause) = result {
+        if let Err(cause) = self.write_theme_half(appearance, theme_id) {
             self.log_storage_error(&Self::write_error(THEME_HALVES_STORAGE_KEY, None, cause));
             return false;
         }
@@ -825,7 +829,7 @@ mod tests {
 
     /// Process-wide theme-library and preview state is shared by every test
     /// that resolves themes; serialize them.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::theme::THEME_GLOBALS_TEST_LOCK as TEST_LOCK;
 
     type GetOverride = Arc<dyn Fn(&str) -> Option<Result<Option<String>, String>> + Send + Sync>;
 
@@ -884,8 +888,10 @@ mod tests {
         }
     }
 
+    type LogEntry = (String, Vec<(String, String)>);
+
     #[derive(Default)]
-    struct RecordedLogs(Mutex<Vec<(String, Vec<(String, String)>)>>);
+    struct RecordedLogs(Mutex<Vec<LogEntry>>);
 
     impl RecordedLogs {
         fn logger(self: &Arc<Self>) -> ThemeLogger {
@@ -1044,6 +1050,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn preserves_desktop_sync_causes_and_retries_after_a_failed_cosmetic_sync() {
         let _guard = TEST_LOCK.lock();
         let cause = "desktop IPC unavailable";

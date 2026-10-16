@@ -171,6 +171,7 @@ impl PullRequestSource for MockPullRequestSource {
                 snapshot.can_write = true;
                 snapshot.activity_pending = false;
                 snapshot.detail = Loadable::Ready(detail);
+                snapshot.stack_loaded = true;
                 snapshot.checks = Loadable::Ready(if is_demo {
                     fixtures::checks()
                 } else {
@@ -427,6 +428,36 @@ impl PullRequestSource for MockPullRequestSource {
         });
     }
 
+    fn load_diff_file_contents(
+        &self,
+        reference: &PullRequestRef,
+        _commit: Option<String>,
+        _change_type: turin_contracts::pull_request::PullRequestDiffFileChangeType,
+        _old_path: &str,
+        new_path: &str,
+        cx: &mut App,
+    ) {
+        let key = new_path.to_owned();
+        let contents = fixtures::diff_file_contents(new_path);
+        self.with_store(cx, |store, cx| {
+            store.update_detail(reference, cx, |snapshot| {
+                snapshot
+                    .file_contents
+                    .entry(key.clone())
+                    .or_insert(Loadable::Pending);
+            });
+        });
+        self.later(250, cx, reference, move |snapshot| {
+            snapshot.file_contents.insert(
+                key,
+                match contents {
+                    Some(contents) => Loadable::Ready(contents),
+                    None => Loadable::Failed("The host has no contents for this file.".into()),
+                },
+            );
+        });
+    }
+
     fn set_files_viewed(
         &self,
         reference: &PullRequestRef,
@@ -457,6 +488,18 @@ impl PullRequestSource for MockPullRequestSource {
     fn set_labels(&self, _reference: &PullRequestRef, _labels: Vec<String>, _cx: &mut App) {}
 
     fn generate_guide(&self, reference: &PullRequestRef, cx: &mut App) {
+        // Dev hook for screenshots: the model is not set up, so no run starts.
+        if std::env::var("TURIN_PR_GUIDE_FAIL").is_ok_and(|value| value == "1") {
+            self.with_store(cx, |store, cx| {
+                store.update_detail(reference, cx, |snapshot| {
+                    snapshot.guide_start_error = Some("No model is selected.".into());
+                });
+            });
+            return;
+        }
+        self.with_store(cx, |store, cx| {
+            store.update_detail(reference, cx, |snapshot| snapshot.guide_start_error = None);
+        });
         self.with_store(cx, |store, cx| {
             store.update_detail(reference, cx, |snapshot| {
                 let head = fixtures::guide_result().current_head_sha;
@@ -469,7 +512,12 @@ impl PullRequestSource for MockPullRequestSource {
             });
         });
         self.later(1800, cx, reference, |snapshot| {
-            snapshot.guide = Loadable::Ready(fixtures::guide_result());
+            let mut result = fixtures::guide_result();
+            // A new guide is stamped when it is written, which is how the coordinator knows it ended.
+            if let Some(guide) = result.guide.as_mut() {
+                guide.generated_at = fixtures::ago(0);
+            }
+            snapshot.guide = Loadable::Ready(result);
         });
     }
 
@@ -486,6 +534,44 @@ impl PullRequestSource for MockPullRequestSource {
             }
             store.set_thread_links(&thread_id, links, cx);
         });
+    }
+
+    fn change_thread_link(
+        &self,
+        mutation: crate::state::helpers::thread_pull_request_compatibility::ThreadPullRequestMutation,
+        cx: &mut App,
+    ) -> Result<(), String> {
+        use crate::state::helpers::thread_pull_request_compatibility::ThreadPullRequestMutation as Mutation;
+        let (thread_id, host, repository, number, linked) = match mutation {
+            Mutation::Link(input) => (
+                input.thread_id,
+                input.host,
+                input.repository,
+                input.number,
+                true,
+            ),
+            Mutation::Unlink(input) => (
+                input.thread_id,
+                input.host,
+                input.repository,
+                input.number,
+                false,
+            ),
+            Mutation::MetaUpdate(_) => {
+                return Err(crate::hooks::use_pull_request_linking::LINKING_UNSUPPORTED.to_owned());
+            }
+        };
+        let reference = turin_contracts::PositiveInt::new(number)
+            .and_then(|number| reference_for(&host, &repository, number))
+            .ok_or_else(|| {
+                crate::hooks::use_pull_request_linking::NOT_AVAILABLE_IN_ENVIRONMENT.to_owned()
+            })?;
+        if linked {
+            self.link_thread(&thread_id, &reference, cx);
+        } else {
+            self.unlink_thread(&thread_id, &reference, cx);
+        }
+        Ok(())
     }
 
     fn unlink_thread(&self, thread_id: &ThreadId, reference: &PullRequestRef, cx: &mut App) {

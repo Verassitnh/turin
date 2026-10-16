@@ -12,19 +12,27 @@ use std::sync::Arc;
 
 use gpui_kit::{App, Context, FocusHandle, ListAlignment, ListState, Subscription, Window, px};
 
+use super::DiffPanelPersistedSnapshot;
+use super::annotatable_code_view::{
+    self, DiffCommentAnnotationEntry, DiffCommentAnnotationKind, DiffCommentLineAnnotation,
+    line_annotations_for_file,
+};
 use super::base_ref_choices::{BaseRefChoice, build_base_ref_choices, filter_base_ref_choices};
 use super::diff_collapse::{are_all_diff_files_collapsed, toggle_all_diff_files};
 use super::diff_file_actions::{
     DiffFileTargets, OpenDiffFilePrimaryActionInput, open_diff_file_primary_action,
 };
+use super::diff_file_contents::load_diff_file_contents as load_diff_files;
 use super::diff_file_tree_logic::{DiffFileTreeEntry, diff_file_tree_entries};
+use super::diff_panel_persistence::{decode_diff_panel_store_json, encode_diff_panel_store};
 use super::diff_panel_store::{DiffPanelSelection, DiffPanelStore, GitScope, ScopedThreadRef};
 use super::diff_rendering::{
     DiffLineStat, RenderablePatch, RenderablePatchOptions, build_file_diff_content_version,
     build_file_diff_identity_key, build_patch_cache_key, get_diff_line_stat, get_renderable_patch,
     resolve_file_diff_path,
 };
-use super::highlight::{FileHighlights, file_highlights};
+use super::diff_worker_pool::DiffWorkerPool;
+use super::highlight::{FileHighlights, file_highlights, plain_file_highlights};
 use super::natural::natural_compare;
 use super::pierre::hydrate_partial_diff::hydrate_partial_diff;
 use super::pierre::iterate_over_diff::{DiffStyle, ExpandDirection, ExpandedHunks};
@@ -33,15 +41,19 @@ use super::pierre::types::{
 };
 use super::review_comment_context::{
     BuildDiffReviewCommentInput, ReviewCommentContext, build_diff_review_comment,
-    restore_diff_review_comment_range,
 };
 use super::rows::{DiffRow, LineKind, build_rows};
 use super::view_model::{
     DiffContext, DiffSource, GitDiffFileStat, GitDiffPreview, GitDiffSource, GitSourceKind,
-    Loadable, load_diff_files,
+    Loadable,
 };
 use crate::components::chat::timeline::types::TurnDiffSummary;
+use crate::hooks::use_checkpoint_diff::{
+    UseCheckpointDiffOptions, checkpoint_diff_query, use_checkpoint_diff,
+};
+use crate::state::checkpoint_diff::CheckpointDiffTarget;
 use crate::theme::ActiveAppTheme;
+use turin_contracts::{EnvironmentId, ThreadId};
 
 /// `AUTOMATIC_BASE_REF`.
 pub const AUTOMATIC_BASE_REF: &str = "__automatic_base_ref__";
@@ -120,7 +132,14 @@ pub struct FileEntry {
 
 /// What a file's rows depend on: split or unified, loader presence, content
 /// version and the expanded regions.
-type RowsKey = (bool, bool, u32, Vec<(usize, usize, usize)>);
+type RowsKey = (bool, bool, u32, u32, Vec<(usize, usize, usize)>);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FileHighlightKey {
+    identity: String,
+    version: u32,
+    dark: bool,
+}
 
 /// A row of the virtualized list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +275,8 @@ pub struct DiffPanel {
     pub(super) comment_input: Option<super::annotation::CommentInput>,
     pub(super) handled_reveal: Option<(String, u64)>,
     pub(super) pending_reveal: Option<String>,
+    highlight_cache: HashMap<FileHighlightKey, Arc<FileHighlights>>,
+    highlight_inflight: HashSet<FileHighlightKey>,
     pub(super) keyboard_file: Option<usize>,
     pub(super) dark: bool,
     /// Dev switch: expand only files whose path contains this.
@@ -287,9 +308,13 @@ impl DiffPanel {
         if env("TURIN_DIFF_WRAP").as_deref() == Some("0") {
             settings.word_wrap = false;
         }
+        let store = std::env::var("TURIN_DIFF_PANEL_STATE_JSON")
+            .ok()
+            .and_then(|json| decode_diff_panel_store_json(&json))
+            .unwrap_or_default();
         let mut panel = Self {
             source,
-            store: DiffPanelStore::default(),
+            store,
             settings,
             derived: Derived::empty(),
             collapsed_scope: None,
@@ -315,6 +340,8 @@ impl DiffPanel {
             comment_input: None,
             handled_reveal: None,
             pending_reveal: None,
+            highlight_cache: HashMap::new(),
+            highlight_inflight: HashSet::new(),
             keyboard_file: None,
             open_only,
             dark: cx.app_theme().is_dark(),
@@ -341,6 +368,7 @@ impl DiffPanel {
             }
             _ => {}
         }
+        panel.sync_persisted_store(cx);
         panel.reload(cx);
         // Dev switches: open a menu, or a comment draft / saved comment on the
         // first changed line of the first expanded file.
@@ -445,6 +473,7 @@ impl DiffPanel {
             return;
         };
         self.store.select_turn(&thread, run_id, file_path);
+        self.sync_persisted_store(cx);
         self.reload(cx);
         cx.notify();
     }
@@ -476,6 +505,11 @@ impl DiffPanel {
     // ── derivation ──────────────────────────────────────────────────────
 
     /// Recomputes everything derived from the source and panel state, and
+    fn sync_persisted_store(&self, cx: &mut Context<Self>) {
+        cx.default_global::<DiffPanelPersistedSnapshot>().value =
+            Some(encode_diff_panel_store(&self.store));
+    }
+
     /// splices the list.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         let started = std::time::Instant::now();
@@ -494,6 +528,7 @@ impl DiffPanel {
         if let Some(thread) = &thread {
             let ids: Vec<String> = turns.iter().map(|t| t.run_id.clone()).collect();
             self.store.reconcile_turn_selection(thread, &ids);
+            self.sync_persisted_store(cx);
         }
         let selection = self.store.selection(thread.as_ref());
         let selected_run_id = match &selection {
@@ -600,13 +635,37 @@ impl DiffPanel {
             let mut git_source: Option<GitDiffSource> = None;
             if turn_selected {
                 let to = selected_turn_count.unwrap_or(0);
-                match self
-                    .source
-                    .checkpoint_diff(to.saturating_sub(1), to, ignore_whitespace)
-                {
-                    Loadable::Ready(text) => patch = Some(text),
-                    Loadable::Pending => loading = true,
-                    Loadable::Failed(message) => error = Some(message),
+                // `activeCheckpointDiff`: the turn's range, read through the hook.
+                let target = CheckpointDiffTarget {
+                    environment_id: context
+                        .thread
+                        .as_ref()
+                        .and_then(|thread| EnvironmentId::new(thread.environment_id.as_str()).ok()),
+                    thread_id: context
+                        .thread
+                        .as_ref()
+                        .and_then(|thread| ThreadId::new(thread.thread_id.as_str()).ok()),
+                    from_turn_count: Some(to.saturating_sub(1)),
+                    to_turn_count: Some(to),
+                    ignore_whitespace,
+                    cache_scope: selected_run_id.as_ref().map(|run| format!("turn:{run}")),
+                };
+                let source = self.source.clone();
+                let checkpoint = use_checkpoint_diff(
+                    &|target, options| {
+                        checkpoint_diff_query(target, options, |from, to, ignore_whitespace| {
+                            source.checkpoint_diff(from, to, ignore_whitespace)
+                        })
+                    },
+                    &target,
+                    Some(UseCheckpointDiffOptions::enabled(context.is_git_repo)),
+                );
+                if let Some(data) = checkpoint.data {
+                    patch = Some(data.diff);
+                } else if let Some(message) = checkpoint.error {
+                    error = Some(message);
+                } else if checkpoint.is_pending {
+                    loading = true;
                 }
             } else {
                 match self
@@ -761,6 +820,7 @@ impl DiffPanel {
         self.derived = derived;
         self.remember_file_keys();
         self.rebuild_items();
+        self.schedule_visible_highlights(cx);
         self.apply_reveal(cx);
         tracing::debug!(
             files = self.derived.files.len(),
@@ -960,7 +1020,26 @@ impl DiffPanel {
                 .map(|(index, region)| (*index, region.from_start, region.from_end))
                 .collect();
             regions.sort_unstable();
-            let rows_key = (style == DiffStyle::Split, loader, entry.version, regions);
+            let draft_annotation = self.draft_annotation_for(entry);
+            let line_annotations = line_annotations_for_file(
+                &self.derived.review_section_id,
+                &entry.path,
+                &entry.file,
+                &self.comments,
+                draft_annotation.as_ref(),
+            );
+            let annotation_version = annotatable_code_view::annotatable_item_version(
+                entry.version,
+                false,
+                &line_annotations,
+            );
+            let rows_key = (
+                style == DiffStyle::Split,
+                loader,
+                entry.version,
+                annotation_version,
+                regions,
+            );
             let rows = match self.rows_cache.get(&entry.key) {
                 Some((key, rows)) if *key == rows_key => rows.clone(),
                 _ => {
@@ -970,7 +1049,7 @@ impl DiffPanel {
                     rows
                 }
             };
-            let annotations = self.annotation_rows(entry, &rows);
+            let annotations = self.annotation_rows(&line_annotations, &rows);
             for row_index in 0..rows.len() {
                 items.push(FlatItem::Row(file_index, row_index));
                 if annotations.contains(&row_index) {
@@ -991,25 +1070,34 @@ impl DiffPanel {
 
     /// Row indexes after which an annotation (a saved comment or the draft)
     /// is rendered.
-    pub(super) fn annotation_rows(&self, entry: &FileEntry, rows: &[DiffRow]) -> HashSet<usize> {
-        let mut targets: Vec<(SelectionSide, usize)> = Vec::new();
-        for comment in &self.comments {
-            if comment.section_id == self.derived.review_section_id
-                && comment.file_path == entry.path
-                && comment.fence_language.as_deref().unwrap_or("diff") == "diff"
-                && let Some(range) = restore_diff_review_comment_range(&entry.file, comment)
-            {
-                targets.push((annotation_side(&range), range.end));
-            }
+    fn draft_annotation_for(&self, entry: &FileEntry) -> Option<DiffCommentLineAnnotation> {
+        let draft = self.draft.as_ref()?;
+        if draft.file_key != entry.key {
+            return None;
         }
-        if let Some(draft) = &self.draft
-            && draft.file_key == entry.key
-        {
-            targets.push((draft.annotation.side, draft.annotation.line_number));
-        }
+        Some(DiffLineAnnotation {
+            side: draft.annotation.side,
+            line_number: draft.annotation.line_number,
+            metadata: annotatable_code_view::DiffCommentAnnotationGroup {
+                entries: vec![DiffCommentAnnotationEntry {
+                    id: draft.id.clone(),
+                    kind: DiffCommentAnnotationKind::Draft,
+                    range: draft.range,
+                    range_label: draft.range_label.clone(),
+                    text: String::new(),
+                }],
+            },
+        })
+    }
+
+    pub(super) fn annotation_rows(
+        &self,
+        line_annotations: &[DiffCommentLineAnnotation],
+        rows: &[DiffRow],
+    ) -> HashSet<usize> {
         let mut result = HashSet::new();
-        for (side, number) in targets {
-            if let Some(index) = row_index_for_line(rows, side, number) {
+        for annotation in line_annotations {
+            if let Some(index) = row_index_for_line(rows, annotation.side, annotation.line_number) {
                 result.insert(index);
             }
         }
@@ -1102,6 +1190,7 @@ impl DiffPanel {
             }
         }
         self.menu = None;
+        self.sync_persisted_store(cx);
         self.reload(cx);
     }
 
@@ -1110,6 +1199,7 @@ impl DiffPanel {
             return;
         };
         self.store.select_branch_base_ref(&thread, base_ref);
+        self.sync_persisted_store(cx);
         self.menu = None;
         self.base_ref_query.clear();
         self.reload(cx);
@@ -1310,8 +1400,61 @@ impl DiffPanel {
 
     // ── helpers for rendering ───────────────────────────────────────────
 
+    pub(super) fn ensure_file_highlights(&mut self, entry: &FileEntry, cx: &mut Context<Self>) {
+        let dark = self.dark;
+        let key = FileHighlightKey {
+            identity: entry.key.clone(),
+            version: entry.version,
+            dark,
+        };
+        if self.highlight_cache.contains_key(&key) || self.highlight_inflight.contains(&key) {
+            return;
+        }
+        self.highlight_inflight.insert(key.clone());
+        DiffWorkerPool::shared().acquire(crate::state::time::now_ms() as u64);
+        let file = entry.file.clone();
+        let identity = entry.key.clone();
+        let version = entry.version;
+        let pool = DiffWorkerPool::shared();
+        cx.spawn(async move |this, cx| {
+            let highlights = cx
+                .background_executor()
+                .spawn(async move { file_highlights(&file, &identity, version, dark) })
+                .await;
+            pool.release(crate::state::time::now_ms() as u64);
+            this.update(cx, |panel, cx| {
+                panel.highlight_inflight.remove(&key);
+                panel.highlight_cache.insert(key, highlights);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(super) fn highlights(&self, entry: &FileEntry, dark: bool) -> Arc<FileHighlights> {
-        file_highlights(&entry.file, &entry.key, entry.version, dark)
+        let key = FileHighlightKey {
+            identity: entry.key.clone(),
+            version: entry.version,
+            dark,
+        };
+        if let Some(highlights) = self.highlight_cache.get(&key) {
+            return highlights.clone();
+        }
+        plain_file_highlights(&entry.file, dark)
+    }
+
+    fn schedule_visible_highlights(&mut self, cx: &mut Context<Self>) {
+        let files: Vec<FileEntry> = self
+            .derived
+            .files
+            .iter()
+            .filter(|entry| !self.collapsed_keys.contains(&entry.key) && !entry.pending)
+            .cloned()
+            .collect();
+        for entry in files {
+            self.ensure_file_highlights(&entry, cx);
+        }
     }
 
     // ── comments ────────────────────────────────────────────────────────
@@ -1482,14 +1625,7 @@ impl DiffPanel {
     }
 }
 
-/// `annotationSide`.
-pub fn annotation_side(range: &SelectedLineRange) -> SelectionSide {
-    if range.end_side.or(range.side) == Some(SelectionSide::Deletions) {
-        SelectionSide::Deletions
-    } else {
-        SelectionSide::Additions
-    }
-}
+pub use super::annotatable_code_view::annotation_side;
 
 /// The row a line annotation attaches to.
 pub fn row_index_for_line(rows: &[DiffRow], side: SelectionSide, number: usize) -> Option<usize> {

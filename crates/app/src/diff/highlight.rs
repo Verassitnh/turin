@@ -147,6 +147,37 @@ pub fn language_for_path(path: &str) -> &'static str {
     }
 }
 
+/// Plain foreground only (used while async highlighting is in flight).
+pub fn plain_file_highlights(file: &FileDiffMetadata, dark: bool) -> Arc<FileHighlights> {
+    let language = file
+        .lang
+        .clone()
+        .unwrap_or_else(|| language_for_path(&file.name).to_string());
+    let foreground = highlight_code("", &language, dark).foreground;
+    Arc::new(FileHighlights {
+        additions: SideHighlights::plain(&file.addition_lines, foreground),
+        deletions: SideHighlights::plain(&file.deletion_lines, foreground),
+    })
+}
+
+impl SideHighlights {
+    fn plain(lines: &[String], foreground: Hsla) -> Self {
+        let mut starts = Vec::with_capacity(lines.len());
+        let mut joined = String::new();
+        for line in lines {
+            starts.push(joined.len());
+            joined.push_str(line);
+        }
+        Self {
+            code: Arc::new(HighlightedCode {
+                foreground,
+                tokens: Vec::new(),
+            }),
+            starts,
+        }
+    }
+}
+
 /// Highlights `file`, cached by identity, content version and appearance.
 pub fn file_highlights(
     file: &FileDiffMetadata,

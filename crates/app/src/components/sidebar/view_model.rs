@@ -15,11 +15,13 @@ use std::rc::Rc;
 use gpui_kit::{App, Context, EventEmitter, Task};
 use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
 
-use super::sidebar_logic::{
-    CommandOutcome, LogicalSidebarProject, ProjectSortOrder, sort_sidebar_v2_project_groups,
-};
+use super::sidebar_logic::{CommandOutcome, ProjectSortOrder};
 use crate::components::thread_search_match::SearchMatchSource;
+use crate::hooks::use_sidebar_project_groups::{
+    SidebarProjectGroupsInput, use_sidebar_project_groups,
+};
 use crate::state::models::{EnvironmentProject, EnvironmentThreadShell};
+use crate::state::project_grouping::ProjectGroupingSettings;
 use crate::timestamp_format::TimestampFormat;
 
 /// `environment.capabilities` the sidebar gates on. A capability that is
@@ -191,35 +193,23 @@ impl SidebarSnapshot {
             .find(|entry| entry.instance_id == instance_id)
     }
 
-    /// The last step of upstream's `useSidebarProjectGroups`:
-    /// `sortSidebarV2ProjectGroups` reorders the grouped projects by thread
-    /// activity, and manual order keeps the saved order.
-    pub fn sort_project_groups(&mut self) {
-        let logical: Vec<LogicalSidebarProject> = self
-            .project_groups
-            .iter()
-            .map(|group| LogicalSidebarProject {
-                project_key: group.project_key.clone(),
-                title: group.display_name.clone(),
-                created_at: group.created_at.clone(),
-                updated_at: group.updated_at.clone(),
-                member_project_keys: group.member_project_keys.clone(),
-            })
-            .collect();
-        let sorted = sort_sidebar_v2_project_groups(
-            &logical,
-            &self.threads,
-            self.settings.project_sort_order,
-        );
-        let mut groups: HashMap<String, SidebarProjectGroup> =
-            std::mem::take(&mut self.project_groups)
-                .into_iter()
-                .map(|group| (group.project_key.clone(), group))
-                .collect();
-        self.project_groups = sorted
-            .iter()
-            .filter_map(|project| groups.remove(&project.project_key))
-            .collect();
+    /// `useSidebarProjectGroups()` over this snapshot: groups the projects (by repository, per the
+    /// grouping settings), orders them (the saved order when manual, else thread activity) and
+    /// stores the result as [`Self::project_groups`].
+    pub fn refresh_project_groups(
+        &mut self,
+        project_order: &[String],
+        grouping_settings: &ProjectGroupingSettings,
+    ) {
+        self.project_groups = use_sidebar_project_groups(&SidebarProjectGroupsInput {
+            projects: &self.projects,
+            threads: &self.threads,
+            project_order,
+            sort_order: self.settings.project_sort_order,
+            grouping_settings,
+            environments: &self.environments,
+            primary_environment_id: self.primary_environment_id.as_ref(),
+        });
     }
 }
 
@@ -344,46 +334,36 @@ pub type SharedSidebarBackend = Rc<dyn SidebarBackend>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::models::fixtures::{project_id, shell};
-
-    fn group(project: &str, title: &str) -> SidebarProjectGroup {
-        let key = format!("environment-local:{project}");
-        SidebarProjectGroup {
-            project_key: key.clone(),
-            display_name: title.into(),
-            created_at: Some("2026-03-09T10:00:00.000Z".into()),
-            updated_at: Some("2026-03-09T10:00:00.000Z".into()),
-            member_project_keys: vec![key],
-        }
-    }
+    use crate::state::models::fixtures::project_id;
 
     #[test]
-    fn sorts_project_groups_by_thread_activity_unless_the_order_is_manual() {
-        let mut thread = shell("thread-newer");
-        thread.project_id = project_id("project-newer");
-        thread.updated_at = "2026-03-09T10:05:00.000Z".into();
+    fn refreshing_the_groups_assembles_them_from_the_projects() {
+        let project = |id: &str, title: &str| EnvironmentProject {
+            environment_id: crate::state::models::fixtures::env("local"),
+            id: project_id(id),
+            title: title.to_owned(),
+            workspace_root: format!("/code/{id}"),
+            favicon_path: None,
+            project_icon: None,
+            created_at: None,
+            updated_at: None,
+            is_scratch: false,
+            source: None,
+        };
         let mut snapshot = SidebarSnapshot {
-            project_groups: vec![
-                group("project-older", "Older"),
-                group("project-newer", "Newer"),
-            ],
-            threads: vec![thread],
-            ..Default::default()
+            projects: vec![project("project-b", "B"), project("project-a", "A")],
+            ..SidebarSnapshot::default()
         };
-        let titles = |snapshot: &SidebarSnapshot| {
-            snapshot
-                .project_groups
-                .iter()
-                .map(|group| group.display_name.clone())
-                .collect::<Vec<_>>()
-        };
-
         snapshot.settings.project_sort_order = ProjectSortOrder::Manual;
-        snapshot.sort_project_groups();
-        assert_eq!(titles(&snapshot), vec!["Older", "Newer"]);
-
-        snapshot.settings.project_sort_order = ProjectSortOrder::UpdatedAt;
-        snapshot.sort_project_groups();
-        assert_eq!(titles(&snapshot), vec!["Newer", "Older"]);
+        let order = vec![crate::logical_project::get_project_order_key(
+            &snapshot.projects[1],
+        )];
+        snapshot.refresh_project_groups(&order, &ProjectGroupingSettings::default());
+        let titles: Vec<&str> = snapshot
+            .project_groups
+            .iter()
+            .map(|group| group.display_name.as_str())
+            .collect();
+        assert_eq!(titles, ["A", "B"]);
     }
 }

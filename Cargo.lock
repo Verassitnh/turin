@@ -7535,6 +7535,7 @@ dependencies = [
  "turin-launcher",
  "turin-orchestration",
  "turin-persistence",
+ "turin-projects",
  "turin-provider-claude",
  "turin-provider-core",
  "turin-providers",

@@ -8,6 +8,7 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
+use turin_contracts::environment::RepositoryIdentity;
 use url::Url;
 
 /// A change request named the way a thread link names one: the host below which the repository
@@ -114,6 +115,59 @@ pub fn parse_change_request_url(target_url: &str) -> Option<ChangeRequestLink> {
     None
 }
 
+/// `matchesLinkedPullRequestUrl`: match a stored PR without requiring its project to remain
+/// available.
+pub fn matches_linked_pull_request_url(linked_url: &str, target_url: &str) -> bool {
+    match (
+        parse_change_request_url(linked_url),
+        parse_change_request_url(target_url),
+    ) {
+        (Some(linked), Some(target)) => linked == target,
+        _ => false,
+    }
+}
+
+/// `gitHubPullRequestBrowserUrl`: builds a GitHub URL that remains available when the pull
+/// request API cannot be read.
+pub fn github_pull_request_browser_url(
+    identity: Option<&RepositoryIdentity>,
+    repository: &str,
+    number: u64,
+) -> Option<String> {
+    let identity = identity?;
+    if identity.provider.as_ref().map(|provider| provider.as_str()) != Some("github")
+        || !(1..=9_007_199_254_740_991).contains(&number)
+    {
+        return None;
+    }
+    let segments: Vec<&str> = repository.split('/').collect();
+    if segments.len() != 2
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return None;
+    }
+    // An http(s) remote names its own origin; SCP-style remotes are read from the normalized
+    // identity below.
+    let origin = Url::parse(identity.locator.remote_url.as_str().trim())
+        .ok()
+        .filter(|url| url.scheme() == "http" || url.scheme() == "https")
+        .map(|url| url.origin().ascii_serialization());
+    let hostname = identity
+        .canonical_key
+        .as_str()
+        .split('/')
+        .next()
+        .unwrap_or("");
+    if origin.is_none() && hostname.is_empty() {
+        return None;
+    }
+    let mut url = Url::parse(&origin.unwrap_or_else(|| format!("https://{hostname}"))).ok()?;
+    url.set_path(&format!("/{}/pull/{number}", segments.join("/")));
+    Some(url.to_string())
+}
+
 fn claim(host: &str, captures: Option<regex::Captures<'_>>) -> Option<ChangeRequestLink> {
     let captures = captures?;
     let repository = captures
@@ -192,5 +246,70 @@ mod tests {
             None
         );
         assert_eq!(parse_change_request_url("not a url"), None);
+    }
+
+    #[test]
+    fn a_stored_link_matches_the_same_change_request_only() {
+        assert!(matches_linked_pull_request_url(
+            "https://github.com/Acme/Turin/pull/7",
+            "https://github.com/acme/turin/pull/7/files"
+        ));
+        assert!(!matches_linked_pull_request_url(
+            "https://github.com/acme/turin/pull/7",
+            "https://github.com/acme/turin/pull/8"
+        ));
+        assert!(!matches_linked_pull_request_url(
+            "https://github.com/acme/turin/pull/7",
+            "not a url"
+        ));
+    }
+
+    fn github_identity(remote_url: &str) -> RepositoryIdentity {
+        serde_json::from_value(serde_json::json!({
+            "canonicalKey": "github.com/acme/turin",
+            "provider": "github",
+            "locator": {
+                "source": "git-remote",
+                "remoteName": "origin",
+                "remoteUrl": remote_url,
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_browser_url_names_the_remotes_own_origin() {
+        let identity = github_identity("https://ghe.example.com/acme/turin.git");
+        assert_eq!(
+            github_pull_request_browser_url(Some(&identity), "acme/turin", 7).as_deref(),
+            Some("https://ghe.example.com/acme/turin/pull/7")
+        );
+    }
+
+    #[test]
+    fn an_scp_remote_falls_back_to_the_canonical_host() {
+        let identity = github_identity("git@github.com:acme/turin.git");
+        assert_eq!(
+            github_pull_request_browser_url(Some(&identity), "acme/turin", 7).as_deref(),
+            Some("https://github.com/acme/turin/pull/7")
+        );
+    }
+
+    #[test]
+    fn the_browser_url_refuses_what_it_cannot_build() {
+        let identity = github_identity("https://github.com/acme/turin.git");
+        assert_eq!(github_pull_request_browser_url(None, "acme/turin", 7), None);
+        assert_eq!(
+            github_pull_request_browser_url(Some(&identity), "acme/turin", 0),
+            None
+        );
+        assert_eq!(
+            github_pull_request_browser_url(Some(&identity), "acme/../turin", 7),
+            None
+        );
+        assert_eq!(
+            github_pull_request_browser_url(Some(&identity), "acme", 7),
+            None
+        );
     }
 }

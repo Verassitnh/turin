@@ -18,6 +18,7 @@
 
 pub mod custom_snooze_dialog;
 pub mod live_source;
+pub mod main_app_location;
 pub mod mock_source;
 pub mod runtime;
 pub mod sidebar_actions;

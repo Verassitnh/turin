@@ -1,0 +1,77 @@
+## T15 — 2299 lines, 14 files
+   263 packages/client-runtime/src/projectFaviconCache.ts
+    85 apps/web/src/assets/projectFaviconCache.ts
+    81 apps/web/src/projectIconOptions.ts
+    74 apps/web/src/sidebarPendingFileDropStore.ts
+    66 apps/web/src/hooks/useNowMinute.ts
+    49 apps/web/src/hooks/useSidebarProjectGroups.ts
+    38 apps/web/src/hooks/threadUndo.ts
+    36 apps/web/src/components/sidebar/mainAppLocation.ts
+    29 apps/web/src/settleAndAdvance.ts
+    27 apps/web/src/components/sidebar/SidebarThreadUndoNotice.tsx
+    15 apps/web/src/logicalProject.ts
+## T19 — 2250 lines, 18 files
+   471 apps/web/src/components/pullRequest/usePullRequestActions.ts
+   362 apps/web/src/components/pullRequest/guide/GuideExcerpt.tsx
+   310 apps/web/src/components/pullRequest/guide/GuideStop.tsx
+   174 apps/web/src/components/pullRequest/guide/GuideTour.tsx
+   140 apps/web/src/components/pullRequest/guide/PullRequestGuideRunCoordinator.tsx
+   130 apps/web/src/components/pullRequest/PullRequestSpeedActions.tsx
+   117 apps/web/src/hooks/usePullRequestLinking.ts
+   108 apps/web/src/components/pullRequest/guide/GuideRail.tsx
+    76 apps/web/src/hooks/useOpenPanelPullRequestUrl.ts
+    67 apps/web/src/sourceControlPresentation.ts
+    58 apps/web/src/components/pullRequest/guide/GuideNotes.tsx
+    53 apps/web/src/components/pullRequest/pullRequestMarkdown.logic.ts
+    50 apps/web/src/components/pullRequest/guide/GuideFileDiff.tsx
+    40 apps/web/src/components/pullRequest/guide/GuideProse.tsx
+    33 apps/web/src/state/usePullRequestStack.ts
+    31 apps/web/src/components/pullRequest/PullRequestActivityUnavailableState.tsx
+    20 apps/web/src/hooks/usePullRequestChecksRefresh.ts
+    10 apps/web/src/hooks/useSupportsMultiplePullRequests.ts
+## T18 — 1004 lines, 11 files
+   306 apps/web/src/components/diffs/AnnotatableCodeView.tsx
+   197 apps/web/src/pierre-icons.ts
+   167 apps/web/src/components/DiffWorkerPoolProvider.tsx
+   124 apps/web/src/lib/diffFileContents.ts
+    45 apps/web/src/components/DiffFilePathCopyButton.tsx
+    39 apps/web/src/components/diffs/DiffFileStatus.tsx
+    33 apps/web/src/components/diffs/useCodeViewFileReveal.ts
+    27 apps/web/src/pierre-tree-theme.ts
+    27 apps/web/src/components/diffs/DiffFileLoadingBoundary.tsx
+    21 apps/web/src/hooks/useTurnDiffSummaries.ts
+    18 apps/web/src/lib/checkpointDiffState.ts
+## T15 — 3907 lines, 2 files
+  3900 apps/web/src/components/LegacySidebar.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+     7 apps/web/src/lib/threadSort.ts  <- ['DEDUP-1', 'N1b-async-fs']
+## T19 — 3474 lines, 26 files
+   444 apps/web/src/components/pullRequest/PullRequestGhosts.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   404 apps/web/src/state/pullRequests.ts  <- ['DEDUP-1', 'N1b-async-fs']
+   334 apps/web/src/components/PullRequestThreadDialog.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   283 apps/web/src/lib/openPullRequestLink.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+   204 apps/web/src/components/pullRequest/PullRequestComposer.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   185 apps/web/src/components/pullRequest/PullRequestListEmptyState.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   169 apps/web/src/components/pullRequest/PullRequestReactions.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   165 apps/web/src/components/pullRequest/PullRequestListRow.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   150 apps/web/src/components/pullRequest/PullRequestMarkdown.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   146 apps/web/src/components/pullRequest/PullRequestCommentForm.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   134 apps/web/src/components/pullRequest/PullRequestReviewerPicker.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   129 apps/web/src/components/pullRequest/PullRequestLabelPicker.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+   107 apps/web/src/components/pullRequest/PullRequestStackPopover.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+    87 apps/web/src/components/pullRequest/guide/useGuideDiffFiles.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    86 apps/web/src/components/pullRequest/guide/guideRunStore.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    78 apps/web/src/components/pullRequest/guide/useReviewGuideWriter.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    65 apps/web/src/components/pullRequest/pullRequestLinkContextMenu.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    60 apps/web/src/components/pullRequest/PullRequestsUnavailableState.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+    55 apps/web/src/components/pullRequest/useInlineActionConfirm.ts  <- ['N1b-async-fs', 'R1-provider-registry']
+    54 apps/web/src/components/pullRequest/pullRequestIcons.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+    39 apps/web/src/components/pullRequest/PullRequestStackLayers.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+    28 apps/web/src/components/pullRequest/PullRequestStackHeader.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+    28 apps/web/src/components/pullRequest/PullRequestStackLayerContent.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+    25 apps/web/src/components/PullRequestContextDetails.tsx  <- ['N1b-async-fs', 'R1-provider-registry']
+    10 apps/web/src/lib/sourceControlActions.ts  <- ['DEDUP-1', 'N1b-async-fs']
+     5 apps/web/src/state/sourceControl.ts  <- ['DEDUP-1', 'N1b-async-fs']
+## T18 — 511 lines, 3 files
+   261 apps/web/src/components/diffs/StyledDiffCodeView.tsx  <- ['DEDUP-1', 'N1b-async-fs']
+   245 apps/web/src/components/diffs/useReviewFilePatches.ts  <- ['DEDUP-1', 'N1b-async-fs']
+     5 apps/web/src/state/review.ts  <- ['DEDUP-1', 'N1b-async-fs']

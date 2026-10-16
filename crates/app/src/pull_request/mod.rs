@@ -8,23 +8,30 @@
 // return a concrete element type are the idiom of every view here.
 #![allow(clippy::type_complexity, refining_impl_trait)]
 
+pub mod action_runner;
+pub mod activity_unavailable;
 pub mod checks_popover;
 pub mod code_tab;
 pub mod comment_body;
 pub mod comment_form;
 pub mod copyable_code;
 pub mod demo;
+pub mod desktop_notification;
 pub mod detail_context;
 pub mod detail_layout;
 pub mod detail_panel;
 pub mod dropdown;
 pub mod edit_button;
 pub mod fixtures;
+pub mod guide_excerpt_expansion;
+pub mod guide_run_coordinator;
+pub mod guide_run_store;
 pub mod guide_tab;
 pub mod guide_view;
 pub mod link_dialog;
 pub mod link_preview;
 pub mod link_pull_request_dialog_logic;
+pub mod list_close_sweep;
 pub mod list_filters;
 pub mod list_page;
 pub mod list_row;
@@ -53,9 +60,12 @@ pub mod pull_requests_route_search;
 pub mod relative_time;
 pub mod review_annotation;
 pub mod review_form;
+pub mod shared_summary;
+pub mod speed_actions;
 pub mod stack_popover;
 pub mod summary_tab;
 pub mod thread_links;
 pub mod thread_panel;
 pub mod timeline_tab;
+pub mod toast;
 pub mod view_model;

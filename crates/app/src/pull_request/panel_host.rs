@@ -6,24 +6,33 @@
 //! shell owns the panel width and layout controls).
 
 use gpui_kit::{
-    AppContext as _, Context, CursorStyle, Entity, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, rems,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, rems,
 };
 use turin_contracts::EnvironmentId;
 use turin_contracts::pull_request::PullRequestRef;
 
 use super::detail_context::DetailTab;
 use super::detail_panel::PullRequestDetailPanel;
+use super::guide_run_coordinator::{GuideRunCoordinator, GuideRunCoordinatorEvent};
+use super::guide_run_store::GuideRunStore;
 use super::presentation_view::PullRequestStateGlyph;
-use super::view_model::{Loadable, PullRequestStore, pull_request_key};
+use super::pull_request_detail_logic::{
+    PullRequestDetailSnapshotRef, resolve_displayed_pull_request_detail,
+};
+use super::shared_summary::{newest_pull_request_summary, pull_request_detail_to_summary};
+use super::toast::{ToastKind, ToastQueue, render_toasts};
+use super::view_model::{PullRequestStore, pull_request_key};
 use crate::components::drag_region::{DragRegion as _, no_drag};
+use crate::hooks::use_open_panel_pull_request_url::pull_request_link_for_shortcut;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
 
 struct OpenSurface {
     key: String,
+    environment_id: EnvironmentId,
     reference: PullRequestRef,
     panel: Entity<PullRequestDetailPanel>,
 }
@@ -34,16 +43,38 @@ pub struct PullRequestPanelHost {
     active: usize,
     /// A stack layer chosen inside a panel: opened on the next render, which has the window.
     pending_open: Option<(EnvironmentId, PullRequestRef)>,
+    /// A guide a notice asked to open, on the Guide tab (`openRequestKey`).
+    pending_guide: Option<(EnvironmentId, PullRequestRef)>,
+    guide_runs: Entity<GuideRunCoordinator>,
+    /// Said by the host itself (the copy shortcut).
+    toasts: ToastQueue,
+    _subscriptions: Vec<gpui_kit::Subscription>,
 }
 
 impl PullRequestPanelHost {
     pub fn new(store: Entity<PullRequestStore>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let guide_runs = cx.new(|cx| GuideRunCoordinator::new(store.clone(), cx));
+        let subscriptions = vec![
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&guide_runs, |_, _, cx| cx.notify()),
+            cx.subscribe(&guide_runs, |this, _, event, cx| {
+                let GuideRunCoordinatorEvent::OpenGuide {
+                    environment_id,
+                    reference,
+                } = event;
+                this.pending_guide = Some((environment_id.clone(), reference.clone()));
+                cx.notify();
+            }),
+        ];
         Self {
             store,
             surfaces: Vec::new(),
             active: 0,
             pending_open: None,
+            pending_guide: None,
+            guide_runs,
+            toasts: ToastQueue::default(),
+            _subscriptions: subscriptions,
         }
     }
 
@@ -91,6 +122,7 @@ impl PullRequestPanelHost {
                 });
                 self.surfaces.push(OpenSurface {
                     key,
+                    environment_id,
                     reference,
                     panel,
                 });
@@ -106,6 +138,75 @@ impl PullRequestPanelHost {
         cx.notify();
     }
 
+    /// The open panel's pull request link, in `useOpenPanelPullRequestUrl`'s three states.
+    fn open_panel_url(&self, cx: &App) -> Option<Option<String>> {
+        let surface = self.surfaces.get(self.active)?;
+        let live = self
+            .store
+            .read(cx)
+            .detail(&surface.reference)
+            .and_then(|snapshot| snapshot.detail.ready())
+            .map(super::detail_panel::core_detail);
+        let snapshot_ref = PullRequestDetailSnapshotRef {
+            host: surface.reference.host.as_ref().map(|host| host.as_str()),
+            project_id: surface.reference.project_id.as_str(),
+            repository: surface.reference.repository.as_str(),
+            number: surface.reference.number.get(),
+        };
+        Some(
+            resolve_displayed_pull_request_detail(live.as_ref(), None, snapshot_ref)
+                .map(|detail| detail.url.as_str().to_owned()),
+        )
+    }
+
+    /// `copyPullRequestFromShortcut`: the pull requests route copies the open pull request's link.
+    fn copy_pull_request_link(&mut self, cx: &mut Context<Self>) {
+        let open = self.open_panel_url(cx);
+        let Some(url) = pull_request_link_for_shortcut(open.as_ref()).map(str::to_owned) else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+        self.toasts.push(
+            cx,
+            |host| &mut host.toasts,
+            ToastKind::Success,
+            "PR link copied",
+            Some(url),
+        );
+    }
+
+    /// The shortcut is window-level while the host is on screen: this page has no chat view to
+    /// hold it.
+    fn shortcut_listener(&self, cx: &mut Context<Self>) -> AnyElement {
+        let host = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let host = host.clone();
+                window.on_key_event(move |event: &KeyDownEvent, phase, _, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    if phase != DispatchPhase::Capture
+                        || event.is_held
+                        || !(modifiers.platform && modifiers.shift && !modifiers.alt)
+                        || event.keystroke.key != "c"
+                    {
+                        return;
+                    }
+                    host.update(cx, |host, cx| {
+                        if matches!(host.open_panel_url(cx), Some(Some(_))) {
+                            cx.stop_propagation();
+                            host.copy_pull_request_link(cx);
+                        }
+                    })
+                    .ok();
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+        .into_any_element()
+    }
+
     pub fn close_all(&mut self, cx: &mut Context<Self>) {
         self.surfaces.clear();
         self.active = 0;
@@ -118,6 +219,17 @@ impl Render for PullRequestPanelHost {
         if let Some((environment_id, reference)) = self.pending_open.take() {
             self.open(environment_id, reference, None, window, cx);
         }
+        if let Some((environment_id, reference)) = self.pending_guide.take() {
+            self.open(
+                environment_id,
+                reference,
+                Some(DetailTab::Guide),
+                window,
+                cx,
+            );
+            // The request is answered once the panel is on the Guide tab.
+            GuideRunStore::global(cx).update(cx, |runs, cx| runs.request_open(None, cx));
+        }
         let theme = cx.app_theme().clone();
         let tabs: Vec<_> = self
             .surfaces
@@ -125,10 +237,21 @@ impl Render for PullRequestPanelHost {
             .enumerate()
             .map(|(index, surface)| {
                 let active = index == self.active;
-                let snapshot = self.store.read(cx).detail(&surface.reference);
-                let (state, is_draft) = match snapshot.map(|s| &s.detail) {
-                    Some(Loadable::Ready(detail)) => (detail.state, detail.is_draft),
-                    _ => (turin_contracts::pull_request::PullRequestState::Open, false),
+                // The compact tab shows lifecycle and draft state only, from the newest of the
+                // detail read and what the rest of the app saw (`RightPanelTabs`).
+                let store = self.store.read(cx);
+                let detail = store
+                    .detail(&surface.reference)
+                    .and_then(|snapshot| snapshot.detail.ready())
+                    .map(|view| {
+                        pull_request_detail_to_summary(&super::detail_panel::core_detail(view))
+                    });
+                let shared =
+                    store.shared_summary(&surface.environment_id, &surface.reference, None);
+                let status = newest_pull_request_summary(detail.as_ref(), shared.as_ref());
+                let (state, is_draft) = match &status {
+                    Some(summary) => (summary.state, summary.is_draft.unwrap_or(false)),
+                    None => (turin_contracts::pull_request::PullRequestState::Open, false),
                 };
                 let label: SharedString = format!("#{}", surface.reference.number.get()).into();
                 let tab = div()
@@ -197,6 +320,9 @@ impl Render for PullRequestPanelHost {
                     .min_h_0()
                     .children(self.surfaces.get(self.active).map(|s| s.panel.clone())),
             )
+            .child(self.shortcut_listener(cx))
+            .children(render_toasts(self.guide_runs.read(cx).toasts(), cx))
+            .children(render_toasts(&self.toasts, cx))
     }
 }
 

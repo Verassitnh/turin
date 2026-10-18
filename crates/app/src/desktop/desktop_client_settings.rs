@@ -46,6 +46,13 @@ pub fn client_settings_path_for_home(home: &Path) -> PathBuf {
     .join("client-settings.json")
 }
 
+/// Live preferences share the database's data directory, including dev overrides.
+pub fn client_settings_path() -> PathBuf {
+    crate::app_runtime::data_dir::resolve_data_dir()
+        .map(|dir| dir.join("client-settings.json"))
+        .unwrap_or_else(|| client_settings_path_for_home(Path::new("")))
+}
+
 /// `DesktopEnvironment` client settings (`<state>/client-settings.json`).
 pub fn default_client_settings_path(home: &Path) -> PathBuf {
     client_settings_path_for_home(home)

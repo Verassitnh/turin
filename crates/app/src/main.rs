@@ -59,7 +59,7 @@ use components::onboarding::first_run_gate::FirstRunGate;
 use components::onboarding::live_source::LiveOnboarding;
 use components::onboarding::mock_source::{FirstRunScenario, MockOnboardingBackend};
 use std::rc::Rc;
-use desktop::desktop_client_settings::client_settings_path_for_home;
+use desktop::desktop_client_settings::client_settings_path;
 use shell::client_settings_persistence::DesktopFileClientSettingsPersistence;
 use shell::live_settings::start_live_client_settings;
 
@@ -179,11 +179,7 @@ fn main() {
     // process; dropping it aborts the feeds.
     let command_bus = app_runtime::write::bus::CommandBus::new(runtime.handle().clone());
     if std::env::var("TURIN_MOCK_UI").ok().as_deref() != Some("1") {
-        let home = std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default();
-        let persistence =
-            DesktopFileClientSettingsPersistence::new(client_settings_path_for_home(&home));
+        let persistence = DesktopFileClientSettingsPersistence::new(client_settings_path());
         start_live_client_settings(runtime.handle(), persistence);
     }
     let _feeds =

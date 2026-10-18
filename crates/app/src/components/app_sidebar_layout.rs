@@ -59,7 +59,7 @@ use super::workspace_titlebar::workspace_controls_left;
 use crate::desktop::desktop_app_settings::{read_desktop_app_settings, write_desktop_app_settings};
 use crate::desktop::desktop_application_menu::{CloseWindow, QuitApplication};
 use crate::desktop::desktop_client_settings::{
-    client_settings_path_for_home, read_client_settings,
+    client_settings_path, read_client_settings,
 };
 use crate::desktop::notification_badge::clear_notification_badge_on_focus;
 use crate::desktop::quit_hold::{
@@ -232,6 +232,7 @@ pub struct AppSidebarLayout {
     confirm_dialog: Entity<ConfirmDialogHost>,
     client_settings: ClientSettings,
     client_settings_path: std::path::PathBuf,
+    _client_settings_watch: gpui_kit::Task<()>,
     bounds_persist: WindowBoundsPersist,
     right_panel_store: RightPanelStore,
     _appearance: Subscription,
@@ -305,8 +306,7 @@ impl AppSidebarLayout {
         }
         let quit_overlay = cx.new(|_| QuitHoldOverlay::new());
         let confirm_dialog = cx.new(|cx| ConfirmDialogHost::new(window, cx));
-        let home = turin_runtime::config::home_directory().unwrap_or_default();
-        let client_settings_path = client_settings_path_for_home(&home);
+        let client_settings_path = client_settings_path();
         let bounds_persist =
             WindowBoundsPersist::new(crate::desktop::desktop_app_settings::desktop_settings_path());
         let bounds = cx.observe_window_bounds(window, |this, window, cx| {
@@ -334,7 +334,7 @@ impl AppSidebarLayout {
             }
             cx.notify();
         });
-        Self::watch_client_settings(client_settings_path.clone(), cx);
+        let client_settings_watch = Self::watch_client_settings(client_settings_path.clone(), cx);
         let toast_viewport = crate::ui::toast::toasts(cx);
         let anchored_toast_viewport = crate::ui::toast::anchored_toasts(cx);
         let draft_host = cx.new(|_| crate::shell::composer_draft_host::ComposerDraftHost::new());
@@ -372,6 +372,7 @@ impl AppSidebarLayout {
             confirm_dialog,
             client_settings: ClientSettings::default(),
             client_settings_path,
+            _client_settings_watch: client_settings_watch,
             bounds_persist,
             right_panel_store: RightPanelStore::default(),
             _appearance: appearance,
@@ -1287,7 +1288,10 @@ impl AppSidebarLayout {
         .detach();
     }
 
-    fn watch_client_settings(path: std::path::PathBuf, cx: &mut Context<Self>) {
+    fn watch_client_settings(
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Task<()> {
         cx.spawn(async move |this, cx| {
             let initial_path = path.clone();
             let initial = cx
@@ -1309,26 +1313,36 @@ impl AppSidebarLayout {
             let Some(watcher) = watcher else {
                 return;
             };
-            while turin_runtime::support::file_watch::next_debounced(
-                &mut rx,
-                turin_runtime::support::file_watch::WATCH_DEBOUNCE,
-            )
-            .await
-            .is_some()
-            {
+            while rx.recv().await.is_some() {
+                // This future runs on GPUI, so its debounce timer must use
+                // GPUI's executor rather than Tokio's ambient reactor.
+                loop {
+                    let event = rx.recv();
+                    let quiet = cx
+                        .background_executor()
+                        .timer(turin_runtime::support::file_watch::WATCH_DEBOUNCE);
+                    futures::pin_mut!(event, quiet);
+                    match futures::future::select(event, quiet).await {
+                        futures::future::Either::Left((Some(()), _)) => continue,
+                        _ => break,
+                    }
+                }
                 let path = path.clone();
                 let settings = cx
                     .background_executor()
                     .spawn(async move { read_client_settings(&path).ok().flatten() })
                     .await;
                 if let Some(settings) = settings {
-                    this.update(cx, |this, cx| this.apply_client_settings(settings, cx))
-                        .ok();
+                    if this
+                        .update(cx, |this, cx| this.apply_client_settings(settings, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
             drop(watcher);
         })
-        .detach();
     }
 }
 

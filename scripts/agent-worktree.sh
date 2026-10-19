@@ -5,12 +5,17 @@ set -euo pipefail
 task="${1:?task id required}"
 base="${2:-main}"
 root="$(git rev-parse --show-toplevel)"
-wt="$(dirname "$root")/turin-wt/$task"
+# Worktrees, targets and the upstream checkout live next to each other in the
+# workspace dir: the parent of the resolved `upstream` checkout (the repo itself
+# may live elsewhere, e.g. ~/turin with an absolute `upstream` symlink).
+upstream="$(cd "$root/upstream" && pwd -P)"
+ws="$(dirname "$upstream")"
+wt="$ws/turin-wt/$task"
 if [ ! -d "$wt" ]; then
   git -C "$root" worktree add -q -b "task/$task" "$wt" "$base"
-  ln -sfn "$(cd "$root/../upstream" && pwd)" "$wt/upstream"
+  ln -sfn "$upstream" "$wt/upstream"
   # Build output lives under ../turin-targets.noindex (Spotlight skips it).
-  mkdir -p "$(dirname "$root")/turin-targets.noindex/$task"
-  ln -sfn "$(dirname "$root")/turin-targets.noindex/$task" "$wt/target"
+  mkdir -p "$ws/turin-targets.noindex/$task"
+  ln -sfn "$ws/turin-targets.noindex/$task" "$wt/target"
 fi
 echo "$wt"

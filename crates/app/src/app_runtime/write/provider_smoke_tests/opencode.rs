@@ -13,12 +13,14 @@ use super::{
 async fn opencode_smoke() -> Smoke {
     let cli = tempfile::tempdir().expect("cli dir");
     let binary = install_script(cli.path(), "fake_opencode.py", "opencode");
+    // The folded form the settings service stores: the enabled flag lives on the
+    // envelope only (`fold_provider_instance_enabled_flags` strips `config.enabled`).
     let settings = json!({
         "providerInstances": {
             "opencode": {
                 "driver": "opencode",
                 "enabled": true,
-                "config": { "enabled": true, "binaryPath": binary.display().to_string() }
+                "config": { "binaryPath": binary.display().to_string() }
             }
         }
     });

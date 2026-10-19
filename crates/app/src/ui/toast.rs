@@ -16,6 +16,7 @@
 //! Hosts mount [`toasts`] and [`anchored_toasts`] over the window root and
 //! call [`init`] once at startup.
 
+use crate::theme::color::solid_over;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -684,7 +685,7 @@ fn corner_orb(
         .rounded_full()
         .border_1()
         .border_color(with_alpha(theme.border, 0.6))
-        .bg(with_alpha(theme.popover, 0.92))
+        .bg(solid_over(theme.popover, 0.92, theme.background))
         .text_color(theme.muted_foreground)
         .shadow(tokens::shadow_sm(0.1))
         .cursor(CursorStyle::PointingHand)

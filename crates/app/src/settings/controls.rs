@@ -4,6 +4,7 @@
 //! Everything is stateless: the owning view keeps the open menu in a
 //! [`MenuState`] and the controls report intent through closures.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -381,7 +382,7 @@ pub fn popup_list(
                 .text_size(TEXT_SM.size)
                 .line_height(TEXT_SM.line_height)
                 .when(item.selected, |this| {
-                    this.bg(with_alpha(theme.foreground, 0.08))
+                    this.bg(solid_over(theme.foreground, 0.08, theme.background))
                 })
                 .when(item.disabled, |this| this.opacity(0.64))
                 .when(!item.disabled, |this| {

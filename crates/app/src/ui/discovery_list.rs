@@ -5,6 +5,7 @@
 //! font-medium`, description `text-xs text-muted-foreground`, hover
 //! `bg-accent/40`.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -132,7 +133,7 @@ impl RenderOnce for DiscoveryListRow {
             })
             .when(self.disabled, |this| this.opacity(0.64))
             .when(!self.disabled, |this| {
-                this.hover(|style| style.bg(with_alpha(theme.accent, 0.4)))
+                this.hover(|style| style.bg(solid_over(theme.accent, 0.4, theme.background)))
             })
             .child(self.icon)
             .child(

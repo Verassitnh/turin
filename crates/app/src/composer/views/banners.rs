@@ -6,6 +6,7 @@
 //! Port of upstream/apps/web/src/components/chat/ComposerPlanFollowUpBanner.tsx ("Plan ready" row).
 //! Port of upstream/apps/web/src/components/chat/QueuedRunsControl.tsx.
 
+use crate::theme::color::solid_over;
 use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -688,8 +689,10 @@ impl ChatComposer {
                 .justify_center()
                 .rounded(crate::theme::tokens::RADIUS_MD)
                 .cursor(CursorStyle::PointingHand)
-                .when(open, |this| this.bg(with_alpha(theme.foreground, 0.06)))
-                .hover(|style| style.bg(with_alpha(theme.foreground, 0.06)))
+                .when(open, |this| {
+                    this.bg(solid_over(theme.foreground, 0.06, theme.background))
+                })
+                .hover(|style| style.bg(solid_over(theme.foreground, 0.06, theme.background)))
                 .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
                 .on_click(
                     cx.listener(|this, _, _, cx| this.set_layer(Some(Layer::ContextMeter), cx)),
@@ -813,7 +816,7 @@ impl ChatComposer {
                         .w_full()
                         .overflow_hidden()
                         .rounded_full()
-                        .bg(with_alpha(theme.muted, 0.6))
+                        .bg(solid_over(theme.muted, 0.6, theme.background))
                         .child(
                             div()
                                 .h_full()

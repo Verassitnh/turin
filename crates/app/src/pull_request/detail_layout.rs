@@ -5,6 +5,7 @@
 //! The `@container/pr-header` queries (`@max-[30rem]/pr-header:hidden` and friends) are decided by
 //! the caller from the width of the panel; here they are plain flags.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::{
@@ -196,7 +197,7 @@ pub fn tab_bar(
                 .gap(px(2.))
                 .p(px(2.))
                 .rounded(RADIUS_LG)
-                .bg(alpha(theme.input, 0.4))
+                .bg(solid_over(theme.input, 0.4, theme.background))
                 .children(toggles),
         )
         .children(trailing)
@@ -333,7 +334,11 @@ pub fn ghost_bar(cx: &App) -> Div {
         .flex_shrink_0()
         .h(rems(0.75))
         .rounded(px(4.))
-        .bg(alpha(cx.app_theme().muted_foreground, 0.15))
+        .bg(solid_over(
+            cx.app_theme().muted_foreground,
+            0.15,
+            cx.app_theme().background,
+        ))
 }
 
 /// A vertically scrolling box that is only as tall as its content, up to `max_height`

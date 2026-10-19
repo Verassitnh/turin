@@ -2,6 +2,7 @@
 //! file headers and diff rows as `@pierre/diffs` lays them out
 //! (`dist/style.js`), with the app's overrides from `StyledDiffCodeView.tsx`.
 
+use crate::theme::color::solid_over;
 use std::ops::Range;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -805,7 +806,7 @@ impl DiffPanel {
                         .rounded(px(8.))
                         .border_1()
                         .border_color(with_alpha(theme.border, 0.7))
-                        .bg(with_alpha(theme.background, 0.7))
+                        .bg(solid_over(theme.background, 0.7, theme.background))
                         .p_3()
                         .font_family(theme.fonts.mono.clone())
                         .text_size(TEXT_2XS.size)
@@ -852,7 +853,7 @@ impl DiffPanel {
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(with_alpha(theme.border, 0.7))
-                    .bg(with_alpha(theme.muted, 0.4))
+                    .bg(solid_over(theme.muted, 0.4, theme.background))
                     .px_3()
                     .py(rems(0.375))
                     .text_size(TEXT_2XS.size)
@@ -1819,7 +1820,7 @@ impl DiffPanel {
             .gap(rems(0.625))
             .border_l(px(2.))
             .border_color(with_alpha(theme.primary, 0.55))
-            .bg(with_alpha(theme.primary, 0.045))
+            .bg(solid_over(theme.primary, 0.045, theme.background))
             .px_3()
             .py(rems(0.625))
             .child(

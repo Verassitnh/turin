@@ -12,6 +12,7 @@
 //! `focus-visible` outline (GPUI chips are not focusable), `useRender`'s
 //! `render` prop (wrap the chip instead) and `transition-colors`.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -125,8 +126,8 @@ pub fn context_chip_colors(
         None => ContextChipColors {
             border: with_alpha(theme.border, 0.7).into(),
             border_hover: with_alpha(theme.border, 0.7).into(),
-            background: with_alpha(theme.accent, 0.4).into(),
-            background_hover: with_alpha(theme.accent, 0.4).into(),
+            background: solid_over(theme.accent, 0.4, theme.background),
+            background_hover: solid_over(theme.accent, 0.4, theme.background),
             foreground: theme.foreground,
             dashed: false,
         },
@@ -136,8 +137,8 @@ pub fn context_chip_colors(
         Some(accent) => ContextChipColors {
             border: color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into(),
             border_hover: color_mix(MixSpace::Oklab, accent, 0.48, theme.border).into(),
-            background: with_alpha(accent, 0.11).into(),
-            background_hover: with_alpha(accent, 0.17).into(),
+            background: solid_over(accent, 0.11, theme.background),
+            background_hover: solid_over(accent, 0.17, theme.background),
             foreground: color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into(),
             dashed: false,
         },
@@ -289,8 +290,8 @@ impl RenderOnce for ContextChip {
             colors = ContextChipColors {
                 border: color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into(),
                 border_hover: color_mix(MixSpace::Oklab, accent, 0.48, theme.border).into(),
-                background: with_alpha(accent, 0.11).into(),
-                background_hover: with_alpha(accent, 0.17).into(),
+                background: solid_over(accent, 0.11, theme.background),
+                background_hover: solid_over(accent, 0.17, theme.background),
                 foreground: color_mix(MixSpace::Oklab, accent, 0.22, theme.foreground).into(),
                 dashed: false,
             };
@@ -471,7 +472,7 @@ mod tests {
     fn hover_deepens_a_kind_tint() {
         let theme = theme(ThemeAppearance::Dark);
         let colors = context_chip_colors(ContextChipKind::Skill, None, &theme);
-        assert!(colors.background_hover.a > colors.background.a);
+        assert_ne!(colors.background_hover, colors.background);
         assert_ne!(colors.border, colors.border_hover);
     }
 }

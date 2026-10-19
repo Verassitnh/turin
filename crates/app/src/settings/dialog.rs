@@ -5,6 +5,7 @@
 //! Port of upstream/apps/web/src/components/settings/AddUsageLimitSourceDialog.tsx.
 //! Port of upstream/apps/web/src/components/settings/SecretInput.tsx (write-only secret fields).
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::{
@@ -171,7 +172,7 @@ pub fn dialog_footer(theme: &AppTheme, children: Vec<AnyElement>) -> AnyElement 
         .py_4()
         .border_t_1()
         .border_color(theme.border)
-        .bg(with_alpha(theme.muted, 0.72))
+        .bg(solid_over(theme.muted, 0.72, theme.background))
         .rounded_b(px(17.))
         .children(children)
         .into_any_element()

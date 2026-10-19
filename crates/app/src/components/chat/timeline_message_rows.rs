@@ -8,6 +8,7 @@
 //!
 //! Port of upstream/apps/web/src/components/chat/ProposedPlanCard.tsx.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -92,7 +93,7 @@ fn status_pill(status: &str, destructive: bool, cx: &RowCx) -> AnyElement {
         .when(destructive, |this| {
             this.font_weight(FontWeight::MEDIUM)
                 .border_color(with_alpha(theme.destructive, 0.25))
-                .bg(with_alpha(theme.destructive, 0.08))
+                .bg(solid_over(theme.destructive, 0.08, theme.background))
                 .text_color(theme.destructive)
         })
         .when(!destructive, |this| {
@@ -166,7 +167,7 @@ pub fn user_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
                 .rounded(RADIUS_LG)
                 .border_1()
                 .border_color(with_alpha(theme.border, 0.8))
-                .bg(with_alpha(theme.background, 0.7))
+                .bg(solid_over(theme.background, 0.7, theme.background))
                 .cursor(gpui_kit::CursorStyle::PointingHand)
                 .on_click(move |_, _, cx| {
                     let mut images = gallery.clone();

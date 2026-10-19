@@ -14,7 +14,7 @@
 use gpui_kit::{Hsla, Rgba};
 
 use super::appearance_contrast::AppearanceContrast;
-use super::color::{MixSpace, TRANSPARENT, color, color_mix, hex, with_alpha};
+use super::color::{MixSpace, TRANSPARENT, color, color_mix, hex, over, with_alpha};
 use super::theme_palettes::ThemeColors;
 use super::tokens::tw;
 
@@ -171,8 +171,11 @@ impl SidebarScope {
         let line =
             |value: Rgba, foreground: Rgba| -> Hsla { contrast.border(value, foreground).into() };
         let sidebar_foreground = fg(raw.sidebar_foreground, raw.sidebar);
-        let border = line(raw.border, raw.foreground);
-        let sidebar_border = line(raw.sidebar_border, raw.sidebar_foreground);
+        let border: Hsla = over(line(raw.border, raw.foreground), raw.background);
+        let sidebar_border: Hsla = over(
+            line(raw.sidebar_border, raw.sidebar_foreground),
+            raw.sidebar,
+        );
         let container_border = if standard_look {
             // `border-border` inside the scope.
             border
@@ -180,13 +183,15 @@ impl SidebarScope {
             // T3 Chat keeps its pink divider in dark mode.
             sidebar_border
         } else {
-            color_mix(
-                MixSpace::Srgb,
-                sidebar_foreground,
-                if dark { 0.08 } else { 0.10 },
-                TRANSPARENT,
+            over(
+                color_mix(
+                    MixSpace::Srgb,
+                    sidebar_foreground,
+                    if dark { 0.08 } else { 0.10 },
+                    TRANSPARENT,
+                ),
+                raw.sidebar,
             )
-            .into()
         };
         Self {
             background: raw.background.into(),
@@ -198,14 +203,14 @@ impl SidebarScope {
             muted: raw.muted.into(),
             muted_foreground: fg(raw.muted_foreground, raw.background),
             border,
-            input: line(raw.input, raw.foreground),
+            input: over(line(raw.input, raw.foreground), raw.background),
             sidebar: raw.sidebar.into(),
             sidebar_foreground,
             sidebar_muted_foreground: fg(raw.sidebar_muted_foreground, raw.sidebar),
             sidebar_control_surface: raw.sidebar_control_surface.into(),
-            sidebar_row_hover: raw.sidebar_row_hover.into(),
-            sidebar_row_active: raw.sidebar_row_active.into(),
-            sidebar_row_selected: raw.sidebar_row_selected.into(),
+            sidebar_row_hover: over(raw.sidebar_row_hover, raw.sidebar),
+            sidebar_row_active: over(raw.sidebar_row_active, raw.sidebar),
+            sidebar_row_selected: over(raw.sidebar_row_selected, raw.sidebar),
             sidebar_border,
             container_border,
         }
@@ -230,7 +235,7 @@ mod tests {
         assert_eq!(to_hex(scope.muted_foreground), "#a3a3a3");
         assert_eq!(to_hex(scope.foreground), "#f1f3f7");
         assert_eq!(to_hex(scope.accent), "#191a1d");
-        assert_eq!(to_hex(scope.border), "#ffffff14");
+        assert_eq!(to_hex(scope.border), "#141414");
     }
 
     #[test]
@@ -248,6 +253,6 @@ mod tests {
             to_hex(scope.muted_foreground),
             to_hex(color(&palette.muted_foreground))
         );
-        assert!((scope.container_border.a - 0.10).abs() < 0.01);
+        assert!((scope.container_border.a - 1.0).abs() < f32::EPSILON);
     }
 }

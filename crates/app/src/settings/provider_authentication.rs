@@ -1,5 +1,6 @@
 //! Port of upstream/apps/web/src/components/settings/ProviderAuthenticationSection.tsx
 
+use crate::theme::color::solid_over;
 use std::collections::HashMap;
 
 use gpui_kit::{
@@ -520,7 +521,7 @@ impl SettingsView {
                             .rounded(RADIUS_MD)
                             .border_1()
                             .border_color(with_alpha(theme.border, 0.6))
-                            .bg(with_alpha(theme.muted, 0.35))
+                            .bg(solid_over(theme.muted, 0.35, theme.background))
                             .p_2()
                             .font_family(theme.fonts.mono.clone())
                             .text_size(TEXT_XS.size)

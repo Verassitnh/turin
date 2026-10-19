@@ -8,6 +8,7 @@
 //!
 //! Not ported: the virtualized list and locale filtering.
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div, px,
@@ -16,7 +17,6 @@ use gpui_kit::{
 
 use super::combobox::{ComboboxSize, combobox_padding};
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_LG, RADIUS_SM, TEXT_SM, TEXT_XS};
 
 #[derive(IntoElement)]
@@ -74,7 +74,7 @@ impl RenderOnce for AutocompleteItem {
             row = row.bg(theme.accent).text_color(theme.accent_foreground);
         } else if self.selected {
             row = row
-                .bg(with_alpha(theme.accent, 0.5))
+                .bg(solid_over(theme.accent, 0.5, theme.background))
                 .text_color(theme.foreground);
         } else {
             row = row.text_color(theme.foreground);

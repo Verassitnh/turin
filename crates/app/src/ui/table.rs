@@ -4,6 +4,7 @@
 //! `p-2`, hover `bg-muted/50`, selected `bg-muted`. The last body row drops
 //! its border (`last`).
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
@@ -11,7 +12,6 @@ use gpui_kit::{
 };
 
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::TEXT_XS;
 
 #[derive(IntoElement)]
@@ -111,7 +111,7 @@ impl RenderOnce for TableRow {
                 this.border_b_1().border_color(theme.border)
             })
             .when_some(bg, |this, bg| this.bg(bg))
-            .hover(|style| style.bg(with_alpha(theme.muted, 0.5)))
+            .hover(|style| style.bg(solid_over(theme.muted, 0.5, theme.background)))
             .children(self.children)
     }
 }

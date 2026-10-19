@@ -14,6 +14,7 @@
 //! Port of upstream/apps/web/src/components/pullRequest/PullRequestReactions.tsx.
 //! Port of upstream/apps/web/src/components/pullRequest/PullRequestMarkdown.tsx.
 
+use crate::theme::color::solid_over;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -532,7 +533,9 @@ impl RenderOnce for ReactionBar {
                                 .rounded(RADIUS_MD)
                                 .text_size(TEXT_BASE.size)
                                 .cursor_pointer()
-                                .when(reacted, |this| this.bg(with_alpha(theme.primary, 0.1)))
+                                .when(reacted, |this| {
+                                    this.bg(solid_over(theme.primary, 0.1, theme.background))
+                                })
                                 .hover(move |style| style.bg(hover))
                                 .tooltip(move |window, cx| {
                                     Tooltip::new(pull_request_reaction_name(content))

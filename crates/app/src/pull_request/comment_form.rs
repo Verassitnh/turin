@@ -11,6 +11,7 @@
 //! Port of upstream/apps/web/src/components/pullRequest/PullRequestComposer.tsx.
 //! Port of upstream/apps/web/src/components/pullRequest/PullRequestCommentForm.tsx.
 
+use crate::theme::color::solid_over;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -44,7 +45,11 @@ pub fn segmented_group(cx: &App) -> Div {
         .gap(px(2.))
         .p(px(2.))
         .rounded(RADIUS_LG)
-        .bg(with_alpha(cx.app_theme().input, 0.4))
+        .bg(solid_over(
+            cx.app_theme().input,
+            0.4,
+            cx.app_theme().background,
+        ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -630,7 +635,7 @@ impl Render for PullRequestComposer {
                                 .gap(px(2.))
                                 .p(px(2.))
                                 .rounded(RADIUS_LG)
-                                .bg(with_alpha(theme.input, 0.4))
+                                .bg(solid_over(theme.input, 0.4, theme.background))
                                 .child(toggle(
                                     "composer-comment",
                                     "Comment".into(),

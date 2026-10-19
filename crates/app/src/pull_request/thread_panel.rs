@@ -7,6 +7,7 @@
 //! (the row's `…` menu opens from its button), the link dialog (`LinkPullRequestDialog`, opened
 //! through [`ThreadPullRequestsPanelEvent::OpenLinkDialog`]) and the project lookup for actions.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -404,7 +405,7 @@ fn link_row(
         .pr_1()
         .pl(indent)
         .cursor(CursorStyle::PointingHand)
-        .hover(|style| style.bg(with_alpha(theme.accent, 0.6)))
+        .hover(|style| style.bg(solid_over(theme.accent, 0.6, theme.background)))
         .when(line.depth > 0, |this| {
             this.child(
                 div()
@@ -412,7 +413,7 @@ fn link_row(
                     .ml(rems(-0.5))
                     .h_6()
                     .w(px(1.))
-                    .bg(with_alpha(theme.border, 0.7)),
+                    .bg(solid_over(theme.border, 0.7, theme.background)),
             )
         })
         .child(glyph)

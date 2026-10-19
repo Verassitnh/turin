@@ -12,6 +12,7 @@
 //! Port of upstream/apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx.
 //! Port of upstream/apps/web/src/components/chat/ComposerPendingApprovalActions.tsx.
 
+use crate::theme::color::solid_over;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -766,12 +767,12 @@ impl RenderOnce for ComposerPendingUserInputBanner {
                     .px(rems(0.625))
                     .py(rems(0.5))
                     .when(is_selected, |this| {
-                        this.bg(with_alpha(theme.muted, 0.55))
+                        this.bg(solid_over(theme.muted, 0.55, theme.background))
                             .text_color(theme.foreground)
                     })
                     .when(!is_selected, |this| {
                         this.text_color(with_alpha(theme.foreground, 0.85))
-                            .hover(|s| s.bg(with_alpha(theme.muted, 0.3)))
+                            .hover(|s| s.bg(solid_over(theme.muted, 0.3, theme.background)))
                     })
                     .when(disabled, |this| this.opacity(0.5))
                     .when(!disabled, |this| this.cursor_pointer())

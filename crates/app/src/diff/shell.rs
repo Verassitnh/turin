@@ -4,6 +4,7 @@
 //!
 //! Port of upstream/apps/web/src/components/diffs/DiffFileLoadingBoundary.tsx (placeholders).
 
+use crate::theme::color::solid_over;
 use gpui_kit::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Styled as _,
     div, px, relative, rems,
@@ -27,7 +28,7 @@ fn skeleton(width: gpui_kit::Length, height: Pixels, pill: bool, cx: &App) -> gp
         .flex_shrink_0()
         .w(width)
         .h(height)
-        .bg(with_alpha(theme.muted_foreground, 0.15))
+        .bg(solid_over(theme.muted_foreground, 0.15, theme.background))
         .when_pill(pill)
 }
 
@@ -134,9 +135,18 @@ pub fn diff_panel_loading_state(cx: &App) -> AnyElement {
                 .gap_2()
                 .pl_2()
                 .pr(px(12.))
-                .child(div().h(px(1.)).flex_1().bg(with_alpha(theme.border, 0.4)))
+                .child(
+                    div()
+                        .h(px(1.))
+                        .flex_1()
+                        .bg(solid_over(theme.border, 0.4, theme.background)),
+                )
                 .child(skeleton(rems(6.).into(), px(10.), true, cx))
-                .child(div().h(px(1.)).flex_1().bg(with_alpha(theme.border, 0.4))),
+                .child(div().h(px(1.)).flex_1().bg(solid_over(
+                    theme.border,
+                    0.4,
+                    theme.background,
+                ))),
         )
         .child(
             div()

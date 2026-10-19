@@ -3,6 +3,7 @@
 //! pushes the checkout to it. Turin ships GitHub only, so the provider step
 //! is one card (or "Setup Required" when `gh` is not ready).
 
+use crate::theme::color::solid_over;
 use gpui_kit::AppContext as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -390,7 +391,7 @@ impl Render for PublishForm {
                                             .gap(rems(0.375))
                                             .border_r_1()
                                             .border_color(theme.input)
-                                            .bg(with_alpha(theme.muted, 0.5))
+                                            .bg(solid_over(theme.muted, 0.5, theme.background))
                                             .px(rems(0.625))
                                             .font_family(theme.fonts.mono.clone())
                                             .text_size(TEXT_XS.size)
@@ -542,7 +543,7 @@ impl Render for PublishForm {
                                 .rounded(RADIUS_MD)
                                 .border_1()
                                 .border_color(theme.input)
-                                .bg(with_alpha(theme.muted, 0.4))
+                                .bg(solid_over(theme.muted, 0.4, theme.background))
                                 .px_3()
                                 .py_2()
                                 .text_size(TEXT_XS.size)
@@ -559,7 +560,7 @@ impl Render for PublishForm {
                             .rounded(RADIUS_MD)
                             .border_1()
                             .border_color(with_alpha(theme.destructive, 0.4))
-                            .bg(with_alpha(theme.destructive, 0.1))
+                            .bg(solid_over(theme.destructive, 0.1, theme.background))
                             .px_3()
                             .py_2()
                             .text_size(TEXT_XS.size)
@@ -597,7 +598,7 @@ impl Render for PublishForm {
                                         .items_center()
                                         .justify_center()
                                         .rounded_full()
-                                        .bg(with_alpha(theme.success, 0.15))
+                                        .bg(solid_over(theme.success, 0.15, theme.background))
                                         .child(Icon::new(IconName::Check).color(theme.success)),
                                 )
                                 .child(
@@ -633,7 +634,7 @@ impl Render for PublishForm {
                                 .rounded(RADIUS_LG)
                                 .border_1()
                                 .border_color(theme.input)
-                                .bg(with_alpha(theme.muted, 0.4))
+                                .bg(solid_over(theme.muted, 0.4, theme.background))
                                 .px_3()
                                 .py_2()
                                 .child(Icon::new(IconName::Github).size(rems(0.875)).color(theme.muted_foreground))

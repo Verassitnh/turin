@@ -9,6 +9,7 @@
 //! (`PROJECT_FILE_BACKED_SETTINGS`, cut with `t3ProjectFile`); the environment
 //! machine icon in the section heading (one local environment).
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement as _, ParentElement as _,
@@ -286,7 +287,7 @@ impl SettingsView {
                             .py_1()
                             .text_size(TEXT_SM.size)
                             .when(layer.effective, |this| {
-                                this.bg(with_alpha(theme.foreground, 0.06))
+                                this.bg(solid_over(theme.foreground, 0.06, theme.background))
                             })
                             .child(
                                 div()

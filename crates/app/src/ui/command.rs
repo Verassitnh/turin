@@ -7,6 +7,7 @@
 //! belongs to the palette; Base UI's Autocomplete has no counterpart here.
 //! GPUI has no backdrop blur, so the glass layers are translucent fills only.
 
+use crate::theme::color::solid_over;
 use gpui_kit::{
     AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, px, rems,
@@ -19,25 +20,19 @@ use crate::theme::tokens::{
 };
 use crate::theme::{ActiveAppTheme, AppTheme};
 
-/// `dialog-backdrop`: `--background` at 60% (64% in dark), blurred 4px.
+/// Dialog scrim: a flat dark overlay (no blur, no glass).
 pub fn dialog_backdrop(theme: &AppTheme) -> Hsla {
-    with_alpha(theme.background, if theme.is_dark() { 0.64 } else { 0.60 }).into()
+    with_alpha(tw::BLACK, if theme.is_dark() { 0.6 } else { 0.4 }).into()
 }
 
-/// `dialog-glass`: `--background` at `--glass-opacity` (80%) over a 12px
-/// backdrop blur. GPUI has no blur, so unblurred content behind an 80% fill
-/// stays legible and fights the text; the fill is raised to 94% instead.
+/// Opaque popup surface (user request: no translucent surfaces).
 pub fn dialog_glass_background(theme: &AppTheme) -> Hsla {
-    with_alpha(theme.background, 0.94).into()
+    theme.background
 }
 
 /// `dialog-glass` border: `--contrast-foreground` at 10%, white at 8% in dark.
 pub fn dialog_glass_border(theme: &AppTheme) -> Hsla {
-    if theme.is_dark() {
-        with_alpha(tw::WHITE, 0.08).into()
-    } else {
-        with_alpha(theme.foreground, 0.10).into()
-    }
+    theme.border
 }
 
 /// `CommandDialogPopup`: `dialog-glass rounded-2xl border`, `max-w-xl`
@@ -198,7 +193,7 @@ pub fn command_footer(cx: &App) -> Div {
         .gap_2()
         .px(COMMAND_CONTENT_INSET)
         .py(rems(0.625))
-        .bg(with_alpha(theme.foreground, 0.025))
+        .bg(solid_over(theme.foreground, 0.025, theme.background))
         .font_family(theme.fonts.sans.clone())
         .font_weight(FontWeight::MEDIUM)
         .text_size(TEXT_SM.size)
@@ -222,7 +217,7 @@ pub fn command_footer_hint(keys: Vec<FooterKey>, label: impl Into<SharedString>,
                 .min_w(rems(1.25))
                 .px_1()
                 .rounded(tokens::RADIUS_DEFAULT)
-                .bg(with_alpha(theme.foreground, 0.08))
+                .bg(solid_over(theme.foreground, 0.08, theme.background))
                 .text_size(TEXT_XS.size)
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.foreground)

@@ -17,6 +17,7 @@
 //!
 //! Port of upstream/apps/web/src/hooks/useResizeDrag.ts (drag bookkeeping).
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyView, App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement,
@@ -85,7 +86,6 @@ use crate::state::right_panel_layout::{
 };
 use crate::state::right_panel_store::RightPanelStore;
 use crate::state::store::ClientStoreGlobal;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{WORKSPACE_CONTROLS_INSET, WORKSPACE_TOPBAR_HEIGHT};
 use crate::theme::{self, ActiveAppTheme};
 use crate::ui::Tooltip;
@@ -1622,7 +1622,7 @@ impl Render for AppSidebarLayout {
                     .left(px(4.))
                     .w(px(1.))
                     .when(dragging_panel, |this| {
-                        this.bg(with_alpha(theme.primary, 0.6))
+                        this.bg(solid_over(theme.primary, 0.6, theme.background))
                     })
                     .when(!dragging_panel, |this| {
                         this.group_hover("right-panel-resize", |style| style.bg(theme.border))

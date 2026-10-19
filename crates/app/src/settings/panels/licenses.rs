@@ -3,6 +3,7 @@
 //! the view model (T22 feeds the cargo-generated manifest) instead of an HTTP
 //! fetch, so the loading / retry states are not ported.
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
@@ -175,7 +176,7 @@ impl SettingsView {
                 .flex()
                 .min_h(rems(2.25))
                 .items_center()
-                .hover(|style| style.bg(with_alpha(theme.muted, 0.35)))
+                .hover(|style| style.bg(solid_over(theme.muted, 0.35, theme.background)))
                 .child(
                     div()
                         .id(SharedString::from(format!("license-{key}")))

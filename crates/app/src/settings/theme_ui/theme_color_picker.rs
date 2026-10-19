@@ -9,6 +9,7 @@
 //! transparency. [`ThemePickerModel`] holds that logic without a window; the views
 //! below only draw it.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::component::Selectable;
@@ -682,7 +683,7 @@ impl Render for ThemeColorField {
             .py(px(6.))
             .rounded(tokens::RADIUS_LG)
             .when(selected, |this| {
-                this.bg(with_alpha(theme.accent, 0.6))
+                this.bg(solid_over(theme.accent, 0.6, theme.background))
                     .border_1()
                     .border_color(theme.ring)
             })

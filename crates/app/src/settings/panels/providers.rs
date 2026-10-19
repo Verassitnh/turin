@@ -13,6 +13,7 @@
 //! Port of upstream/apps/web/src/components/settings/ProviderInstanceCard.tsx.
 //! Port of upstream/apps/web/src/components/settings/UsageProviderSettings.tsx.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -476,7 +477,7 @@ impl SettingsView {
                 .cursor(CursorStyle::PointingHand)
                 .hover(|style| {
                     style
-                        .bg(with_alpha(theme.muted, 0.25))
+                        .bg(solid_over(theme.muted, 0.25, theme.background))
                         .text_color(theme.foreground)
                 })
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -533,7 +534,7 @@ impl SettingsView {
                             .min_h_0()
                             .border_r_1()
                             .border_color(with_alpha(theme.border, 0.6))
-                            .bg(with_alpha(theme.muted, 0.1))
+                            .bg(solid_over(theme.muted, 0.1, theme.background))
                             .child(
                                 div()
                                     .flex_1()
@@ -778,9 +779,11 @@ impl SettingsView {
                 this.border_t_1()
                     .border_color(with_alpha(theme.border, 0.5))
             })
-            .when(selected, |this| this.bg(with_alpha(theme.muted, 0.45)))
+            .when(selected, |this| {
+                this.bg(solid_over(theme.muted, 0.45, theme.background))
+            })
             .when(!selected, |this| {
-                this.hover(|style| style.bg(with_alpha(theme.muted, 0.25)))
+                this.hover(|style| style.bg(solid_over(theme.muted, 0.25, theme.background)))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.panels.providers.selected = Some(select_id.clone());
@@ -959,7 +962,7 @@ impl SettingsView {
                         .py_1()
                         .text_size(TEXT_SM.size)
                         .when(effective, |this| {
-                            this.bg(with_alpha(theme.foreground, 0.06))
+                            this.bg(solid_over(theme.foreground, 0.06, theme.background))
                         })
                         .child(
                             div()
@@ -1539,7 +1542,7 @@ impl SettingsView {
                         .rounded_md()
                         .border_1()
                         .border_color(with_alpha(theme.border, 0.7))
-                        .bg(with_alpha(theme.muted, 0.4))
+                        .bg(solid_over(theme.muted, 0.4, theme.background))
                         .py(px(2.))
                         .pr(px(2.))
                         .pl_2()
@@ -2366,7 +2369,7 @@ impl SettingsView {
                     .justify_center()
                     .rounded(RADIUS_MD)
                     .cursor(CursorStyle::PointingHand)
-                    .hover(|style| style.bg(with_alpha(theme.accent, 0.5)))
+                    .hover(|style| style.bg(solid_over(theme.accent, 0.5, theme.background)))
                     .tooltip(move |window, cx| tooltip.clone().build(window, cx))
                     .child(
                         Icon::new(IconName::Star)
@@ -2519,7 +2522,7 @@ impl SettingsView {
                     .gap_2()
                     .rounded_md()
                     .px_2()
-                    .hover(|style| style.bg(with_alpha(theme.muted, 0.3)))
+                    .hover(|style| style.bg(solid_over(theme.muted, 0.3, theme.background)))
                     .when(hidden_now, |this| this.opacity(0.5))
                     .child(div().w(rems(1.5)).flex_shrink_0().child(star))
                     .child(
@@ -2989,7 +2992,7 @@ impl SettingsView {
                 .justify_center()
                 .cursor(CursorStyle::PointingHand)
                 .text_color(theme.muted_foreground)
-                .hover(|style| style.bg(with_alpha(theme.accent, 0.5)))
+                .hover(|style| style.bg(solid_over(theme.accent, 0.5, theme.background)))
                 .child(Icon::new(icon).size(rems(1.)).color(theme.muted_foreground))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let next = (value as i64 + delta).max(min as i64) as u64;

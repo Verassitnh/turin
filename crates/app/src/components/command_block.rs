@@ -7,6 +7,7 @@
 // the rest as the composer, thread details and settings tasks land.
 #![allow(dead_code)]
 
+use crate::theme::color::solid_over;
 use std::time::Duration;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -16,7 +17,6 @@ use gpui_kit::{
 };
 
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, TEXT_BASE, TEXT_SM};
 use crate::ui::icon::IconName;
 use crate::ui::{Button, ButtonSize, ButtonVariant, Tooltip};
@@ -76,7 +76,7 @@ impl Render for CommandBlock {
             .rounded(RADIUS_LG)
             .border_1()
             .border_color(theme.border)
-            .bg(with_alpha(theme.muted, 0.5))
+            .bg(solid_over(theme.muted, 0.5, theme.background))
             .font_family(theme.fonts.mono.clone())
             .font_weight(FontWeight::NORMAL)
             .map(|this| {

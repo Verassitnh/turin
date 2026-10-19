@@ -425,6 +425,15 @@ impl ChatView {
             panel.update(cx, |panel, cx| panel.reload(snapshot, cx));
             Some(panel)
         });
+        let header_project = live_target.as_ref().and_then(|live| {
+            let thread_id = live.thread.as_ref()?;
+            let state = live.client.read(cx).state();
+            state
+                .shell_view
+                .as_ref()?
+                .project_of_thread(thread_id)
+                .cloned()
+        });
         let details_card = demo_card.map(|(_, _, card)| card).or_else(|| {
             if !self.thread_details_open {
                 return None;
@@ -458,6 +467,7 @@ impl ChatView {
                     .bg(theme.background)
                     .children(self.thread.clone().map(|(project, title)| ChatHeader {
                         project,
+                        project_record: header_project.clone(),
                         title,
                         right_panel_open: self.right_panel_open,
                     }))

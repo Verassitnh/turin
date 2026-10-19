@@ -8,16 +8,25 @@ use gpui_kit::{
     App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, rems,
 };
 
+use std::sync::Arc;
+
+use crate::components::project_favicon::ProjectFavicon;
 use crate::components::project_monogram::ProjectMonogram;
+use crate::project_icon_colors::project_icon_color;
+use crate::project_identity::derive_project_identity;
+use crate::state::models::EnvironmentProject;
+use crate::theme::ActiveAppTheme as _;
 use crate::components::workspace_breadcrumb::{
     WorkspaceBreadcrumb, WorkspaceBreadcrumbItem, WorkspaceBreadcrumbSeparator,
     workspace_breadcrumb_text,
 };
-use crate::theme::color::hex;
 
 #[derive(IntoElement)]
 pub struct ChatHeader {
     pub project: SharedString,
+    /// The thread's project, for its configured icon or favicon. Without it
+    /// (fixture demos) the crumb shows the monogram generated from the name.
+    pub project_record: Option<Arc<EnvironmentProject>>,
     pub title: SharedString,
     /// `pr-10` when the right panel owns the titlebar, else `pr-24` to clear
     /// the fixed layout controls.
@@ -25,7 +34,21 @@ pub struct ChatHeader {
 }
 
 impl RenderOnce for ChatHeader {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let icon = match &self.project_record {
+            Some(project) => ProjectFavicon::new(project)
+                .size(rems(0.875))
+                .into_any_element(),
+            None => {
+                let identity = derive_project_identity(&self.project);
+                ProjectMonogram::new(
+                    identity.monogram,
+                    project_icon_color(identity.color, cx.app_theme().is_dark()),
+                )
+                .size(rems(0.875))
+                .into_any_element()
+            }
+        };
         div()
             .flex()
             .min_w_0()
@@ -47,10 +70,7 @@ impl RenderOnce for ChatHeader {
                                 .flex()
                                 .items_center()
                                 .gap(rems(0.375))
-                                .child(
-                                    ProjectMonogram::new("T", hex(0x155dfc).into())
-                                        .size(rems(0.875)),
-                                )
+                                .child(icon)
                                 .child(workspace_breadcrumb_text(self.project).max_w(rems(10.))),
                         ),
                     )

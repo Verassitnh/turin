@@ -63,6 +63,9 @@ struct Overrides {
     model_options: Option<Vec<OptionSelection>>,
     runtime_mode: Option<RuntimeMode>,
     interaction_mode: Option<InteractionMode>,
+    /// The Compact chip is turned off: the next send keeps the full history
+    /// (`fullHistoryThreadKeys`).
+    keep_full_history: bool,
     /// The queued run whose message is loaded in the composer for editing.
     editing_run: Option<String>,
     /// A send is in flight (a second submit is refused until it settles).
@@ -87,6 +90,7 @@ struct ThreadChoices {
     model_options: Option<Vec<OptionSelection>>,
     runtime_mode: Option<RuntimeMode>,
     interaction_mode: Option<InteractionMode>,
+    keep_full_history: bool,
 }
 
 #[derive(Default)]
@@ -118,6 +122,7 @@ impl Overrides {
             model_options: self.model_options.clone(),
             runtime_mode: self.runtime_mode,
             interaction_mode: self.interaction_mode,
+            keep_full_history: self.keep_full_history,
         }
     }
 
@@ -127,6 +132,7 @@ impl Overrides {
             model_options: choices.model_options,
             runtime_mode: choices.runtime_mode,
             interaction_mode: choices.interaction_mode,
+            keep_full_history: choices.keep_full_history,
             ..Self::default()
         }
     }
@@ -661,6 +667,23 @@ impl LiveSource {
             interaction_mode == InteractionMode::Plan && settings.plan_mode_enabled,
             pending_user_inputs,
         );
+        let pending_approvals = detail.is_some_and(|detail| {
+            !super::timeline::live_projection::pending_approvals(&detail.pending_requests)
+                .is_empty()
+        });
+        // A stale Claude session offers to compact before the next message.
+        let resume_compaction_tokens = super::live_composer_derive::resume_compaction_tokens(
+            projection,
+            &super::live_composer_derive::ResumeCompactionCheck {
+                providers: &providers,
+                instance_id: &instance_id,
+                busy: running
+                    || pending_approvals
+                    || pending_user_inputs > 0
+                    || plan_follow_up.is_some(),
+                now_ms: chrono::Utc::now().timestamp_millis(),
+            },
+        );
         let selected_reports_context_window = providers
             .iter()
             .find(|entry| entry.instance_id == instance_id)
@@ -674,6 +697,8 @@ impl LiveSource {
                     !projection.runs.is_empty(),
                     selected_reports_context_window,
                 ),
+            resume_compaction_tokens,
+            keep_full_history: overrides.keep_full_history,
             show_plan_follow_up_prompt: plan_follow_up.is_some(),
             plan_follow_up_title: plan_follow_up.as_ref().and_then(|plan| plan.title.clone()),
             plan_follow_up_plan: plan_follow_up.map(|plan| {
@@ -1032,13 +1057,18 @@ impl ComposerSource for LiveSource {
         if let Some(run_id) = request.editing_queued_run.clone() {
             return self.edit_queued(run_id, request.prompt, cx);
         }
+        // A stale Claude session compacts before this message so the turn does
+        // not re-read the old history. The message queues behind the /compact
+        // run, since steering into it is rejected.
+        let compact_first = self.compacts_before_send(&request.prompt, cx);
         let delivery = match request.dispatch_mode {
+            _ if compact_first => Delivery::QueueAfterActive,
             ComposerDispatchMode::Auto => Delivery::StartImmediately,
             ComposerDispatchMode::Queue => Delivery::QueueAfterActive,
             ComposerDispatchMode::Steer | ComposerDispatchMode::Restart => {
                 let Some(target_run_id) = self.active_run_id() else {
                     // The turn ended between the click and here: start a fresh one.
-                    return self.send_with(request, Delivery::StartImmediately, cx);
+                    return self.send_with(request, Delivery::StartImmediately, false, cx);
                 };
                 if request.dispatch_mode == ComposerDispatchMode::Steer {
                     Delivery::SteerActive { target_run_id }
@@ -1047,7 +1077,7 @@ impl ComposerSource for LiveSource {
                 }
             }
         };
-        self.send_with(request, delivery, cx)
+        self.send_with(request, delivery, compact_first, cx)
     }
 
     fn interrupt(&self, cx: &mut App) {
@@ -1306,7 +1336,11 @@ impl ComposerSource for LiveSource {
         }
     }
 
-    fn toggle_keep_full_history(&self, _cx: &mut App) {}
+    fn toggle_keep_full_history(&self, cx: &mut App) {
+        self.update_overrides(cx, |overrides| {
+            overrides.keep_full_history = !overrides.keep_full_history;
+        });
+    }
 
     /// `onCompactContext`: sends the standalone `/compact` command as a turn.
     fn compact_context(&self, cx: &mut App) {
@@ -1583,7 +1617,33 @@ impl LiveSource {
     /// runtime, without blocking the UI thread. The composer clears its draft
     /// when this returns; a failure toasts and hands the draft back
     /// (`DraftRestore`), as upstream restores its optimistic send.
-    fn send_with(&self, request: SendRequest, delivery: Delivery, cx: &mut App) -> bool {
+    /// `compactBeforeSend`: the offer is showing, was not turned off, and the
+    /// message is not itself `/compact`.
+    fn compacts_before_send(&self, prompt: &str, cx: &App) -> bool {
+        if self.overrides.borrow().keep_full_history
+            || prompt.trim().eq_ignore_ascii_case("/compact")
+        {
+            return false;
+        }
+        let state = self.handle.snapshot();
+        let Some(entry) = state.thread(&self.thread_id) else {
+            return false;
+        };
+        let Some(projection) = entry.state.data.as_ref() else {
+            return false;
+        };
+        self.view_model(projection, entry.detail.as_ref(), cx)
+            .resume_compaction_tokens
+            .is_some()
+    }
+
+    fn send_with(
+        &self,
+        request: SendRequest,
+        delivery: Delivery,
+        compact_first: bool,
+        cx: &mut App,
+    ) -> bool {
         if self.overrides.borrow().sending {
             return false;
         }
@@ -1666,6 +1726,19 @@ impl LiveSource {
                             .await?;
                     }
                 }
+                if compact_first {
+                    commands
+                        .send_message(SendMessage {
+                            thread_id: thread_id.clone(),
+                            text: "/compact".to_owned(),
+                            attachments: Vec::new(),
+                            model_selection: Some(selection.clone()),
+                            delivery: Delivery::StartImmediately,
+                            title_seed: None,
+                            source_plan_id: None,
+                        })
+                        .await?;
+                }
                 commands
                     .send_message(SendMessage {
                         thread_id: thread_id.clone(),
@@ -1702,6 +1775,11 @@ impl LiveSource {
                 };
                 source.update_overrides(cx, |overrides| {
                     overrides.sending = false;
+                    // A send that starts its turn spends the choice; a failed
+                    // one keeps it for the retry.
+                    if outcome.is_ok() {
+                        overrides.keep_full_history = false;
+                    }
                     if outcome.is_err() {
                         overrides.restore_nonce += 1;
                         overrides.restore = Some(DraftRestore {
@@ -1936,10 +2014,12 @@ mod tests {
             model: Some(("claudeAgent".into(), "sonnet".into())),
             runtime_mode: Some(RuntimeMode::ApprovalRequired),
             interaction_mode: Some(InteractionMode::Plan),
+            keep_full_history: true,
             sending: true,
             ..Overrides::default()
         };
         let reopened = Overrides::with_choices(overrides.choices());
+        assert!(reopened.keep_full_history);
         assert_eq!(reopened.model, overrides.model);
         assert_eq!(reopened.runtime_mode, Some(RuntimeMode::ApprovalRequired));
         assert_eq!(reopened.interaction_mode, Some(InteractionMode::Plan));

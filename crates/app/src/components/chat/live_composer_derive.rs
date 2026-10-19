@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 use turin_contracts::orchestration_v2::{
-    OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus, OrchestrationV2TurnItem,
+    OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus, OrchestrationV2RunStatus,
+    OrchestrationV2TurnItem,
 };
 
 use turin_shared::proposed_plan_text::proposed_plan_title;
@@ -14,7 +15,11 @@ use super::context_window::{
     latest_provider_turn_token_usage,
 };
 use super::timeline::live_projection::active_run;
+use crate::composer::catalog::ProviderInstanceEntry;
 use crate::composer::command_items::PullRequestMeta;
+use crate::composer::context_meter::{
+    has_available_compaction_provider, should_offer_resume_compaction,
+};
 use crate::composer::view_model::{ContextWindowSnapshot, ThreadRef};
 use crate::state::client_state::ClientState;
 use crate::state::helpers::composer_thread_items::{
@@ -23,6 +28,7 @@ use crate::state::helpers::composer_thread_items::{
 use crate::state::models::EnvironmentThreadShell;
 use crate::state::models::PullRequestState;
 use crate::state::thread_projection::ThreadProjection;
+use crate::timestamp_format::parse_timestamp_ms;
 use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
 
 /// The threads `@` may mention from this composer (`environmentThreadShells` through
@@ -105,8 +111,15 @@ fn pull_requests_to_mention(
         .collect()
 }
 
-/// The newest context usage the thread reports, as the meter shows it.
-pub fn context_window(projection: &ThreadProjection) -> Option<ContextWindowSnapshot> {
+/// The newest context usage the thread reports, with the prompt-cache TTL the
+/// provider's live report carries (`activeThreadLiveTokenUsage?.promptCacheTtlMs`,
+/// only when that report is the window's source).
+fn latest_context_window(
+    projection: &ThreadProjection,
+) -> Option<(
+    super::context_window::ContextWindowUsageSnapshot,
+    Option<i64>,
+)> {
     let live_usage =
         latest_provider_turn_token_usage(projection.provider_turns.iter().map(|turn| {
             OrchestrationV2ProviderTurnTokenUsageHolder {
@@ -130,6 +143,15 @@ pub fn context_window(projection: &ThreadProjection) -> Option<ContextWindowSnap
         live_usage,
         active_provider_thread.map(|thread| &**thread),
     )?;
+    let ttl_ms = live_usage
+        .and_then(|usage| usage.prompt_cache_ttl_ms)
+        .map(|ttl| u64::from(ttl) as i64);
+    Some((snapshot, ttl_ms))
+}
+
+/// The newest context usage the thread reports, as the meter shows it.
+pub fn context_window(projection: &ThreadProjection) -> Option<ContextWindowSnapshot> {
+    let (snapshot, _) = latest_context_window(projection)?;
     Some(ContextWindowSnapshot {
         used_tokens: snapshot.used_tokens,
         max_tokens: snapshot.max_tokens,
@@ -138,6 +160,56 @@ pub fn context_window(projection: &ThreadProjection) -> Option<ContextWindowSnap
         auto_compact_threshold: snapshot.auto_compact_threshold,
         cost: snapshot.cost,
     })
+}
+
+/// What decides whether a stale session offers to compact first.
+pub struct ResumeCompactionCheck<'a> {
+    pub providers: &'a [ProviderInstanceEntry],
+    pub instance_id: &'a str,
+    /// A turn is running, an approval or question is open, or the plan prompt
+    /// shows: compacting is unavailable (`compactThreadUnavailable`).
+    pub busy: bool,
+    pub now_ms: i64,
+}
+
+/// `resumeCompactionTokens`: the tokens a stale Claude session would re-read
+/// on its next turn, while the composer should offer to compact first. Held
+/// queues never compact first, so the offer hides for them.
+pub fn resume_compaction_tokens(
+    projection: &ThreadProjection,
+    check: &ResumeCompactionCheck<'_>,
+) -> Option<f64> {
+    if check.busy {
+        return None;
+    }
+    let has_held_queue = projection
+        .runs
+        .iter()
+        .any(|run| run.status == OrchestrationV2RunStatus::Queued && run.queue_held == Some(true));
+    if has_held_queue
+        || !has_available_compaction_provider(
+            check.providers,
+            "claudeAgent",
+            Some(check.instance_id),
+            None,
+        )
+    {
+        return None;
+    }
+    let driver = check
+        .providers
+        .iter()
+        .find(|provider| provider.instance_id == check.instance_id)
+        .map(|provider| provider.driver_kind.as_str());
+    let (snapshot, ttl_ms) = latest_context_window(projection)?;
+    should_offer_resume_compaction(
+        driver,
+        Some(snapshot.used_tokens),
+        parse_timestamp_ms(&snapshot.updated_at),
+        ttl_ms,
+        check.now_ms,
+    )
+    .then_some(snapshot.used_tokens)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +411,95 @@ mod tests {
         assert_eq!(meter.used_tokens, 50_000.);
         assert_eq!(meter.max_tokens, Some(200_000.));
         assert_eq!(meter.used_percentage(), Some(25.));
+    }
+
+    fn claude_with_compact() -> Vec<ProviderInstanceEntry> {
+        let mut entry = ProviderInstanceEntry::new("claudeAgent", "claudeAgent", "Claude");
+        entry
+            .slash_commands
+            .push(crate::composer::catalog::ProviderSlashCommand {
+                name: "compact".into(),
+                ..Default::default()
+            });
+        vec![entry]
+    }
+
+    fn stale_claude_projection(used: u64, ttl: Option<u64>) -> ThreadProjection {
+        let mut projection = projection("completed", Vec::new());
+        let mut usage = json!({
+            "usedTokens": used, "maxTokens": 1_000_000, "updatedAt": "2026-06-20T00:00:00.000Z",
+        });
+        if let Some(ttl) = ttl {
+            usage["promptCacheTtlMs"] = json!(ttl);
+        }
+        projection.provider_turns = Arc::new(vec![Arc::new(from_json(json!({
+            "id": "turn-1", "providerThreadId": "provider-thread:1", "nodeId": "node-1",
+            "runAttemptId": null, "nativeTurnRef": null, "ordinal": 1,
+            "status": "completed", "startedAt": null, "completedAt": null,
+            "tokenUsage": usage,
+        })))]);
+        projection
+    }
+
+    #[test]
+    fn a_stale_claude_session_offers_to_compact_first() {
+        let providers = claude_with_compact();
+        let reported = parse_timestamp_ms("2026-06-20T00:00:00.000Z").unwrap();
+        let check = |now_ms, busy| ResumeCompactionCheck {
+            providers: &providers,
+            instance_id: "claudeAgent",
+            busy,
+            now_ms,
+        };
+        let projection = stale_claude_projection(250_000, None);
+        // Within the cache window nothing is offered; past it, the used tokens are.
+        assert_eq!(
+            resume_compaction_tokens(&projection, &check(reported + 60 * 60_000, false)),
+            None
+        );
+        assert_eq!(
+            resume_compaction_tokens(&projection, &check(reported + 71 * 60_000, false)),
+            Some(250_000.)
+        );
+        // A running turn, an open question or the plan prompt hide the offer.
+        assert_eq!(
+            resume_compaction_tokens(&projection, &check(reported + 71 * 60_000, true)),
+            None
+        );
+        // Small contexts are not worth compacting.
+        let small = stale_claude_projection(50_000, None);
+        assert_eq!(
+            resume_compaction_tokens(&small, &check(reported + 71 * 60_000, false)),
+            None
+        );
+        // The provider's own cache TTL replaces the 70 minute fallback.
+        let short = stale_claude_projection(250_000, Some(5 * 60_000));
+        assert_eq!(
+            resume_compaction_tokens(&short, &check(reported + 6 * 60_000, false)),
+            Some(250_000.)
+        );
+    }
+
+    #[test]
+    fn compacting_first_needs_a_claude_instance_with_a_compact_command() {
+        let reported = parse_timestamp_ms("2026-06-20T00:00:00.000Z").unwrap();
+        let projection = stale_claude_projection(250_000, None);
+        let without_compact = vec![ProviderInstanceEntry::new(
+            "claudeAgent",
+            "claudeAgent",
+            "Claude",
+        )];
+        let mut codex = claude_with_compact();
+        codex[0].driver_kind = "codex".into();
+        for providers in [&without_compact, &codex] {
+            let check = ResumeCompactionCheck {
+                providers,
+                instance_id: "claudeAgent",
+                busy: false,
+                now_ms: reported + 71 * 60_000,
+            };
+            assert_eq!(resume_compaction_tokens(&projection, &check), None);
+        }
     }
 
     #[test]

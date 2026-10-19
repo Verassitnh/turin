@@ -891,6 +891,35 @@ impl Commands {
             .collect())
     }
 
+    /// `projectEnvironment.writeFile`: writes `contents` under `cwd`, creating
+    /// parent folders, and returns the saved path relative to `cwd`. A path
+    /// that leaves the workspace root is refused.
+    pub async fn write_project_file(
+        &self,
+        cwd: &str,
+        relative_path: &str,
+        contents: &str,
+    ) -> Result<String, CommandError> {
+        use turin_contracts::project::ProjectWriteFileInput;
+        use turin_git::workspace::workspace_file_system::WorkspaceFileSystem;
+        use turin_git::workspace::workspace_paths::WorkspacePaths;
+        let input: ProjectWriteFileInput = serde_json::from_value(
+            json!({"cwd": cwd, "relativePath": relative_path, "contents": contents}),
+        )
+        .map_err(|error| CommandError::new(format!("Invalid workspace path: {error}")))?;
+        let home = std::env::var("HOME").unwrap_or_default();
+        let files = WorkspaceFileSystem::new(
+            Arc::new(WorkspacePaths::new(home.clone())),
+            self.runtime.workspace_entries.clone(),
+            home,
+        );
+        files
+            .write_file(&input)
+            .await
+            .map(|saved| saved.relative_path.to_string())
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
     /// Cross-thread message search for the sidebar and palette
     /// (`ThreadSearch.ts`): the newest best message per thread.
     pub async fn search_messages(

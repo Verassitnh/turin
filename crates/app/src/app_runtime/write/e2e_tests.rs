@@ -850,6 +850,93 @@ async fn at_completion_finds_workspace_files_and_folders() {
     );
 }
 
+// The plan card's "Save to workspace": the file lands under the root, parent
+// folders are created, and a path that leaves the root is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_plan_is_saved_into_the_workspace_and_cannot_escape_it() {
+    let harness = harness().await;
+    let cwd = harness.workspace.to_str().expect("utf-8");
+
+    let saved = harness
+        .commands
+        .write_project_file(cwd, "plans/ship-it.md", "# Ship it\n")
+        .await
+        .expect("save");
+    assert_eq!(saved, "plans/ship-it.md");
+    assert_eq!(
+        std::fs::read_to_string(harness.workspace.join("plans/ship-it.md")).expect("saved file"),
+        "# Ship it\n"
+    );
+
+    let escaped = harness
+        .commands
+        .write_project_file(cwd, "../outside.md", "nope")
+        .await;
+    assert!(escaped.is_err(), "{escaped:?}");
+    assert!(!harness.workspace.join("../outside.md").exists());
+}
+
+// `@` completion and the plan card use the thread's worktree, not the project
+// checkout (`activeWorkspaceRoot`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worktree_thread_searches_and_saves_in_its_worktree() {
+    let harness = harness().await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let worktree = harness.workspace.join("wt");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    std::fs::write(worktree.join("only-on-the-branch.rs"), "").expect("file");
+    let worktree = worktree.to_str().expect("utf-8").to_owned();
+    let create = |worktree_path: Option<&str>| CreateThread {
+        project_id: project_id.clone(),
+        title: "Thread".into(),
+        model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+        runtime_mode: "auto".into(),
+        interaction_mode: "default".into(),
+        branch: None,
+        worktree_path: worktree_path.map(str::to_owned),
+    };
+    let on_worktree = harness
+        .commands
+        .create_thread(create(Some(&worktree)))
+        .await
+        .expect("thread on a worktree");
+    let client = start(harness.stores.clone());
+    wait_for(&client, "the shell", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.threads.len() == 1)
+    })
+    .await;
+    client.open_thread(thread_id(on_worktree.as_str()));
+    wait_for(&client, "the thread", |state| {
+        state
+            .thread(&thread_id(on_worktree.as_str()))
+            .is_some_and(|entry| entry.state.data.is_some())
+    })
+    .await;
+    let state = client.snapshot();
+    let root = crate::components::chat::live_chat::thread_workspace_root(
+        &state,
+        &projection_of(&state, &on_worktree),
+    )
+    .expect("workspace root");
+    assert_eq!(root, worktree);
+    let found = harness
+        .commands
+        .search_paths(&root, "only-on", 20)
+        .await
+        .expect("search");
+    assert!(
+        found.iter().any(|(path, _)| path == "only-on-the-branch.rs"),
+        "{found:?}"
+    );
+}
+
 // A file created after the first `@` search (by the agent or the user) turns up
 // once the listing has aged, instead of staying invisible for the session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

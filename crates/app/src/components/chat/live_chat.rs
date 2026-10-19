@@ -549,6 +549,22 @@ fn restore_into_drafts(
     drafts.add_files(thread_key, files, AddAttachmentsOptions::default());
 }
 
+/// `activeWorkspaceRoot`: the thread's worktree, else its project's checkout.
+pub(crate) fn thread_workspace_root(state: &ClientState, thread: &ThreadProjection) -> Option<String> {
+    thread
+        .thread
+        .worktree_path
+        .as_ref()
+        .map(|path| path.to_string())
+        .or_else(|| {
+            state
+                .shell_view
+                .as_ref()?
+                .project(&thread.thread.project_id)
+                .map(|project| project.workspace_root.clone())
+        })
+}
+
 impl LiveSource {
     fn refresh(&self, state: &ClientState, cx: &mut App) {
         let Some(entry) = state.thread(&self.thread_id) else {
@@ -557,11 +573,7 @@ impl LiveSource {
         let Some(projection) = entry.state.data.as_ref() else {
             return;
         };
-        let workspace_root = state
-            .shell_view
-            .as_ref()
-            .and_then(|view| view.project(&projection.thread.project_id))
-            .map(|project| project.workspace_root.clone());
+        let workspace_root = thread_workspace_root(state, projection);
         let pending = entry
             .detail
             .as_ref()
@@ -1392,19 +1404,13 @@ impl ComposerSource for LiveSource {
         });
     }
 
-    /// `@` completion over the project's workspace.
+    /// `@` completion over the thread's workspace (its worktree when it has one).
     fn search_paths(&self, query: &str, cx: &mut App) {
         let state = self.handle.snapshot();
         let Some(cwd) = state
             .thread(&self.thread_id)
             .and_then(|entry| entry.state.data.clone())
-            .and_then(|data| {
-                state
-                    .shell_view
-                    .as_ref()?
-                    .project(&data.thread.project_id)
-                    .map(|project| project.workspace_root.clone())
-            })
+            .and_then(|data| thread_workspace_root(&state, &data))
         else {
             return;
         };
@@ -1699,6 +1705,33 @@ impl LiveSource {
 }
 
 impl TimelineSource for LiveSource {
+    fn can_write_workspace_files(&self) -> bool {
+        // The in-process owner holds every scope (`AuthFilesystemWriteScope`).
+        true
+    }
+
+    fn write_workspace_file(
+        &self,
+        cwd: &str,
+        relative_path: &str,
+        contents: &str,
+        on_done: super::timeline::source::WriteDone,
+        cx: &mut App,
+    ) {
+        let (cwd, relative_path, contents) =
+            (cwd.to_owned(), relative_path.to_owned(), contents.to_owned());
+        let task = self.bus.task(cx, move |commands| async move {
+            commands
+                .write_project_file(&cwd, &relative_path, &contents)
+                .await
+        });
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            cx.update(|cx| on_done(outcome.map_err(|error| error.message), cx));
+        })
+        .detach();
+    }
+
     fn respond_to_approval(
         &self,
         request_id: &str,

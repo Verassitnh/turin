@@ -39,7 +39,7 @@ use crate::composer::prompt_history::ComposerPromptHistoryMessage;
 use crate::composer::provider_options::{OptionSelection, OptionValue};
 use crate::composer::view_model::{
     ComposerSource, ComposerStore, ComposerViewModel, DraftRestore, InteractionMode, PathEntry,
-    QueueState, QueuedRun, RuntimeMode, SendRequest, SessionPhase,
+    QueueState, QueuedRun, RuntimeMode, SavedComposerSettings, SendRequest, SessionPhase,
 };
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
@@ -79,6 +79,7 @@ pub struct LiveChat {
     pub timeline: Entity<ThreadTimelineStore>,
     pub composer: Entity<ComposerStore>,
     _subscription: Subscription,
+    _settings_subscription: Subscription,
 }
 
 struct LiveSource {
@@ -144,6 +145,13 @@ impl LiveChat {
         });
         let state = client.read(cx).state().clone();
         source.refresh(&state, cx);
+        // The saved composer settings (send shortcut, follow-up behaviour, ...).
+        let observed = source.clone();
+        let settings_client = client.clone();
+        let settings_subscription = cx.observe_global::<SavedComposerSettings>(move |_, cx| {
+            let state = settings_client.read(cx).state().clone();
+            observed.refresh(&state, cx);
+        });
         // The provider catalogue changes when the registry refreshes.
         let mut providers = source.bus.providers();
         let weak = source.me.clone();
@@ -169,6 +177,7 @@ impl LiveChat {
             timeline,
             composer,
             _subscription: subscription,
+            _settings_subscription: settings_subscription,
         }
     }
 
@@ -193,13 +202,27 @@ fn attachment_names(
         .collect()
 }
 
+/// Upstream's `ACTIVITY_RUN_STATUSES` (threadExecution.ts): a queued run is
+/// waiting its turn, not active.
 fn run_is_active(status: OrchestrationV2RunStatus) -> bool {
     matches!(
         status,
-        OrchestrationV2RunStatus::Starting
+        OrchestrationV2RunStatus::Preparing
+            | OrchestrationV2RunStatus::Starting
             | OrchestrationV2RunStatus::Running
             | OrchestrationV2RunStatus::Waiting
     )
+}
+
+/// The thread's active run: the latest by ordinal among the active ones,
+/// whatever queued or finished runs follow it (`findLast` in
+/// `dispatchThreadMessage`).
+fn active_run(
+    runs: &[Arc<turin_contracts::orchestration_v2::OrchestrationV2Run>],
+) -> Option<&Arc<turin_contracts::orchestration_v2::OrchestrationV2Run>> {
+    runs.iter()
+        .filter(|run| run_is_active(run.status))
+        .max_by_key(|run| run.ordinal)
 }
 
 fn composer_runtime_mode(mode: turin_contracts::provider_policy::RuntimeMode) -> RuntimeMode {
@@ -260,11 +283,7 @@ impl LiveSource {
     ) -> ComposerViewModel {
         let overrides = self.overrides.borrow();
         let thread = &projection.thread;
-        let running = projection
-            .runs
-            .iter()
-            .max_by_key(|run| run.ordinal)
-            .is_some_and(|run| run_is_active(run.status));
+        let running = active_run(&projection.runs).is_some();
         let (instance_id, model) = overrides.model.clone().unwrap_or_else(|| {
             (
                 thread.model_selection.instance_id.to_string(),
@@ -356,6 +375,7 @@ impl LiveSource {
                     cx,
                 ))
             }),
+            settings: SavedComposerSettings::current(cx),
             ..ComposerViewModel::default()
         }
     }
@@ -395,20 +415,7 @@ impl LiveSource {
     fn active_run_id(&self) -> Option<String> {
         let state = self.handle.snapshot();
         let data = state.thread(&self.thread_id)?.state.data.clone()?;
-        data.runs
-            .iter()
-            .filter(|run| {
-                !matches!(
-                    run.status,
-                    OrchestrationV2RunStatus::Completed
-                        | OrchestrationV2RunStatus::Failed
-                        | OrchestrationV2RunStatus::Cancelled
-                        | OrchestrationV2RunStatus::Interrupted
-                        | OrchestrationV2RunStatus::RolledBack
-                )
-            })
-            .max_by_key(|run| run.ordinal)
-            .map(|run| run.id.to_string())
+        active_run(&data.runs).map(|run| run.id.to_string())
     }
 
     fn thread_modes(&self) -> Option<(RuntimeMode, InteractionMode)> {
@@ -1041,5 +1048,90 @@ impl TimelineSource for LiveSource {
 
     fn open_thread(&self, thread_id: &str, cx: &mut App) {
         super::thread_navigation::request_open_thread(thread_id, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::composer::dispatch::ActiveTurnComposerAction;
+    use crate::composer::logic::SendShortcut;
+    use serde_json::json;
+    use turin_contracts::orchestration_v2::OrchestrationV2Run;
+    use turin_contracts::settings::ClientSettings;
+
+    fn run(id: &str, ordinal: u64, status: &str) -> Arc<OrchestrationV2Run> {
+        Arc::new(
+            serde_json::from_value(json!({
+                "id": id,
+                "threadId": "thread-v2",
+                "ordinal": ordinal,
+                "providerInstanceId": "codex",
+                "modelSelection": { "instanceId": "codex", "model": "gpt-5.4" },
+                "providerThreadId": null,
+                "userMessageId": "message-1",
+                "rootNodeId": null,
+                "activeAttemptId": null,
+                "status": status,
+                "requestedAt": "2026-06-20T00:00:00.000Z",
+                "startedAt": null,
+                "completedAt": null,
+                "checkpointId": null,
+                "contextHandoffId": null,
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn queued_runs_after_the_running_one_do_not_hide_it() {
+        let runs = vec![
+            run("run-8", 8, "running"),
+            run("run-9", 9, "queued"),
+            run("run-10", 10, "queued"),
+        ];
+        assert_eq!(active_run(&runs).unwrap().id.as_str(), "run-8");
+    }
+
+    #[test]
+    fn cancelled_and_finished_runs_after_the_active_one_do_not_hide_it() {
+        let runs = vec![
+            run("run-1", 1, "completed"),
+            run("run-2", 2, "waiting"),
+            run("run-3", 3, "cancelled"),
+            run("run-4", 4, "failed"),
+        ];
+        assert_eq!(active_run(&runs).unwrap().id.as_str(), "run-2");
+    }
+
+    #[test]
+    fn a_thread_with_only_queued_or_finished_runs_has_no_active_run() {
+        let runs = vec![run("run-1", 1, "completed"), run("run-2", 2, "queued")];
+        assert!(active_run(&runs).is_none());
+        assert!(active_run(&[]).is_none());
+    }
+
+    #[test]
+    fn preparing_and_starting_runs_are_active() {
+        assert!(active_run(&[run("run-1", 1, "preparing")]).is_some());
+        assert!(active_run(&[run("run-1", 1, "starting")]).is_some());
+    }
+
+    #[test]
+    fn composer_settings_follow_the_saved_client_settings() {
+        let mut saved = ClientSettings::default();
+        saved.send_shortcut = turin_contracts::settings::SendShortcut::ModEnter;
+        saved.follow_up_behavior = turin_contracts::settings::FollowUpBehavior::Queue;
+        saved.context_window_meter_enabled = false;
+        saved.plan_mode_enabled = false;
+        saved.composer_rich_text_enabled = false;
+        saved.show_skills_in_slash_menu = false;
+        let settings = crate::composer::view_model::ComposerSettings::from_client(&saved);
+        assert_eq!(settings.send_shortcut, SendShortcut::ModEnter);
+        assert_eq!(settings.follow_up_behavior, ActiveTurnComposerAction::Queue);
+        assert!(!settings.context_window_meter_enabled);
+        assert!(!settings.plan_mode_enabled);
+        assert!(!settings.composer_rich_text_enabled);
+        assert!(!settings.show_skills_in_slash_menu);
     }
 }

@@ -1293,6 +1293,7 @@ impl AppSidebarLayout {
 
     fn apply_client_settings(&mut self, settings: ClientSettings, cx: &mut Context<Self>) {
         self.sidebar_backend.apply_client_settings(&settings, cx);
+        crate::composer::view_model::SavedComposerSettings::apply(cx, &settings);
         self.client_settings = settings;
         self.sync_notifications(cx);
         cx.notify();

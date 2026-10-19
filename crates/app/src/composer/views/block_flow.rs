@@ -8,6 +8,7 @@
 //! `` ` ``) of the styled text the caret touches show as dim, non-editable
 //! text (`.composer-rich-marker`).
 
+use crate::theme::color::solid_over;
 use gpui_kit::{FontWeight, Hsla, Pixels, SharedString, px};
 
 use crate::components::chat::markdown::inline_flow::{
@@ -383,7 +384,7 @@ pub fn build_inline_flow(
             style.size = typography.size * 0.92;
             style.color = theme.foreground;
             style.chrome = Some(SpanChrome {
-                background: with_alpha(theme.muted_foreground, 0.12).into(),
+                background: solid_over(theme.muted_foreground, 0.12, theme.background),
                 border: None,
                 radius: typography.size * 0.3,
                 pad_x: typography.size * 0.25,

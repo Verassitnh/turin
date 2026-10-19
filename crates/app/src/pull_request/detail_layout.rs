@@ -334,7 +334,11 @@ pub fn ghost_bar(cx: &App) -> Div {
         .flex_shrink_0()
         .h(rems(0.75))
         .rounded(px(4.))
-        .bg(alpha(cx.app_theme().muted_foreground, 0.15))
+        .bg(solid_over(
+            cx.app_theme().muted_foreground,
+            0.15,
+            cx.app_theme().background,
+        ))
 }
 
 /// A vertically scrolling box that is only as tall as its content, up to `max_height`

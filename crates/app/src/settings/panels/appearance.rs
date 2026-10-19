@@ -456,8 +456,11 @@ impl SettingsView {
                 .border_1()
                 .cursor(CursorStyle::PointingHand)
                 .when(active, |this| {
-                    this.border_color(theme.ring)
-                        .bg(solid_over(theme.accent, 0.3, theme.background))
+                    this.border_color(theme.ring).bg(solid_over(
+                        theme.accent,
+                        0.3,
+                        theme.background,
+                    ))
                 })
                 .when(!active, |this| {
                     this.border_color(with_alpha(theme.border, 0.7))
@@ -923,87 +926,82 @@ impl SettingsView {
         );
         // `PanelAnimationsPreview`: a miniature window with sidebar, content and
         // an inspector panel (shown open; replay animation is not ported).
-        let preview = div()
-            .flex()
-            .h_10()
-            .w_full()
-            .overflow_hidden()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background)
-            .p_1()
-            .shadow(tokens::shadow_xs(0.05))
-            .child(
-                div()
-                    .h_full()
-                    .w_4()
-                    .flex_shrink_0()
-                    .rounded_md()
-                    .bg(theme.sidebar),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .flex_col()
-                    .px_1()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .gap_1()
-                            .pt_1()
-                            .child(
-                                div()
-                                    .h(px(2.))
-                                    .w_full()
-                                    .rounded_full()
-                                    .bg(solid_over(theme.muted_foreground, 0.25, theme.background)),
-                            )
-                            .child(
-                                div()
-                                    .h(px(2.))
-                                    .w(relative(0.8))
-                                    .rounded_full()
-                                    .bg(solid_over(theme.muted_foreground, 0.2, theme.background)),
-                            )
-                            .child(
-                                div()
-                                    .h(px(2.))
-                                    .w(relative(0.6))
-                                    .rounded_full()
-                                    .bg(solid_over(theme.muted_foreground, 0.15, theme.background)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .h_2()
-                            .items_center()
-                            .border_t_1()
-                            .border_color(with_alpha(theme.border, 0.7))
-                            .bg(solid_over(theme.foreground, 0.05, theme.background))
-                            .px_2()
-                            .child(
-                                div()
-                                    .h(px(1.))
-                                    .w(relative(0.66))
-                                    .rounded_full()
-                                    .bg(solid_over(theme.muted_foreground, 0.25, theme.background)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .h_full()
-                    .w_5()
-                    .flex_shrink_0()
-                    .rounded_md()
-                    .bg(theme.muted),
-            );
+        let preview =
+            div()
+                .flex()
+                .h_10()
+                .w_full()
+                .overflow_hidden()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .p_1()
+                .shadow(tokens::shadow_xs(0.05))
+                .child(
+                    div()
+                        .h_full()
+                        .w_4()
+                        .flex_shrink_0()
+                        .rounded_md()
+                        .bg(theme.sidebar),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_w_0()
+                        .flex_col()
+                        .px_1()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .gap_1()
+                                .pt_1()
+                                .child(div().h(px(2.)).w_full().rounded_full().bg(solid_over(
+                                    theme.muted_foreground,
+                                    0.25,
+                                    theme.background,
+                                )))
+                                .child(
+                                    div()
+                                        .h(px(2.))
+                                        .w(relative(0.8))
+                                        .rounded_full()
+                                        .bg(solid_over(
+                                            theme.muted_foreground,
+                                            0.2,
+                                            theme.background,
+                                        )),
+                                )
+                                .child(div().h(px(2.)).w(relative(0.6)).rounded_full().bg(
+                                    solid_over(theme.muted_foreground, 0.15, theme.background),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .h_2()
+                                .items_center()
+                                .border_t_1()
+                                .border_color(with_alpha(theme.border, 0.7))
+                                .bg(solid_over(theme.foreground, 0.05, theme.background))
+                                .px_2()
+                                .child(div().h(px(1.)).w(relative(0.66)).rounded_full().bg(
+                                    solid_over(theme.muted_foreground, 0.25, theme.background),
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .h_full()
+                        .w_5()
+                        .flex_shrink_0()
+                        .rounded_md()
+                        .bg(theme.muted),
+                );
         let control = div()
             .flex()
             .items_center()

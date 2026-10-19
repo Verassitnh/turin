@@ -5,6 +5,7 @@
 //! over content: the background is the app background at the glass opacity with a 4% tint of the
 //! variant's color (GPUI has no backdrop blur, so only the translucent fill is drawn).
 
+use crate::theme::color::solid_over;
 use gpui_kit::{
     AnyElement, App, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
     Styled, Window, div, px, rems,
@@ -72,7 +73,7 @@ fn variant_colors(variant: AlertVariant, theme: &AppTheme) -> VariantColors {
         },
         AlertVariant::Info => VariantColors {
             border: Some(with_alpha(theme.info, 0.32).into()),
-            fill: Some(with_alpha(theme.info, 0.04).into()),
+            fill: Some(solid_over(theme.info, 0.04, theme.background)),
             text: theme.card_foreground,
             description: muted,
             icon: theme.info,
@@ -80,7 +81,7 @@ fn variant_colors(variant: AlertVariant, theme: &AppTheme) -> VariantColors {
         },
         AlertVariant::Success => VariantColors {
             border: Some(with_alpha(theme.success, 0.32).into()),
-            fill: Some(with_alpha(theme.success, 0.04).into()),
+            fill: Some(solid_over(theme.success, 0.04, theme.background)),
             text: theme.card_foreground,
             description: muted,
             icon: theme.success,

@@ -53,7 +53,7 @@ use gpui_kit::{App, Global, Hsla, Rgba, Window, WindowAppearance, px};
 
 use appearance_contrast::AppearanceContrast;
 use appearance_fonts::{AppearanceFontPreferences, ResolvedFonts, resolve_appearance_fonts};
-use color::{MixSpace, color, color_mix, with_alpha};
+use color::{MixSpace, color, color_mix, over, with_alpha};
 #[allow(unused_imports)]
 pub use open_vsx::{
     FakeOpenVsxClient, OpenVsxClient, OpenVsxClientError, OpenVsxHeadResponse, OpenVsxHttpResponse,
@@ -242,7 +242,17 @@ impl AppTheme {
         let dark = appearance.is_dark();
         let contrast = AppearanceContrast::new(contrast);
         let target = if dark { tw::WHITE } else { tw::BLACK };
-        let c = |value: &gpui_kit::SharedString| -> Hsla { color(value.as_ref()) };
+        // Every surface is opaque (user request): translucent palette values
+        // are composited over the canvas, or over the surface they sit on.
+        let canvas = rgba(palette.canvas.as_ref());
+        let sidebar_base = rgba(palette.sidebar.as_ref());
+        let toolbar_base = over(rgba(palette.toolbar.as_ref()), canvas);
+        let c = |value: &gpui_kit::SharedString| -> Hsla { over(color(value.as_ref()), canvas) };
+        let cs = |value: &gpui_kit::SharedString| -> Hsla {
+            over(color(value.as_ref()), over(sidebar_base, canvas))
+        };
+        let ct =
+            |value: &gpui_kit::SharedString| -> Hsla { over(color(value.as_ref()), toolbar_base) };
         let fg = |value: &gpui_kit::SharedString, backdrop: &gpui_kit::SharedString| -> Hsla {
             contrast
                 .foreground(rgba(value.as_ref()), rgba(backdrop.as_ref()), target)
@@ -271,8 +281,8 @@ impl AppTheme {
         };
         let (scrollbar_thumb, scrollbar_thumb_hover): (Hsla, Hsla) = if dark {
             (
-                with_alpha(tw::WHITE, 0.08).into(),
-                with_alpha(tw::WHITE, 0.12).into(),
+                over(with_alpha(tw::WHITE, 0.08), canvas),
+                over(with_alpha(tw::WHITE, 0.12), canvas),
             )
         } else {
             (color::hex(0xd9d9d9).into(), color::hex(0xbfbfbf).into())
@@ -288,10 +298,10 @@ impl AppTheme {
             app_chrome_background: c(&p.chrome),
             toolbar_background: c(&p.toolbar),
             toolbar_foreground: fg(&p.toolbar_foreground, &p.toolbar),
-            toolbar_border: line(&p.toolbar_border, &p.toolbar_foreground),
-            toolbar_control: c(&p.toolbar_control),
+            toolbar_border: over(line(&p.toolbar_border, &p.toolbar_foreground), toolbar_base),
+            toolbar_control: ct(&p.toolbar_control),
             toolbar_control_foreground: fg(&p.toolbar_control_foreground, &p.toolbar_control),
-            toolbar_control_hover: c(&p.toolbar_control_hover),
+            toolbar_control_hover: ct(&p.toolbar_control_hover),
             surface_raised: c(&p.surface_raised),
             foreground: fg(&p.text, &p.canvas),
             card: c(&p.surface),
@@ -348,8 +358,8 @@ impl AppTheme {
             }
             .into(),
             diff_deletion_foreground: if dark { tw::RED_400 } else { tw::RED_600 }.into(),
-            border: line(&p.border, &p.text),
-            input: line(&p.input, &p.text),
+            border: over(line(&p.border, &p.text), canvas),
+            input: over(line(&p.input, &p.text), canvas),
             ring: c(&p.focus),
             code_background: c(&p.code_background),
             code_foreground: c(&p.code_foreground),
@@ -360,11 +370,14 @@ impl AppTheme {
             sidebar: c(&p.sidebar),
             sidebar_foreground: fg(&p.sidebar_foreground, &p.sidebar),
             sidebar_muted_foreground,
-            sidebar_control_surface: c(&p.sidebar_control_surface),
-            sidebar_row_hover: c(&p.sidebar_row_hover),
-            sidebar_row_active: c(&p.sidebar_row_active),
-            sidebar_row_selected: c(&p.sidebar_row_selected),
-            sidebar_border: line(&p.sidebar_border, &p.sidebar_foreground),
+            sidebar_control_surface: cs(&p.sidebar_control_surface),
+            sidebar_row_hover: cs(&p.sidebar_row_hover),
+            sidebar_row_active: cs(&p.sidebar_row_active),
+            sidebar_row_selected: cs(&p.sidebar_row_selected),
+            sidebar_border: over(
+                line(&p.sidebar_border, &p.sidebar_foreground),
+                over(sidebar_base, canvas),
+            ),
             sidebar_icon_color,
             scrollbar_thumb,
             scrollbar_thumb_hover,

@@ -285,10 +285,13 @@ impl ModelPickerView {
                 .items_center()
                 .justify_center()
                 .rounded(RADIUS_MD)
-                .when(selected, |this| this.bg(solid_over(theme.foreground, 0.08, theme.background)))
+                .when(selected, |this| {
+                    this.bg(solid_over(theme.foreground, 0.08, theme.background))
+                })
                 .when(!disabled, |this| {
-                    this.cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(solid_over(theme.foreground, 0.10, theme.background)))
+                    this.cursor(CursorStyle::PointingHand).hover(|style| {
+                        style.bg(solid_over(theme.foreground, 0.10, theme.background))
+                    })
                 })
                 .when(disabled, |this| {
                     this.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
@@ -496,7 +499,9 @@ impl ModelPickerView {
                         .justify_center()
                         .rounded(px(6.))
                         .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(solid_over(theme.foreground, 0.1, theme.background)))
+                        .hover(|style| {
+                            style.bg(solid_over(theme.foreground, 0.1, theme.background))
+                        })
                         .child(
                             Icon::new(IconName::Star)
                                 .size(rems(0.75))

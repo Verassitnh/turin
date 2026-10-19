@@ -1,7 +1,7 @@
 //! Rendering of the Code tab: the toolbar, the list rows and the states around them.
 
-use crate::theme::color::solid_over;
 use super::*;
+use crate::theme::color::solid_over;
 use crate::ui::pierre_file_icon::{file_tree_file_icon, file_tree_folder_icon};
 
 /// The code face and the line metrics the rows share.
@@ -282,12 +282,11 @@ impl CodeTab {
             .flex()
             .w_full()
             .child(left)
-            .child(
-                div()
-                    .w(px(1.))
-                    .flex_shrink_0()
-                    .bg(solid_over(theme.border, 0.6, theme.background)),
-            )
+            .child(div().w(px(1.)).flex_shrink_0().bg(solid_over(
+                theme.border,
+                0.6,
+                theme.background,
+            )))
             .child(right)
             .into_any_element()
     }

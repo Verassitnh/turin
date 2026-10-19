@@ -216,7 +216,7 @@ impl ButtonVariant {
                 bg: Some(theme.primary),
                 border: theme.primary,
                 fg: theme.primary_foreground,
-                bg_hover: Some(a(theme.primary, 0.9)),
+                bg_hover: Some(flat(theme.primary, 0.9, theme.background)),
                 shadow: solid_shadow(theme.primary),
                 ..base
             },
@@ -224,7 +224,7 @@ impl ButtonVariant {
                 bg: Some(theme.destructive),
                 border: theme.destructive,
                 fg: tw::WHITE.into(),
-                bg_hover: Some(a(theme.destructive, 0.9)),
+                bg_hover: Some(flat(theme.destructive, 0.9, theme.background)),
                 shadow: solid_shadow(theme.destructive),
                 ..base
             },
@@ -232,7 +232,7 @@ impl ButtonVariant {
                 bg: Some(outline_bg),
                 border: theme.input,
                 fg: theme.destructive_foreground,
-                bg_hover: Some(a(theme.destructive, 0.04)),
+                bg_hover: Some(flat(theme.destructive, 0.04, theme.background)),
                 border_hover: Some(a(theme.destructive, 0.32)),
                 shadow: outline_shadow(),
                 lip: true,
@@ -290,15 +290,19 @@ impl ButtonVariant {
             Self::Secondary => VariantColors {
                 bg: Some(theme.secondary),
                 fg: theme.secondary_foreground,
-                bg_hover: Some(a(theme.secondary, 0.9)),
-                bg_active: Some(a(theme.secondary, 0.8)),
+                bg_hover: Some(flat(theme.secondary, 0.9, theme.background)),
+                bg_active: Some(flat(theme.secondary, 0.8, theme.background)),
                 ..base
             },
             Self::WarningOutline => VariantColors {
                 bg: Some(theme.warning_surface),
                 border: a(theme.warning, 0.32),
                 fg: theme.warning_foreground,
-                bg_hover: Some(a(theme.warning, if dark { 0.24 } else { 0.16 })),
+                bg_hover: Some(flat(
+                    theme.warning,
+                    if dark { 0.24 } else { 0.16 },
+                    theme.background,
+                )),
                 border_hover: Some(a(theme.warning, 0.4)),
                 shadow: tokens::shadow_xs(0.05),
                 ..base

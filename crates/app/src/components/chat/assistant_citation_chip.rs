@@ -4,6 +4,7 @@
 //! the source. In the composer it also edits the comment, and keeps an
 //! over-length or rejected draft when the source text disappears.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,7 +20,7 @@ use super::assistant_citation_comment_editor::comment_too_long;
 use super::timeline::assistant_citations::{
     AssistantCitation, assistant_citation_label, serialize_assistant_citation,
 };
-use crate::theme::color::{MixSpace, color, color_mix, with_alpha};
+use crate::theme::color::{MixSpace, color, color_mix};
 use crate::theme::tokens::{RADIUS_LG, TEXT_SM};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName};
@@ -235,7 +236,7 @@ fn chip_shell(theme: &AppTheme, label: SharedString, window: &Window) -> gpui_ki
         .rounded(rems(em * 0.5))
         .border_1()
         .border_color(border)
-        .bg(with_alpha(accent, 0.11))
+        .bg(solid_over(accent, 0.11, theme.background))
         .text_size(rems(em))
         .font_weight(gpui_kit::FontWeight::MEDIUM)
         .text_color(foreground)

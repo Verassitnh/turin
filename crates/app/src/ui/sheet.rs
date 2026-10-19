@@ -173,7 +173,10 @@ impl RenderOnce for Sheet {
             .left_0()
             .right_0()
             .bottom_0()
-            .bg(with_alpha(tw::BLACK, if theme.is_dark() { 0.6 } else { 0.4 }))
+            .bg(with_alpha(
+                tw::BLACK,
+                if theme.is_dark() { 0.6 } else { 0.4 },
+            ))
             .occlude()
             .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss(window, cx));
         if inset {

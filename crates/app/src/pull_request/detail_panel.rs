@@ -1256,13 +1256,11 @@ impl PullRequestDetailPanel {
                         ),
                     )),
             )
-            .child(
-                div()
-                    .h(rems(0.75))
-                    .w(px(1.))
-                    .flex_shrink_0()
-                    .bg(solid_over(theme.border, 0.7, theme.background)),
-            )
+            .child(div().h(rems(0.75)).w(px(1.)).flex_shrink_0().bg(solid_over(
+                theme.border,
+                0.7,
+                theme.background,
+            )))
             .child(
                 div()
                     .flex()

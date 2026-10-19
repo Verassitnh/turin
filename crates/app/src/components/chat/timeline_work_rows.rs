@@ -1764,7 +1764,12 @@ pub fn context_compaction_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyEleme
         return div().into_any_element();
     };
     let theme = &cx.theme;
-    let rule = || div().h(px(1.)).flex_1().bg(solid_over(theme.border, 0.7, theme.background));
+    let rule = || {
+        div()
+            .h(px(1.))
+            .flex_1()
+            .bg(solid_over(theme.border, 0.7, theme.background))
+    };
     div()
         .flex()
         .w_full()
@@ -1839,7 +1844,12 @@ fn timeline_system_divider(
 
 fn system_divider(props: SystemDivider<'_>, cx: &RowCx) -> AnyElement {
     let theme = &cx.theme;
-    let rule = || div().h(px(1.)).flex_1().bg(solid_over(theme.border, 0.7, theme.background));
+    let rule = || {
+        div()
+            .h(px(1.))
+            .flex_1()
+            .bg(solid_over(theme.border, 0.7, theme.background))
+    };
     let SystemDivider {
         label,
         detail,

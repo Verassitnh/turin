@@ -543,7 +543,9 @@ impl Sidebar {
                                 } else {
                                     with_alpha(scope.sidebar_foreground, 0.25)
                                 })
-                                .when(is_target, |this| this.bg(solid_over(theme.primary, 0.05, theme.background)))
+                                .when(is_target, |this| {
+                                    this.bg(solid_over(theme.primary, 0.05, theme.background))
+                                })
                                 .text_size(TEXT_XS.size)
                                 .text_color(if is_target {
                                     theme.primary
@@ -647,7 +649,7 @@ impl Sidebar {
                         .mx(rems(0.625))
                         .my(rems(0.375))
                         .h(px(1.))
-                        .bg(with_alpha(scope.sidebar_border, 0.6)),
+                        .bg(solid_over(scope.sidebar_border, 0.6, scope.sidebar)),
                 )
                 .into_any_element(),
         )
@@ -697,9 +699,9 @@ impl Sidebar {
                 if is_active {
                     this.bg(scope.sidebar_row_active)
                 } else if is_hovered {
-                    this.bg(with_alpha(warning, 0.08))
+                    this.bg(solid_over(warning, 0.08, theme.background))
                 } else {
-                    this.bg(with_alpha(warning, 0.04))
+                    this.bg(solid_over(warning, 0.04, theme.background))
                 }
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {

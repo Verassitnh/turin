@@ -779,7 +779,9 @@ impl SettingsView {
                 this.border_t_1()
                     .border_color(with_alpha(theme.border, 0.5))
             })
-            .when(selected, |this| this.bg(solid_over(theme.muted, 0.45, theme.background)))
+            .when(selected, |this| {
+                this.bg(solid_over(theme.muted, 0.45, theme.background))
+            })
             .when(!selected, |this| {
                 this.hover(|style| style.bg(solid_over(theme.muted, 0.25, theme.background)))
             })

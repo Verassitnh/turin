@@ -533,7 +533,9 @@ impl RenderOnce for ReactionBar {
                                 .rounded(RADIUS_MD)
                                 .text_size(TEXT_BASE.size)
                                 .cursor_pointer()
-                                .when(reacted, |this| this.bg(solid_over(theme.primary, 0.1, theme.background)))
+                                .when(reacted, |this| {
+                                    this.bg(solid_over(theme.primary, 0.1, theme.background))
+                                })
                                 .hover(move |style| style.bg(hover))
                                 .tooltip(move |window, cx| {
                                     Tooltip::new(pull_request_reaction_name(content))

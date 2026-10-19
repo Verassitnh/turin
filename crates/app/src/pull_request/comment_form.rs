@@ -45,7 +45,11 @@ pub fn segmented_group(cx: &App) -> Div {
         .gap(px(2.))
         .p(px(2.))
         .rounded(RADIUS_LG)
-        .bg(with_alpha(cx.app_theme().input, 0.4))
+        .bg(solid_over(
+            cx.app_theme().input,
+            0.4,
+            cx.app_theme().background,
+        ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

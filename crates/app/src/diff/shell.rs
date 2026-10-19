@@ -135,9 +135,18 @@ pub fn diff_panel_loading_state(cx: &App) -> AnyElement {
                 .gap_2()
                 .pl_2()
                 .pr(px(12.))
-                .child(div().h(px(1.)).flex_1().bg(solid_over(theme.border, 0.4, theme.background)))
+                .child(
+                    div()
+                        .h(px(1.))
+                        .flex_1()
+                        .bg(solid_over(theme.border, 0.4, theme.background)),
+                )
                 .child(skeleton(rems(6.).into(), px(10.), true, cx))
-                .child(div().h(px(1.)).flex_1().bg(solid_over(theme.border, 0.4, theme.background))),
+                .child(div().h(px(1.)).flex_1().bg(solid_over(
+                    theme.border,
+                    0.4,
+                    theme.background,
+                ))),
         )
         .child(
             div()

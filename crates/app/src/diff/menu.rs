@@ -11,8 +11,8 @@ use gpui_kit::{
     ParentElement as _, Styled as _, div, px, rems,
 };
 
-use crate::theme::tokens::{self, RADIUS_LG, TEXT_SM};
 use crate::theme::ActiveAppTheme;
+use crate::theme::tokens::{self, RADIUS_LG, TEXT_SM};
 use crate::ui::tooltip::dropdown_glass_border;
 
 /// `MenuPopup`: the `dropdown-glass` surface, `rounded-lg`, `p-1`. Opaque
@@ -55,7 +55,9 @@ pub fn menu_radio_item(
         .py_1()
         .cursor(CursorStyle::PointingHand)
         .text_color(theme.foreground)
-        .when(checked, |this| this.bg(solid_over(theme.foreground, 0.08, theme.background)))
+        .when(checked, |this| {
+            this.bg(solid_over(theme.foreground, 0.08, theme.background))
+        })
         .hover(move |style| style.bg(accent).text_color(accent_fg))
         .child(div().min_w_0().flex_1().child(child))
 }

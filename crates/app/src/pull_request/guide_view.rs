@@ -762,7 +762,7 @@ fn rail(
                     this.bg(theme.accent).text_color(theme.accent_foreground)
                 })
                 .when(!active, |this| {
-                    this.hover(move |style| style.bg(with_alpha(accent, 0.5)))
+                    this.hover(move |style| style.bg(solid_over(accent, 0.5, theme.background)))
                 })
                 .on_click(move |_, window, cx| select(index, window, cx))
                 .child(bullet)
@@ -1005,7 +1005,9 @@ impl GuideTour {
             .text_color(theme.muted_foreground)
             .when(!busy, |this| {
                 this.cursor(gpui_kit::CursorStyle::PointingHand)
-                    .hover(|style| style.bg(solid_over(theme.muted_foreground, 0.16, theme.background)))
+                    .hover(|style| {
+                        style.bg(solid_over(theme.muted_foreground, 0.16, theme.background))
+                    })
                     .on_click(on_click)
             })
             .child(Icon::new(icon).size(rems(0.75)))
@@ -1412,7 +1414,7 @@ impl GuideTour {
                 .py_2()
                 .text_size(TEXT_XS.size)
                 .cursor_pointer()
-                .hover(move |style| style.bg(with_alpha(accent, 0.5)))
+                .hover(move |style| style.bg(solid_over(accent, 0.5, theme.background)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.open_files.remove(&toggle_path) {
                         this.open_files.insert(toggle_path.clone());

@@ -294,12 +294,11 @@ pub fn panel_select_chevron(theme: &AppTheme) -> AnyElement {
                 .bottom_0()
                 .flex()
                 .items_center()
-                .child(
-                    div()
-                        .h(rems(1.))
-                        .w(px(1.))
-                        .bg(solid_over(theme.border, 0.65, theme.background)),
-                ),
+                .child(div().h(rems(1.)).w(px(1.)).bg(solid_over(
+                    theme.border,
+                    0.65,
+                    theme.background,
+                ))),
         )
         .child(panel_icon(IconName::ChevronDown, theme))
         .into_any_element()

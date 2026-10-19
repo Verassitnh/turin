@@ -689,7 +689,9 @@ impl ChatComposer {
                 .justify_center()
                 .rounded(crate::theme::tokens::RADIUS_MD)
                 .cursor(CursorStyle::PointingHand)
-                .when(open, |this| this.bg(solid_over(theme.foreground, 0.06, theme.background)))
+                .when(open, |this| {
+                    this.bg(solid_over(theme.foreground, 0.06, theme.background))
+                })
                 .hover(|style| style.bg(solid_over(theme.foreground, 0.06, theme.background)))
                 .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
                 .on_click(

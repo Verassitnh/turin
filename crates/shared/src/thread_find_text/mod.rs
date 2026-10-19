@@ -545,8 +545,6 @@ pub fn markdown_thread_find_text(
 }
 
 #[cfg(test)]
-mod diff_tmp;
-#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod upstream_parity;

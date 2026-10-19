@@ -153,3 +153,29 @@ async fn a_fresh_database_gives_an_empty_sidebar() {
     assert!(view.projects.is_empty());
     assert!(view.threads.is_empty());
 }
+
+#[tokio::test]
+async fn a_database_that_cannot_open_is_reported_to_the_ui() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("statev2.sqlite"), [0x5a_u8; 4096]).expect("corrupt db");
+    let runtime = spawn_client_state(&Handle::current(), crate::state::local_environment_id());
+    let bus = super::write::bus::CommandBus::new(Handle::current());
+    let mut failure = bus.startup_failure();
+
+    super::run(
+        Some(dir.path().to_path_buf()),
+        runtime.sender,
+        runtime.requests,
+        bus.clone(),
+    )
+    .await;
+
+    failure.changed().await.expect("failure published");
+    let message = failure.borrow().clone().expect("a message");
+    assert!(
+        message.contains(&dir.path().display().to_string()),
+        "names the data folder: {message}"
+    );
+    assert!(message.contains("could not open its database"), "{message}");
+    assert!(bus.commands().is_err());
+}

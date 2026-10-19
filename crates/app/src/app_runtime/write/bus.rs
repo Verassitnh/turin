@@ -16,6 +16,8 @@ use super::commands::{CommandError, Commands};
 struct Shared {
     commands: OnceLock<Commands>,
     failure: OnceLock<String>,
+    /// Mirrors `failure` for the UI, which shows it once.
+    failed: tokio::sync::watch::Sender<Option<String>>,
     /// The provider status list (`ProviderRegistry::get_providers`), kept
     /// current by the composition root.
     providers: tokio::sync::watch::Sender<Arc<Vec<ServerProvider>>>,
@@ -34,6 +36,7 @@ impl CommandBus {
             shared: Arc::new(Shared {
                 commands: OnceLock::new(),
                 failure: OnceLock::new(),
+                failed: tokio::sync::watch::channel(None).0,
                 providers: tokio::sync::watch::channel(Arc::default()).0,
             }),
         }
@@ -45,7 +48,14 @@ impl CommandBus {
 
     /// Startup failed: every command reports `message`.
     pub(crate) fn fail(&self, message: String) {
-        let _ = self.shared.failure.set(message);
+        let _ = self.shared.failure.set(message.clone());
+        self.shared.failed.send_replace(Some(message));
+    }
+
+    /// Holds the startup failure once there is one (`None` while starting or
+    /// when startup succeeded).
+    pub fn startup_failure(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.shared.failed.subscribe()
     }
 
     pub(crate) fn publish_providers(&self, providers: Vec<ServerProvider>) {
@@ -131,3 +141,19 @@ impl CommandBus {
 pub struct CommandBusGlobal(pub CommandBus);
 
 impl gpui_kit::Global for CommandBusGlobal {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_startup_failure_reaches_subscribers() {
+        let bus = CommandBus::new(Handle::current());
+        let mut failure = bus.startup_failure();
+        assert_eq!(*failure.borrow(), None);
+        bus.fail("disk is full".into());
+        failure.changed().await.unwrap();
+        assert_eq!(failure.borrow().as_deref(), Some("disk is full"));
+        assert!(bus.commands().is_err());
+    }
+}

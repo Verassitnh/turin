@@ -97,6 +97,16 @@ impl Stores {
     }
 }
 
+/// What the startup toast says when the database cannot be opened: the
+/// data folder and the underlying error, so the user can see this is not data
+/// loss.
+pub(crate) fn database_open_failure_message(data_dir: &std::path::Path, error: &str) -> String {
+    format!(
+        "Turin could not open its database in {}. Your projects and threads are not shown until this is fixed. ({error})",
+        data_dir.display()
+    )
+}
+
 /// Starts the write path and the feeds for the client store. Returns when the
 /// store drops its request channel or the database cannot be opened. An
 /// unopenable database leaves the store empty; the UI still starts, and the
@@ -120,10 +130,9 @@ pub async fn run(
         Ok(stores) => Arc::new(stores),
         Err(error) => {
             tracing::error!(error = %format!("{error:#}"), "failed to open Turin database; the sidebar stays empty");
-            bus.fail(format!("{error:#}"));
-            sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
-                error.to_string(),
-            )));
+            let message = database_open_failure_message(&data_dir, &format!("{error:#}"));
+            bus.fail(message.clone());
+            sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message)));
             return;
         }
     };

@@ -135,6 +135,22 @@ impl Commands {
             .await
     }
 
+    /// `project.create` with `createWorkspaceRootIfMissing: true` (the command
+    /// palette's Add project): the folder is created when it does not exist, so
+    /// a mistyped path never yields a project whose sessions cannot start.
+    pub async fn create_project_creating_folder(
+        &self,
+        title: &str,
+        workspace_root: &str,
+    ) -> Result<ProjectId, CommandError> {
+        tokio::fs::create_dir_all(workspace_root)
+            .await
+            .map_err(|error| CommandError {
+                message: format!("Could not create the folder {workspace_root}: {error}"),
+            })?;
+        self.create_project(title, workspace_root).await
+    }
+
     /// Same as [`Self::create_project`], but keeps the caller's project id
     /// (onboarding retries must not mint a new id each attempt).
     pub async fn create_project_with_id(

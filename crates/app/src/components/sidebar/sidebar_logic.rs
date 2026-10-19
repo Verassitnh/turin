@@ -961,6 +961,12 @@ pub fn should_create_new_thread_in_current_project(
     shift_key || project_group_count <= 1
 }
 
+/// `archiveThread`'s `shouldNavigateToDraft`: the archived thread is the
+/// routed one.
+pub fn should_navigate_after_archive(route_thread_key: Option<&str>, archived_key: &str) -> bool {
+    route_thread_key == Some(archived_key)
+}
+
 /// Extra ids an item answers to (`getPreferenceIds`).
 pub type PreferenceIds<'a, T, Id> = Option<&'a dyn Fn(&T) -> Vec<Id>>;
 
@@ -1653,6 +1659,13 @@ mod tests {
         BackgroundTaskKind, ForkedFrom, PendingBackgroundTask, ThreadLineage,
     };
     use futures::executor::block_on;
+
+    #[test]
+    fn archiving_the_open_thread_navigates_away_but_other_threads_do_not() {
+        assert!(should_navigate_after_archive(Some("local:a"), "local:a"));
+        assert!(!should_navigate_after_archive(Some("local:b"), "local:a"));
+        assert!(!should_navigate_after_archive(None, "local:a"));
+    }
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| v.to_string()).collect()

@@ -145,7 +145,7 @@ impl PaletteBackend for LivePaletteBackend {
         }
         let title = crate::state::projects::infer_project_title_from_path(&cwd);
         let task = self.bus.task(cx, move |commands| async move {
-            commands.create_project(&title, &cwd).await
+            commands.create_project_creating_folder(&title, &cwd).await
         });
         cx.spawn(async move |_| match task.await {
             Ok(project_id) => Ok(AddProjectOutcome::Created {

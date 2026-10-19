@@ -986,3 +986,55 @@ async fn the_thread_branch_update_reaches_the_read_model() {
         .expect("shell");
     assert_eq!(shell.branch.as_ref().map(|b| b.as_str()), Some("feature/x"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn add_project_creates_a_missing_workspace_folder() {
+    let harness = harness().await;
+    let missing = harness.workspace.join("does/not/exist/foo");
+    assert!(!missing.exists());
+    let project_id = harness
+        .commands
+        .create_project_creating_folder("foo", missing.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    assert!(missing.is_dir(), "the workspace folder is created");
+    let row = harness
+        .stores
+        .projects
+        .get(project_id, false)
+        .await
+        .expect("read project")
+        .expect("project row");
+    assert_eq!(row.workspace_root, missing.to_str().expect("utf-8"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_threads_take_the_configured_default_model_and_runtime_mode() {
+    use turin_contracts::settings::ServerSettingsPatch;
+    let harness = harness().await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let patch: ServerSettingsPatch = serde_json::from_value(json!({
+        "defaultModelSelection": {"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
+        "defaultRuntimeMode": "approval-required",
+    }))
+    .expect("patch");
+    harness
+        .commands
+        .update_server_settings(patch)
+        .await
+        .expect("update settings");
+    let defaults = harness
+        .commands
+        .new_thread_defaults(&project_id)
+        .await
+        .expect("defaults");
+    assert_eq!(
+        defaults.model_selection,
+        json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"})
+    );
+    assert_eq!(defaults.runtime_mode, "approval-required");
+}

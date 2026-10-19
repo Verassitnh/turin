@@ -7992,6 +7992,7 @@ dependencies = [
  "indexmap",
  "jsonwebtoken",
  "parking_lot",
+ "pretty_assertions",
  "rand 0.8.8",
  "regex",
  "reqwest",

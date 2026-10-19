@@ -196,6 +196,11 @@ fn client_command(value: Value) -> Result<OrchestrationV2Command, CommandError> 
         .map_err(|error| CommandError::new(format!("Invalid command: {error}")))
 }
 
+/// [`client_command`] for composers outside this module.
+pub(super) fn command_json(value: Value) -> Result<OrchestrationV2Command, CommandError> {
+    client_command(value)
+}
+
 #[derive(Clone)]
 pub struct Commands {
     runtime: Arc<WriteRuntime>,

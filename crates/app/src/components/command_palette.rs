@@ -31,6 +31,7 @@ pub mod command_palette_results;
 pub mod demo;
 pub mod live_source;
 pub mod mock_source;
+pub mod named_project;
 pub mod palette_items;
 pub mod palette_source;
 pub mod shortcut_labels;

@@ -341,6 +341,11 @@ pub trait SidebarBackend {
     fn archive(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome>;
     fn delete(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome>;
     fn discard_draft(&self, draft_id: String, cx: &mut App);
+    /// `reorderProjects`: drops the dragged project group in front of the
+    /// target group (both by group key) and keeps the manual order. Backends
+    /// without a saved order ignore it.
+    #[allow(dead_code)]
+    fn reorder_projects(&self, _dragged_group_key: &str, _target_group_key: &str, _cx: &mut App) {}
     /// The saved client settings changed (`useSettings()`); backends that
     /// build their own snapshots fold them in. The mock ignores them.
     fn apply_client_settings(

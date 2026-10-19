@@ -362,10 +362,16 @@ impl AppSidebarLayout {
         let client_settings_watch = Self::watch_client_settings(client_settings_path.clone(), cx);
         let toast_viewport = crate::ui::toast::toasts(cx);
         let anchored_toast_viewport = crate::ui::toast::anchored_toasts(cx);
-        let draft_host = cx.new(|_| crate::shell::composer_draft_host::ComposerDraftHost::new());
+        let draft_host = cx.new(|_| {
+            if live.is_some() {
+                crate::shell::composer_draft_host::ComposerDraftHost::persistent()
+            } else {
+                crate::shell::composer_draft_host::ComposerDraftHost::new()
+            }
+        });
         crate::shell::composer_draft_host::ComposerDraftHost::register(draft_host.clone(), cx);
         if let Some(live) = live.as_ref() {
-            crate::shell::startup_failure::start(live.bus.clone(), cx);
+            crate::shell::startup_failure::start(live.bus.clone(), window.window_handle(), cx);
         }
         let _keybindings_warning = live
             .as_ref()
@@ -832,6 +838,18 @@ impl AppSidebarLayout {
         };
         let (_, thread_id) = key.split_once(':')?;
         ThreadId::new(thread_id).ok()
+    }
+
+    /// Onboarding landing (`openNewThread(projectRef)`): a new thread in the
+    /// local project the wizard just imported.
+    pub fn open_new_thread_in_project(
+        &mut self,
+        project_id: &turin_contracts::ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = crate::shell::app_route::scoped_project_key(&local_environment_id(), project_id);
+        self.create_thread_in_project(key, window, cx);
     }
 
     /// `handleNewThread(projectRef)`: creates the thread at once and opens it.
@@ -1854,5 +1872,15 @@ mod new_thread_target_tests {
             sidebar_new_thread_target(Some("local:p1")),
             NewThreadTarget::InProject("local:p1".into())
         );
+    }
+
+    #[test]
+    fn wizard_landing_key_resolves_back_to_the_imported_project() {
+        let project_id = turin_contracts::ProjectId::new("imported-1").unwrap();
+        let key = crate::shell::app_route::scoped_project_key(&local_environment_id(), &project_id);
+        let parsed = key
+            .split_once(':')
+            .and_then(|(_, id)| turin_contracts::ProjectId::new(id).ok());
+        assert_eq!(parsed, Some(project_id));
     }
 }

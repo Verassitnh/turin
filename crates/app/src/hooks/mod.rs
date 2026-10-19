@@ -2,6 +2,7 @@
 //! lives on the owning GPUI entity).
 
 pub mod chat_thread_actions;
+pub mod open_in_editor;
 pub mod thread_undo;
 pub mod use_active_project_target;
 pub mod use_active_thread_ref;

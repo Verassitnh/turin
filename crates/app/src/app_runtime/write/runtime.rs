@@ -425,8 +425,8 @@ impl WriteRuntime {
         }
 
         let managed_folders = super::managed_folders::build(Arc::clone(&stores), data_dir);
-
-        Ok(Arc::new(Self {
+        let created_pr_linker = source_control.created_pr_linker.clone();
+        let runtime = Arc::new(Self {
             storage_cleanup,
             config,
             _cleanup_schedule: cleanup_schedule,
@@ -463,7 +463,9 @@ impl WriteRuntime {
             _continuations: continuations,
             recovery,
             _terminal_runs: terminal_runs,
-        }))
+        });
+        created_pr_linker.bind(&runtime);
+        Ok(runtime)
     }
 
     /// Publish the latest persisted settings. Read under the same bridge gate as

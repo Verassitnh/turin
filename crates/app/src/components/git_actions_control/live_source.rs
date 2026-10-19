@@ -431,8 +431,16 @@ impl GitActionsBackend for LiveGitActionsBackend {
         cx.spawn(async move |_| task.await.map_err(|error| error.message))
     }
 
-    fn open_in_editor(&self, _: String, _: &str, cx: &mut App) -> Task<Result<(), String>> {
-        cx.spawn(async move |_| Err("Opening files in an editor is not available yet.".into()))
+    /// `openChangedFileInEditor`: the changed file, joined onto the checkout,
+    /// opens in the preferred editor.
+    fn open_in_editor(&self, path: String, cwd: &str, cx: &mut App) -> Task<Result<(), String>> {
+        let target = crate::diff::diff_file_actions::resolve_path_link_target(&path, cwd);
+        let opened = crate::hooks::open_in_editor::EditorLauncherService::global().spawn_open(
+            self.inner.bus.handle(),
+            target,
+            cx,
+        );
+        cx.spawn(async move |_| opened.await.map(drop))
     }
 
     fn open_link(&self, url: String, cx: &mut App) {

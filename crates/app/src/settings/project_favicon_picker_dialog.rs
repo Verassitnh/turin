@@ -201,23 +201,30 @@ impl SettingsView {
                 .label(format!("Open in {}", local_file_manager_name("MacIntel")))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let source = this.store.read(cx).source();
-                    match source.pick_project_favicon(&cwd, cx) {
-                        Ok(Some(path)) => {
-                            this.close_favicon_picker(cx);
-                            this.set_project_icon(project_ids.clone(), Some(path), None, cx);
-                        }
-                        Ok(None) => {}
-                        Err(message) => this.toast(
-                            SettingsToastKind::Error,
-                            "Could not open image picker",
-                            if message.is_empty() {
-                                "An error occurred.".to_owned()
-                            } else {
-                                message
-                            },
-                            cx,
-                        ),
-                    }
+                    let picked = source.pick_project_favicon(&cwd, cx);
+                    let project_ids = project_ids.clone();
+                    cx.spawn(async move |this, cx| {
+                        let outcome = picked.await;
+                        this.update(cx, |this, cx| match outcome {
+                            Ok(Some(path)) => {
+                                this.close_favicon_picker(cx);
+                                this.set_project_icon(project_ids, Some(path), None, cx);
+                            }
+                            Ok(None) => {}
+                            Err(message) => this.toast(
+                                SettingsToastKind::Error,
+                                "Could not open image picker",
+                                if message.is_empty() {
+                                    "An error occurred.".to_owned()
+                                } else {
+                                    message
+                                },
+                                cx,
+                            ),
+                        })
+                        .ok();
+                    })
+                    .detach();
                 }))
         });
         let footer = command_footer(cx)

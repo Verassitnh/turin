@@ -23,21 +23,20 @@ use turin_projects::project_service::{
     ProjectBootstrap, ProjectCreateInput, ProjectDeleteInput, ProjectOperation,
     ProjectOperationError, ProjectServiceApi, ProjectServiceError, ProjectUpdateInput,
 };
-use turin_projects::testing::{SystemGit, SystemProbe};
+use turin_projects::testing::SystemProbe;
 
 use super::commands::commit_project_command;
 use crate::app_runtime::Stores;
 
-/// The service over Turin's data dir: Scratch lives in `<data dir>/scratch`.
+/// The service over the same base directory as the palette's New project
+/// (`<base>/projects`): Scratch lives in `<base>/scratch`.
 pub fn build(stores: Arc<Stores>, data_dir: &Path) -> Arc<ManagedProjectFolders> {
+    use crate::components::command_palette::named_project::{managed_base_dir, system_git};
     Arc::new(ManagedProjectFolders::new(
-        data_dir.to_path_buf(),
+        managed_base_dir(data_dir),
         Arc::new(SystemProbe),
         // The user's own git environment (identity, default branch).
-        Arc::new(SystemGit {
-            env: Vec::new(),
-            removed_env: Vec::new(),
-        }),
+        system_git(),
         Arc::new(RuntimeProjects { stores }),
     ))
 }

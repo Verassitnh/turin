@@ -1,5 +1,6 @@
 //! Port of upstream/apps/desktop/src/window/* and desktop settings.
 
+pub mod about_panel;
 pub mod context_menu_image;
 pub mod desktop_app_settings;
 pub mod desktop_application_menu;

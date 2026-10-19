@@ -45,6 +45,8 @@ async fn run(commands: &Commands, workspace: &str, prompt: &str) -> Result<(), S
             }),
             runtime_mode: "auto".into(),
             interaction_mode: "default".into(),
+            branch: None,
+            worktree_path: None,
         })
         .await
         .map_err(|error| error.message)?;

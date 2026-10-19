@@ -788,11 +788,20 @@ impl AppSidebarLayout {
                 window,
                 cx,
             ),
-            SidebarEvent::NewThread { project_key, .. } if self.live.is_some() => {
+            SidebarEvent::NewThread {
+                project_key,
+                branch,
+                worktree_path,
+            } if self.live.is_some() => {
                 match sidebar_new_thread_target(project_key.as_deref()) {
-                    NewThreadTarget::InProject(project_key) => {
-                        self.create_thread_in_project(project_key, window, cx)
-                    }
+                    NewThreadTarget::InProject(project_key) => self
+                        .create_thread_in_project_on_branch(
+                            project_key,
+                            branch.clone(),
+                            worktree_path.clone(),
+                            window,
+                            cx,
+                        ),
                     // `handleNewThreadClick`: several projects without Shift open
                     // the "New thread in…" picker even when a thread is open.
                     NewThreadTarget::Picker => self.open_command_palette(
@@ -863,6 +872,20 @@ impl AppSidebarLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.create_thread_in_project_on_branch(project_key, None, None, window, cx);
+    }
+
+    /// `handleNewThread(projectRef, { branch, worktreePath })`: the thread starts on `branch`,
+    /// in `worktree_path` when it has one (the sidebar's "New thread on this branch" and a
+    /// prepared pull request), else in the project checkout.
+    pub(crate) fn create_thread_in_project_on_branch(
+        &mut self,
+        project_key: String,
+        branch: Option<String>,
+        worktree_path: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(live) = self.live.clone() else {
             return;
         };
@@ -881,6 +904,8 @@ impl AppSidebarLayout {
                     model_selection: defaults.model_selection,
                     runtime_mode: defaults.runtime_mode,
                     interaction_mode: "default".into(),
+                    branch,
+                    worktree_path,
                 })
                 .await
         });
@@ -903,6 +928,8 @@ impl AppSidebarLayout {
                     model_selection: defaults.model_selection,
                     runtime_mode: defaults.runtime_mode,
                     interaction_mode: "default".into(),
+                    branch: None,
+                    worktree_path: None,
                 })
                 .await
         });

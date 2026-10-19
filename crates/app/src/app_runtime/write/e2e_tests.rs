@@ -93,6 +93,8 @@ async fn send_message_streams_a_fake_claude_reply_into_the_store() {
             model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
             runtime_mode: "auto".into(),
             interaction_mode: "default".into(),
+            branch: None,
+            worktree_path: None,
         })
         .await
         .expect("create thread");
@@ -251,6 +253,8 @@ async fn thread_actions_and_project_rename_reach_the_read_model() {
             model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
             runtime_mode: "auto".into(),
             interaction_mode: "default".into(),
+            branch: None,
+            worktree_path: None,
         })
         .await
         .expect("create thread");
@@ -303,6 +307,8 @@ async fn project_and_thread(harness: &Harness) -> turin_contracts::ThreadId {
             model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
             runtime_mode: "auto".into(),
             interaction_mode: "default".into(),
+            branch: None,
+            worktree_path: None,
         })
         .await
         .expect("create thread")
@@ -391,6 +397,8 @@ async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
             model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
             runtime_mode: "approval-required".into(),
             interaction_mode: "default".into(),
+            branch: None,
+            worktree_path: None,
         })
         .await
         .expect("create thread");
@@ -1657,6 +1665,8 @@ async fn a_scratch_thread_is_created_without_a_project_and_works_in_its_own_fold
         model_selection: defaults.model_selection.clone(),
         runtime_mode: defaults.runtime_mode.clone(),
         interaction_mode: "default".into(),
+        branch: None,
+        worktree_path: None,
     };
     let first = commands
         .create_thread(create("New thread"))
@@ -1954,4 +1964,67 @@ async fn restarting_the_agent_session_stops_the_process_and_the_next_message_sta
         .restart_agent_session(&turin_contracts::ThreadId::new("no-such-thread").expect("id"))
         .await;
     assert!(missing.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_thread_created_on_a_branch_keeps_its_branch_and_worktree() {
+    // "New thread on this branch" and a prepared pull request: the new thread starts where
+    // the source thread works, instead of on the project checkout.
+    let harness = harness().await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let create = |branch: Option<&str>, worktree_path: Option<&str>| CreateThread {
+        project_id: project_id.clone(),
+        title: "On a branch".into(),
+        model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+        runtime_mode: "auto".into(),
+        interaction_mode: "default".into(),
+        branch: branch.map(str::to_owned),
+        worktree_path: worktree_path.map(str::to_owned),
+    };
+    let shell_of = |thread: turin_contracts::ThreadId| {
+        let projections = harness.stores.projections.clone();
+        async move {
+            projections
+                .get_thread_shell(&thread)
+                .await
+                .expect("read shell")
+                .expect("thread shell")
+        }
+    };
+
+    let worktree = harness.workspace.join("wt");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    let worktree = worktree.to_str().expect("utf-8").to_owned();
+    let on_worktree = harness
+        .commands
+        .create_thread(create(Some("feature/x"), Some(&worktree)))
+        .await
+        .expect("thread on a worktree");
+    let shell = shell_of(on_worktree).await;
+    assert_eq!(shell.branch.as_ref().map(|b| b.as_str()), Some("feature/x"));
+    assert_eq!(
+        shell.worktree_path.as_ref().map(|path| path.as_str()),
+        Some(worktree.as_str())
+    );
+
+    let on_branch = harness
+        .commands
+        .create_thread(create(Some("main"), None))
+        .await
+        .expect("thread on a branch");
+    let shell = shell_of(on_branch).await;
+    assert_eq!(shell.branch.as_ref().map(|b| b.as_str()), Some("main"));
+    assert!(shell.worktree_path.is_none());
+
+    let plain = harness
+        .commands
+        .create_thread(create(None, None))
+        .await
+        .expect("plain thread");
+    let shell = shell_of(plain).await;
+    assert!(shell.branch.is_none() && shell.worktree_path.is_none());
 }

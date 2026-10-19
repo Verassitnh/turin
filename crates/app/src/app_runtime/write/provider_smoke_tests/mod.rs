@@ -126,6 +126,8 @@ impl Smoke {
                 model_selection: self.model_selection.clone(),
                 runtime_mode: runtime_mode.into(),
                 interaction_mode: "default".into(),
+                branch: None,
+                worktree_path: None,
             })
             .await
             .expect("create thread");

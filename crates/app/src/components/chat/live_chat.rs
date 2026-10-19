@@ -1119,6 +1119,8 @@ impl ComposerSource for LiveSource {
                     model_selection: selection.clone(),
                     runtime_mode: defaults.runtime_mode,
                     interaction_mode: "default".to_owned(),
+                    branch: None,
+                    worktree_path: None,
                 })
                 .await?;
             let sent = commands

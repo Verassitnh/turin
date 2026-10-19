@@ -88,6 +88,10 @@ pub struct CreateThread {
     pub model_selection: Value,
     pub runtime_mode: String,
     pub interaction_mode: String,
+    /// The branch the thread starts on (a "New thread on this branch" or a prepared pull request).
+    pub branch: Option<String>,
+    /// The worktree the thread works in; absent for the project checkout.
+    pub worktree_path: Option<String>,
 }
 
 /// The message a manual continuation sends (`onResume` in upstream's `ChatView`).
@@ -317,7 +321,7 @@ impl Commands {
     /// Scratch project gets a folder of its own to work in.
     pub async fn create_thread(&self, input: CreateThread) -> Result<ThreadId, CommandError> {
         let thread_id = ThreadId::new(new_id()).expect("uuid thread id");
-        let worktree_path = self
+        let managed_folder = self
             .runtime
             .managed_folders
             .folder_for_thread(turin_projects::managed_project_folders::ThreadFolderInput {
@@ -328,6 +332,7 @@ impl Commands {
             .await
             .map_err(|error| CommandError::from_error(&error))?
             .map(|folder| folder.to_string_lossy().into_owned());
+        let worktree_path = input.worktree_path.clone().or(managed_folder);
         self.dispatch(json!({
             "type": "thread.create",
             "createdBy": "user",
@@ -339,7 +344,7 @@ impl Commands {
             "modelSelection": input.model_selection,
             "runtimeMode": input.runtime_mode,
             "interactionMode": input.interaction_mode,
-            "branch": null,
+            "branch": input.branch,
             "worktreePath": worktree_path,
         }))
         .await?;

@@ -719,6 +719,61 @@ impl Commands {
             .map_err(|error| CommandError::from_error(&error))
     }
 
+    /// `reviewEnvironment.diffPreview`: the branch range and working tree diffs.
+    pub async fn review_diff_preview(
+        &self,
+        input: &turin_contracts::review::ReviewDiffPreviewInput,
+    ) -> Result<turin_contracts::review::ReviewDiffPreviewResult, CommandError> {
+        self.runtime
+            .git
+            .get_review_diff_preview(input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `reviewEnvironment.diffFileContents`: the full old and new text behind a partial diff.
+    pub async fn review_diff_file_contents(
+        &self,
+        input: &turin_contracts::review::ReviewDiffFileContentsInput,
+    ) -> Result<turin_contracts::review::ReviewDiffFileContentsResult, CommandError> {
+        self.runtime
+            .git
+            .get_review_diff_file_contents(input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `orchestration.getTurnDiff` over the checkpoint refs `context` names (the thread's
+    /// projection): the unified patch for turns `from..=to`.
+    pub async fn checkpoint_turn_diff(
+        &self,
+        context: turin_git::checkpointing::checkpoint_diff_query::CheckpointProjection,
+        input: &turin_contracts::checkpoint_diff::OrchestrationGetTurnDiffInput,
+    ) -> Result<String, CommandError> {
+        use turin_git::checkpointing::checkpoint_diff_query::{
+            CheckpointContextError, CheckpointDiffQuery, CheckpointProjection,
+            CheckpointQueryContext,
+        };
+        struct Fixed(CheckpointProjection);
+        #[async_trait::async_trait]
+        impl CheckpointQueryContext for Fixed {
+            async fn get_checkpoint_context(
+                &self,
+                _: &ThreadId,
+            ) -> Result<CheckpointProjection, CheckpointContextError> {
+                Ok(self.0.clone())
+            }
+        }
+        CheckpointDiffQuery::new(
+            Arc::new(Fixed(context)),
+            Arc::clone(&self.runtime.checkpoint_store),
+        )
+        .get_turn_diff(input)
+        .await
+        .map(|result| result.diff)
+        .map_err(|error| CommandError::from_error(&error))
+    }
+
     pub async fn git_list_refs(
         &self,
         input: &turin_contracts::git::VcsListRefsInput,

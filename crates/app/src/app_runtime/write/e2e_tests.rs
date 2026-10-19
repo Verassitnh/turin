@@ -1184,3 +1184,95 @@ async fn lineage_panel_commands_reach_the_orchestrator() {
         .await
         .expect("stop idle child");
 }
+
+// The diff panel's live reads: a finished turn in a git workspace leaves a checkpoint the
+// panel can diff, and the working tree's changes come from the review diff preview.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_diff_panel_reads_a_turn_checkpoint_and_the_working_tree() {
+    use turin_contracts::TrimmedNonEmptyString;
+    use turin_contracts::checkpoint_diff::OrchestrationGetTurnDiffInput;
+    use turin_contracts::review::{ReviewDiffPreviewInput, ReviewDiffPreviewSourceKind};
+
+    let harness = harness().await;
+    let commands = &harness.commands;
+    git_repo(&harness.workspace);
+    let thread = project_and_thread(&harness).await;
+    let client = start(harness.stores.clone());
+    wait_for(&client, "the shell", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.threads.len() == 1)
+    })
+    .await;
+    client.open_thread(thread_id(thread.as_str()));
+    commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    let state = tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "a ready checkpoint", |state| {
+            state
+                .thread(&thread_id(thread.as_str()))
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+                        && data
+                            .checkpoints
+                            .iter()
+                            .any(|checkpoint| checkpoint.app_run_ordinal.is_some())
+                })
+        }),
+    )
+    .await
+    .expect("checkpoint in time");
+    let projection = state
+        .thread(&thread_id(thread.as_str()))
+        .and_then(|entry| entry.state.data.clone())
+        .expect("projection");
+    let context =
+        crate::diff::live_source::checkpoint_projection(&projection).expect("checkpoint context");
+    let patch = commands
+        .checkpoint_turn_diff(
+            context,
+            &OrchestrationGetTurnDiffInput {
+                from_turn_count: 0,
+                to_turn_count: 1,
+                thread_id: thread.clone(),
+                ignore_whitespace: Some(true),
+            },
+        )
+        .await
+        .expect("the turn's checkpoint diff reads");
+    // The fake turn edits nothing, so the turn's patch is empty but the read succeeds.
+    assert!(patch.is_empty(), "{patch}");
+
+    std::fs::write(harness.workspace.join("a.txt"), "one\ntwo\n").expect("edit");
+    let cwd = harness.workspace.to_str().expect("utf-8");
+    let preview = commands
+        .review_diff_preview(&ReviewDiffPreviewInput {
+            cwd: TrimmedNonEmptyString::new(cwd).expect("cwd"),
+            base_ref: None,
+            ignore_whitespace: Some(true),
+            file: None,
+        })
+        .await
+        .expect("preview");
+    let working = preview
+        .sources
+        .iter()
+        .find(|source| source.kind == ReviewDiffPreviewSourceKind::WorkingTree)
+        .expect("a working tree source");
+    assert!(working.diff.contains("+two"), "{}", working.diff);
+}

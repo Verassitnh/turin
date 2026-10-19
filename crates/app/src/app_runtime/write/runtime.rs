@@ -97,6 +97,8 @@ pub struct WriteRuntime {
     pub source_control_discovery:
         Arc<turin_source_control::source_control::discovery::SourceControlDiscovery>,
     pub git: Arc<turin_git::git_vcs_driver_core::GitVcsDriverCore>,
+    /// Reads checkpoint refs for the diff panel.
+    pub checkpoint_store: Arc<turin_git::checkpointing::checkpoint_store::CheckpointStore>,
     pub git_manager: Arc<turin_git::git_manager::GitManager>,
     pub pull_requests: Arc<turin_source_control::pull_request::service::PullRequestService>,
     pub review_guides: Arc<
@@ -217,10 +219,16 @@ impl WriteRuntime {
         let projects = Arc::new(StoredProjects(Arc::clone(&stores.projects)));
 
         // Checkpoints: hidden git refs per run. Non-git workspaces skip capture.
+        let checkpoint_driver = Arc::new(GitVcsDriver::new(
+            turin_git::vcs_process::VcsProcess::new(ProcessRunner),
+        ));
+        let checkpoint_store = Arc::new(
+            turin_git::checkpointing::checkpoint_store::CheckpointStore::new(
+                checkpoint_driver.clone(),
+            ),
+        );
         let checkpoints = Arc::new(CheckpointService::new(Arc::new(TurinCheckpointGit::new(
-            Arc::new(GitVcsDriver::new(turin_git::vcs_process::VcsProcess::new(
-                ProcessRunner,
-            ))),
+            checkpoint_driver,
         ))));
         let capture = Arc::new(CheckpointCaptureService::new(
             Arc::clone(&checkpoints),
@@ -431,6 +439,7 @@ impl WriteRuntime {
             intake,
             attachments_dir,
             workspace_entries: super::path_search::workspace_entries(),
+            checkpoint_store,
             sessions,
             effects,
             _continuations: continuations,

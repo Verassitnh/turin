@@ -43,7 +43,7 @@ use super::no_active_thread_state::NoActiveThreadState;
 use super::preview_panel_shell::{PreviewPanelMode, PreviewPanelShell};
 use super::quit_hold_overlay::QuitHoldOverlay;
 use super::reopen_closed_view_shortcut::try_reopen_closed_view;
-use super::right_panel_tabs::RightPanelTabs;
+use super::right_panel_tabs::{LiveDiffTarget, RightPanelTabs};
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
 use super::sidebar::{self as thread_sidebar, Sidebar, SidebarEvent, SidebarRoute};
@@ -1410,6 +1410,11 @@ impl Render for AppSidebarLayout {
         let right_panel_sheet = panel_presentation == ThreadPanelPresentation::Popover;
         let maximized = right_panel_open && self.right_panel_maximized;
         let right_panel_content = self.right_panel_content.clone();
+        let right_panel_diff = self.live.as_ref().map(|live| LiveDiffTarget {
+            client: live.client.clone(),
+            bus: live.bus.clone(),
+            thread: self.routed_thread_id(cx),
+        });
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
         let routed_thread_id = self.routed_thread_id(cx);
@@ -1635,7 +1640,8 @@ impl Render for AppSidebarLayout {
                             .when(right_panel_open && !right_panel_sheet, |this| {
                                 let body = match right_panel_content.clone() {
                                     Some(content) => content.into_any_element(),
-                                    None => RightPanelTabs.into_any_element(),
+                                    None => RightPanelTabs::new(right_panel_diff.clone())
+                                        .into_any_element(),
                                 };
                                 this.child(
                                     PreviewPanelShell::new(
@@ -1657,7 +1663,7 @@ impl Render for AppSidebarLayout {
             .when(right_panel_open && right_panel_sheet, |this| {
                 let body = match right_panel_content {
                     Some(content) => content.into_any_element(),
-                    None => RightPanelTabs.into_any_element(),
+                    None => RightPanelTabs::new(right_panel_diff.clone()).into_any_element(),
                 };
                 this.child(
                     div().absolute().inset_0().flex().justify_end().child(

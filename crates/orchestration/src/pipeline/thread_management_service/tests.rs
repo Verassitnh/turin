@@ -1491,3 +1491,90 @@ async fn a_settle_waiting_on_its_own_turn_does_not_keep_the_service_alive() {
     }
     panic!("the settle wait still holds the dropped service");
 }
+
+// Regression: the `RestartThreads` and `IntakeDispatcher` adapters for
+// `ThreadManagementService` named `ThreadManagementService::dispatch`, which
+// has no inherent method of that name (it lives on the core the service
+// derefs to), so each call resolved to the adapter itself and recursed until
+// the stack overflowed (a crash on launch). A recursion aborts the test
+// process, so these tests fail loudly; passing means the call reached the
+// orchestrator.
+mod trait_adapters_reach_the_orchestrator {
+    use super::*;
+    use crate::core::restart_continuation_service::RestartThreads;
+    use crate::pipeline::thread_message_intake::IntakeDispatcher;
+
+    async fn service_harness() -> Harness {
+        let project = "project:thread-management";
+        let orchestrator = MockOrchestrator::default()
+            .with_records(move |_| Ok(projection("thread:adapter", project, json!({}))));
+        harness_with_projects(
+            orchestrator,
+            StaticSettings::default_settings(),
+            Arc::new(NoSessions),
+            StaticProjects([(ProjectId::new(project).unwrap(), "/repo".to_owned())].into()),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn restart_threads_dispatch_forwards_the_command() {
+        let h = service_harness().await;
+        RestartThreads::dispatch(&*h.service, server_command(thread_create("thread:adapter")))
+            .await
+            .unwrap();
+        assert_eq!(h.orchestrator.dispatched_types(), ["thread.create"]);
+    }
+
+    #[tokio::test]
+    async fn restart_threads_reads_records_through_the_orchestrator() {
+        let h = service_harness().await;
+        let records = RestartThreads::get_thread_records(
+            &*h.service,
+            &ThreadId::new("thread:adapter").unwrap(),
+            &[],
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(records.thread.id.as_str(), "thread:adapter");
+    }
+
+    #[tokio::test]
+    async fn intake_dispatcher_dispatch_forwards_the_command() {
+        let h = service_harness().await;
+        IntakeDispatcher::dispatch(&*h.service, server_command(thread_create("thread:adapter")))
+            .await
+            .unwrap();
+        assert_eq!(h.orchestrator.dispatched_types(), ["thread.create"]);
+    }
+
+    #[tokio::test]
+    async fn intake_dispatcher_send_to_thread_reaches_the_orchestrator() {
+        let h = service_harness().await;
+        let input = SendInput {
+            project_id: ProjectId::new("project:thread-management").unwrap(),
+            command_id: CommandId::new("command:adapter:send").unwrap(),
+            thread_id: ThreadId::new("thread:adapter").unwrap(),
+            message_id: MessageId::new("message:adapter:send").unwrap(),
+            scheduled_task_id: None,
+            sender_thread_id: None,
+            text: "hello".into(),
+            attachments: vec![],
+            model_selection: None,
+            mode: SendMode::Auto,
+            created_by: OrchestrationV2Actor::User,
+            creation_source: OrchestrationV2CreationSource::Web,
+        };
+        // The scripted records carry no run for the message, so the call ends in the
+        // durable-run guard, after the command was dispatched.
+        let error = IntakeDispatcher::send_to_thread(&*h.service, input)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ThreadManagementError::DurableRunProjection { .. }
+        ));
+        assert_eq!(h.orchestrator.dispatched.lock().len(), 1);
+    }
+}

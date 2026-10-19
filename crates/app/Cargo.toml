@@ -99,7 +99,7 @@ notify.workspace = true
 # Locked to gpui's macOS platform versions (dock icon + shell).
 objc2 = "0.6"
 raw-window-handle = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSSound"] }
 objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSDictionary", "NSString"] }
 
 [dev-dependencies]

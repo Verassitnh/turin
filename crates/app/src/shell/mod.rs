@@ -15,6 +15,7 @@ pub mod pr_preferences;
 pub mod provider_updates;
 pub mod reopen_closed_view;
 pub mod startup_failure;
+pub mod system_notifier;
 pub mod thread_notifications;
 pub mod thread_routes;
 pub mod usage_commands;

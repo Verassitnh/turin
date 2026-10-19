@@ -7,6 +7,7 @@ pub mod desktop_application_menu;
 pub mod desktop_client_settings;
 pub mod desktop_window;
 pub mod notification_badge;
+pub mod notification_sound;
 pub mod quit_hold;
 pub mod relaunch;
 pub mod window_actions;

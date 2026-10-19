@@ -49,7 +49,9 @@ use super::right_panel_tabs::{LiveDiffTarget, PullRequestsRequest, RightPanelTab
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
 use super::sidebar::{self as thread_sidebar, Sidebar, SidebarEvent, SidebarRoute};
-use super::thread_notification_coordinator::ThreadNotificationCoordinator;
+use super::thread_notification_coordinator::{
+    NoticeKind, NoticeSeverity, ThreadNotice, ThreadNotificationCoordinator,
+};
 use super::thread_sidebar_width::{
     THREAD_SIDEBAR_DEFAULT_WIDTH, THREAD_SIDEBAR_MIN_WIDTH, clamp_thread_sidebar_width,
     resolve_initial_thread_sidebar_width, resolve_thread_sidebar_maximum_width,
@@ -1178,15 +1180,93 @@ impl AppSidebarLayout {
         }
     }
 
-    fn sync_notifications(&mut self, focused: bool, cx: &App) {
-        let environment_ids = vec![crate::state::local_environment_id()];
+    /// `ThreadNotificationCoordinator`: scans the shell's threads and says
+    /// about each one that just finished or needs the user.
+    fn sync_notifications(&mut self, focused: bool, cx: &mut Context<Self>) {
+        crate::shell::system_notifier::set_notification_mode(
+            self.client_settings.notification_mode,
+            cx,
+        );
         let snapshot = cx.global::<ClientStoreGlobal>().0.read(cx).state().clone();
-        poll_environment_notifications(
+        let notices = poll_environment_notifications(
             &mut self.notifications,
-            &environment_ids,
             Some(snapshot.as_ref()),
             &self.client_settings,
-            focused,
+        );
+        for notice in notices {
+            self.announce_thread_notice(&notice, focused, cx);
+        }
+    }
+
+    /// One notice: the sound, then an in-app toast while the window is in
+    /// front on another thread, else a desktop notification while it is not.
+    fn announce_thread_notice(&mut self, notice: &ThreadNotice, focused: bool, cx: &mut App) {
+        use crate::desktop::notification_sound::{NotificationSound, play_notification_sound};
+        use crate::pull_request::desktop_notification::{
+            DesktopNotification, show_desktop_notification,
+        };
+        use crate::shell::thread_notifications::{
+            has_desktop_notifications, has_notification_sound,
+        };
+        use crate::ui::toast::{ThreadToastData, ToastActionSpec, ToastOptions, toast_manager};
+        use crate::ui::toast_logic::ToastType;
+
+        let mode = self.client_settings.notification_mode;
+        if has_notification_sound(mode) {
+            play_notification_sound(match notice.kind {
+                NoticeKind::Completion => NotificationSound::Completion,
+                NoticeKind::Input => NotificationSound::Input,
+            });
+        }
+        let key = scoped_thread_key(&local_environment_id(), &notice.thread_id);
+        let is_active = matches!(
+            self.sidebar.read(cx).route(),
+            Some(SidebarRoute::Thread(active)) if *active == key
+        );
+        let sidebar = self.sidebar.clone();
+        if self.client_settings.in_app_notifications_enabled && focused && !is_active {
+            let toast_id = Rc::new(std::cell::Cell::new(None));
+            let action = ToastActionSpec::new("open-thread", "Open thread").on_click({
+                let toast_id = toast_id.clone();
+                let key = key.clone();
+                move |_, cx| {
+                    if let Some(id) = toast_id.get() {
+                        toast_manager(cx).update(cx, |store, cx| store.close(id, cx));
+                    }
+                    sidebar.update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+                }
+            });
+            let options = ToastOptions::new(notice.title)
+                .description(notice.body.clone())
+                .type_(match notice.severity {
+                    NoticeSeverity::Success => ToastType::Success,
+                    NoticeSeverity::Warning => ToastType::Warning,
+                    NoticeSeverity::Error => ToastType::Error,
+                })
+                .action(action)
+                .data(ThreadToastData {
+                    hide_copy_button: true,
+                    ..ThreadToastData::default()
+                });
+            let id = toast_manager(cx).update(cx, |store, cx| store.add(options, cx));
+            toast_id.set(Some(id));
+            return;
+        }
+        if !has_desktop_notifications(mode) || focused {
+            return;
+        }
+        self.notifications.note_desktop_notification(&key);
+        let target = key.clone();
+        show_desktop_notification(
+            DesktopNotification {
+                title: notice.title.to_owned(),
+                body: notice.body.clone(),
+                tag: key,
+                on_click: Some(Rc::new(move |cx: &mut App| {
+                    sidebar.update(cx, |sidebar, cx| sidebar.navigate_to_thread(&target, cx));
+                })),
+            },
+            cx,
         );
     }
 

@@ -1,36 +1,33 @@
 //! Port of upstream/apps/web/src/routes/__root.tsx notification polling hooks
-//! (per-environment shell polling until orchestrator feeds live attention).
+//! (per-environment shell polling).
+
+use std::sync::Arc;
 
 use turin_contracts::settings::ClientSettings;
 
-use crate::components::thread_notification_coordinator::ThreadNotificationCoordinator;
+use crate::components::thread_notification_coordinator::{
+    ThreadNotice, ThreadNotificationCoordinator, notifications_enabled,
+};
 use crate::state::client_state::ClientState;
-use crate::state::contracts::EnvironmentId;
 
-/// Refreshes dock badge policy from settings and store snapshots.
+/// Scans the shell's threads for the ones that just finished or need the
+/// user. Returns nothing while every notification channel is off, and forgets
+/// what it saw, so turning one on later does not announce old events.
 pub fn poll_environment_notifications(
     coordinator: &mut ThreadNotificationCoordinator,
-    environment_ids: &[EnvironmentId],
     snapshot: Option<&ClientState>,
     settings: &ClientSettings,
-    window_focused: bool,
-) {
+) -> Vec<ThreadNotice> {
     coordinator.sync_mode(settings);
-    let _ = environment_ids;
-    let pending = snapshot.map(pending_notification_count).unwrap_or(0);
-    coordinator.set_pending_count(pending, settings.notification_mode, window_focused);
-}
-
-/// Threads that need attention for the dock badge (approvals and user input).
-fn pending_notification_count(state: &ClientState) -> u32 {
-    let Some(view) = &state.shell_view else {
-        return 0;
-    };
-    view.threads
-        .iter()
-        .chain(view.navigation_threads.iter())
-        .filter(|thread| thread.has_pending_approvals || thread.has_pending_user_input)
-        .map(|thread| thread.id.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .len() as u32
+    if !notifications_enabled(
+        settings.notification_mode,
+        settings.in_app_notifications_enabled,
+    ) {
+        coordinator.reset_scan();
+        return Vec::new();
+    }
+    let threads: Option<&[Arc<_>]> = snapshot
+        .and_then(|state| state.shell_view.as_ref())
+        .map(|view| view.threads.as_slice());
+    coordinator.scan(threads)
 }

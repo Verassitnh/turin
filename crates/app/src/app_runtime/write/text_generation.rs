@@ -148,7 +148,7 @@ impl SettingsBacked {
             })),
             Maker::Cursor => {
                 let cursor = CursorSettings::from_value(config).unwrap_or_default();
-                let enabled = entry.map_or(true, resolve_provider_instance_enabled);
+                let enabled = entry.is_none_or(resolve_provider_instance_enabled);
                 Arc::new(cursor_text_generation(CursorTextGenerationOptions {
                     enabled,
                     binary_path: cursor.agent_program().to_owned(),

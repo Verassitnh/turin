@@ -830,10 +830,10 @@ impl AppSidebarLayout {
             }
             SidebarEvent::OpenSettings => self.open_live_settings("general", window, cx),
             SidebarEvent::OpenProjectSettings(key) => {
-                self.open_live_project_settings(&key, window, cx);
+                self.open_live_project_settings(key, window, cx);
             }
             SidebarEvent::OpenPullRequests(_) | SidebarEvent::OpenPullRequestsPage => {
-                match pull_requests_surface(&event) {
+                match pull_requests_surface(event) {
                     Some(PullRequestsSurface::ThreadTab) => {
                         self.show_thread_pull_requests(false, window, cx)
                     }

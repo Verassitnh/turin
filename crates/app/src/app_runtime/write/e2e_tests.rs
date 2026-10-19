@@ -463,10 +463,22 @@ async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
     .expect("run settled in time");
     assert!(answered, "an approval was raised");
     assert_eq!(status, OrchestrationV2RunStatus::Completed);
+    // The drawer shows what is approved: the item carries the command.
+    let records = orchestrator
+        .get_thread_records(&thread, &[RecordField::TurnItems], &RecordFilter::default())
+        .await
+        .expect("records");
+    let prompt = records.turn_items.iter().find_map(|item| match item {
+        turin_contracts::orchestration_v2::OrchestrationV2TurnItem::ApprovalRequest {
+            prompt,
+            ..
+        } => prompt.clone(),
+        _ => None,
+    });
+    assert_eq!(prompt.as_deref(), Some("Bash: pwd"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "provider-claude emits no user_input_request turn item (register_request drops the control request body), so the question id is unknowable; see docs/handoff/T22.md"]
 async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes() {
     use turin_contracts::orchestration_v2::{
         OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,

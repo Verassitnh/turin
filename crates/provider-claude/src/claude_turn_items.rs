@@ -465,9 +465,201 @@ fn web_search_fields(call: &ToolCall<'_>, input: &Value, output_text: Option<&st
     Value::Object(fields)
 }
 
+/// Upstream `CLAUDE_KNOWN_TOOL_CLASSIFICATIONS` `requestKind`: what kind of
+/// approval a native tool asks for. Unknown tools ask as a command.
+pub fn request_kind(tool_name: &str) -> &'static str {
+    match normalized_tool_name(tool_name).as_str() {
+        "edit" | "multiedit" | "notebookedit" | "write" => "file-change",
+        "glob" | "grep" | "ls" | "read" => "file-read",
+        _ => "command",
+    }
+}
+
+/// Upstream `summarizeClaudeToolRequest`: the command or file a tool asks to
+/// use, else its input as JSON, capped at 400 characters.
+pub fn summarize_tool_request(tool_name: &str, input: &Value) -> String {
+    let value = if input.get("type").and_then(Value::as_str) == Some("record") {
+        input.get("value").unwrap_or(input)
+    } else {
+        input
+    };
+    let cap = |text: &str| text.chars().take(400).collect::<String>();
+    if let Some(command) = first_trimmed_string(value, &["command", "cmd", "script"]) {
+        return format!("{tool_name}: {}", cap(&command));
+    }
+    if let Some(path) = first_trimmed_string(value, &["file_path", "path", "filename", "fileName"])
+    {
+        return format!("{tool_name}: {}", cap(&path));
+    }
+    let serialized = serde_json::to_string(value).unwrap_or_default();
+    if serialized.chars().count() <= 400 {
+        format!("{tool_name}: {serialized}")
+    } else {
+        format!(
+            "{tool_name}: {}...",
+            serialized.chars().take(397).collect::<String>()
+        )
+    }
+}
+
+/// Upstream `claudeUserInputQuestions`: the `AskUserQuestion` input's
+/// questions in the contract's shape. A question is keyed by its own text.
+pub fn user_input_questions(input: &Value) -> Vec<Value> {
+    let value = if input.get("type").and_then(Value::as_str) == Some("record") {
+        input.get("value").unwrap_or(input)
+    } else {
+        input
+    };
+    let Some(questions) = value.get("questions").and_then(Value::as_array) else {
+        return vec![];
+    };
+    let text = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    questions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            record.as_object()?;
+            let question = text(record, "question");
+            if question.is_empty() {
+                return None;
+            }
+            let header = match text(record, "header") {
+                header if header.is_empty() => format!("Question {}", index + 1),
+                header => header,
+            };
+            let options: Vec<Value> = record
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| {
+                            option.as_object()?;
+                            let label = text(option, "label");
+                            (!label.is_empty())
+                                .then(|| json!({"label": label, "description": text(option, "description")}))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(json!({
+                "id": question, "header": header, "question": question,
+                "options": options,
+                "multiSelect": record.get("multiSelect").and_then(Value::as_bool) == Some(true),
+            }))
+        })
+        .collect()
+}
+
+/// What a raised request asks the user.
+pub enum RequestBody<'a> {
+    /// `request_kind` is a `request_kind(..)` value.
+    Approval { request_kind: &'a str, prompt: &'a str },
+    UserInput { questions: &'a [Value] },
+}
+
+pub struct RequestArtifacts {
+    pub node: OrchestrationV2ExecutionNode,
+    pub turn_item: OrchestrationV2TurnItem,
+}
+
+/// Upstream `buildApprovalRequestArtifacts` (node and turn item): the waiting
+/// node a runtime request hangs from, and the item that carries what the user
+/// is asked. The item's prompt is what the approval drawer shows.
+pub fn request_artifacts(
+    scope: &TurnScope,
+    native_item_id: &str,
+    request_id: &turin_contracts::RuntimeRequestId,
+    ordinal: u64,
+    body: &RequestBody<'_>,
+    at: turin_contracts::UtcDateTime,
+) -> Option<RequestArtifacts> {
+    let driver = &scope.driver;
+    let node_id = derive::approval_node(request_id);
+    let native = native_ref(driver, native_item_id);
+    let node = decode(json!({
+        "id": node_id, "threadId": scope.thread_id, "runId": scope.run_id,
+        "parentNodeId": derive::node_from_provider_item(driver, native_item_id),
+        "rootNodeId": scope.root_node_id,
+        "kind": match body {
+            RequestBody::Approval { .. } => "approval_request",
+            RequestBody::UserInput { .. } => "user_input_request",
+        },
+        "status": "waiting", "countsForRun": false,
+        "providerThreadId": scope.provider_thread_id, "providerTurnId": scope.provider_turn_id,
+        "nativeItemRef": native, "runtimeRequestId": request_id, "checkpointScopeId": null,
+        "startedAt": at, "completedAt": null,
+    }))?;
+    let mut item = json!({
+        "id": derive::approval_turn_item(request_id), "threadId": scope.thread_id,
+        "runId": scope.run_id, "nodeId": node_id,
+        "providerThreadId": scope.provider_thread_id, "providerTurnId": scope.provider_turn_id,
+        "nativeItemRef": native, "parentItemId": null, "ordinal": ordinal,
+        "status": "waiting", "title": null, "startedAt": at, "completedAt": null,
+        "updatedAt": at, "requestId": request_id,
+    });
+    if let Some(map) = item.as_object_mut() {
+        match body {
+            RequestBody::Approval { request_kind, prompt } => {
+                map.insert("type".into(), json!("approval_request"));
+                map.insert("requestKind".into(), json!(request_kind));
+                map.insert("prompt".into(), json!(prompt));
+            }
+            RequestBody::UserInput { questions } => {
+                map.insert("type".into(), json!("user_input_request"));
+                map.insert("questions".into(), json!(questions));
+            }
+        }
+    }
+    Some(RequestArtifacts {
+        node,
+        turn_item: decode(item)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_approval_prompt_names_the_command_or_file() {
+        assert_eq!(
+            summarize_tool_request("Bash", &json!({"command": " pwd "})),
+            "Bash: pwd"
+        );
+        assert_eq!(
+            summarize_tool_request("Write", &json!({"file_path": "/w/a.txt", "content": "x"})),
+            "Write: /w/a.txt"
+        );
+        assert_eq!(
+            summarize_tool_request("Mcp", &json!({"a": 1})),
+            "Mcp: {\"a\":1}"
+        );
+        assert_eq!(request_kind("Write"), "file-change");
+        assert_eq!(request_kind("Grep"), "file-read");
+        assert_eq!(request_kind("Bash"), "command");
+    }
+
+    #[test]
+    fn user_input_questions_are_keyed_by_their_text() {
+        let questions = user_input_questions(&json!({"questions": [
+            {"question": "Which color?", "options": [{"label": "Red", "description": "Warm"}, {"label": " "}], "multiSelect": true},
+            {"question": " "},
+        ]}));
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0]["id"], "Which color?");
+        assert_eq!(questions[0]["header"], "Question 1");
+        assert_eq!(questions[0]["multiSelect"], true);
+        assert_eq!(questions[0]["options"].as_array().map(Vec::len), Some(1));
+    }
+
     use serde_json::json;
     use turin_contracts::UtcDateTime;
 

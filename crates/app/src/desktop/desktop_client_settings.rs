@@ -87,6 +87,21 @@ pub fn read_client_settings(
     Ok(Some(settings))
 }
 
+/// Moves a settings file that cannot be decoded aside, as
+/// `client-settings.json.corrupt-<unix ms>`, so the defaults can be used and
+/// saved over it without losing what the user had. Returns where it went.
+pub fn quarantine_unreadable_client_settings(path: &Path) -> std::io::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".corrupt-{stamp}"));
+    let backup = path.with_file_name(name);
+    fs::rename(path, &backup)?;
+    Ok(backup)
+}
+
 pub fn write_client_settings(
     path: &Path,
     settings: &ClientSettings,
@@ -140,5 +155,26 @@ mod tests {
         let read = read_client_settings(&path).unwrap().unwrap();
         assert_eq!(read.confirm_quit, QuitConfirmationMode::DoubleClick);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_moved_aside_whole() {
+        let dir =
+            std::env::temp_dir().join(format!("turin-client-quarantine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("client-settings.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        let backup = quarantine_unreadable_client_settings(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "{ not json");
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("client-settings.json.corrupt-")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

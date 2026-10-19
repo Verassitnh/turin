@@ -842,6 +842,100 @@ async fn at_completion_finds_workspace_files_and_folders() {
     );
 }
 
+// A file created after the first `@` search (by the agent or the user) turns up
+// once the listing has aged, instead of staying invisible for the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_completion_finds_files_created_after_the_first_search() {
+    let harness = harness().await;
+    std::fs::write(harness.workspace.join("old.md"), "").expect("file");
+    let cwd = harness.workspace.to_str().expect("utf-8");
+    let first = harness
+        .commands
+        .search_paths(cwd, "fresh", 20)
+        .await
+        .expect("search");
+    assert!(first.is_empty(), "{first:?}");
+
+    std::fs::write(harness.workspace.join("freshly-made.rs"), "").expect("file");
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    let found = harness
+        .commands
+        .search_paths(cwd, "fresh", 20)
+        .await
+        .expect("search");
+    assert_eq!(
+        found.first(),
+        Some(&("freshly-made.rs".to_owned(), false)),
+        "{found:?}"
+    );
+    // A subsequence match is a match.
+    let fuzzy = harness
+        .commands
+        .search_paths(cwd, "frshmd", 20)
+        .await
+        .expect("search");
+    assert!(
+        fuzzy.iter().any(|(path, _)| path == "freshly-made.rs"),
+        "{fuzzy:?}"
+    );
+}
+
+// The composer's model star is the same saved setting the provider settings
+// panel writes, so it survives a restart and shows in both places.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_favorited_model_is_saved_in_the_server_settings() {
+    use turin_contracts::settings::ServerSettingsPatch;
+    let harness = harness().await;
+    let patch: ServerSettingsPatch = serde_json::from_value(json!({
+        "setModelFavorites": [
+            {"provider": "claudeAgent", "model": "claude-opus-5-5", "favorite": true}
+        ],
+    }))
+    .expect("patch");
+    let patch = crate::settings_logic::use_settings::prepare_model_preferences_patch(
+        &harness.commands.server_settings().await.expect("settings"),
+        patch,
+    )
+    .await
+    .expect("prepared");
+    harness
+        .commands
+        .update_server_settings(patch)
+        .await
+        .expect("update");
+    let saved = harness.commands.server_settings().await.expect("settings");
+    let keys = crate::components::chat::live_chat::favorite_keys(saved);
+    assert!(keys.contains("claudeAgent:claude-opus-5-5"), "{keys:?}");
+}
+
+// Implementing a plan names it on the message (`sourcePlanRef`), and the
+// orchestrator checks that the thread really has that plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn implementing_a_plan_sends_its_source_plan_to_the_orchestrator() {
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let error = harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "PLEASE IMPLEMENT THIS PLAN:\n# Ship it".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: Some("plan-1".into()),
+        })
+        .await
+        .expect_err("the thread has no such plan");
+    assert!(
+        error
+            .message
+            .contains("Proposed plan plan-1 does not exist on thread"),
+        "{}",
+        error.message
+    );
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .args(args)

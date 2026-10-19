@@ -59,7 +59,6 @@ struct Overrides {
     model_options: Option<Vec<OptionSelection>>,
     runtime_mode: Option<RuntimeMode>,
     interaction_mode: Option<InteractionMode>,
-    favorites: std::collections::HashSet<String>,
     /// The queued run whose message is loaded in the composer for editing.
     editing_run: Option<String>,
     /// A send is in flight (a second submit is refused until it settles).
@@ -125,6 +124,45 @@ impl Overrides {
             ..Self::default()
         }
     }
+}
+
+/// The user's favourite models (`ServerSettings.favorites`, with the legacy
+/// client list folded in), shared by every composer and kept across restarts
+/// by the settings file.
+#[derive(Default)]
+struct SavedModelFavorites(std::collections::HashSet<String>);
+
+impl gpui_kit::Global for SavedModelFavorites {}
+
+impl SavedModelFavorites {
+    fn current(cx: &App) -> std::collections::HashSet<String> {
+        cx.try_global::<Self>()
+            .map(|saved| saved.0.clone())
+            .unwrap_or_default()
+    }
+
+    fn store(favorites: std::collections::HashSet<String>, cx: &mut App) {
+        cx.set_global(Self(favorites));
+    }
+}
+
+/// `provider_model_key`s of the favourites a settings snapshot holds.
+pub(crate) fn favorite_keys(
+    server: turin_contracts::settings::ServerSettings,
+) -> std::collections::HashSet<String> {
+    use crate::settings_logic::use_settings::{get_client_settings, merge_environment_settings};
+    merge_environment_settings(server, get_client_settings())
+        .server
+        .favorites
+        .unwrap_or_default()
+        .iter()
+        .map(|favorite| {
+            crate::composer::model_picker::provider_model_key(
+                favorite.provider.as_str(),
+                favorite.model.as_str(),
+            )
+        })
+        .collect()
 }
 
 pub struct LiveChat {
@@ -199,6 +237,7 @@ impl LiveChat {
         });
         let state = client.read(cx).state().clone();
         source.refresh(&state, cx);
+        source.load_favorites(cx);
         // The saved composer settings (send shortcut, follow-up behaviour, ...).
         let observed = source.clone();
         let settings_client = client.clone();
@@ -218,6 +257,7 @@ impl LiveChat {
                     };
                     let state = client.read(cx).state().clone();
                     source.refresh(&state, cx);
+                    source.load_favorites(cx);
                     true
                 });
                 if !alive {
@@ -469,7 +509,7 @@ impl LiveSource {
             selected_instance_id: instance_id,
             selected_model: model,
             selected_model_options: overrides.model_options.clone().unwrap_or_default(),
-            favorite_models: overrides.favorites.clone(),
+            favorite_models: SavedModelFavorites::current(cx),
             queue: detail.and_then(|detail| {
                 let workflow = &detail.queue_workflow;
                 (!workflow.queued_runs.is_empty()).then(|| QueueState {
@@ -538,6 +578,37 @@ impl LiveSource {
         let input = detail.and_then(|detail| message_mode_pending_input(&detail.pending_requests));
         let mut overrides = self.overrides.borrow_mut();
         sync_pending_input_session(&mut overrides.pending_input, input);
+    }
+
+    fn republish(&self, cx: &mut App) {
+        let state = self.handle.snapshot();
+        self.refresh(&state, cx);
+    }
+
+    /// Reads the saved favourites; the star states follow once they arrive.
+    fn load_favorites(&self, cx: &mut App) {
+        let task = self.bus.task(
+            cx,
+            |commands| async move { commands.server_settings().await },
+        );
+        let source = self.me.clone();
+        cx.spawn(async move |cx| {
+            // Before the runtime is up there is nothing saved to read yet.
+            let Ok(settings) = task.await else {
+                return;
+            };
+            cx.update(|cx| {
+                let favorites = favorite_keys(settings);
+                if SavedModelFavorites::current(cx) == favorites {
+                    return;
+                }
+                SavedModelFavorites::store(favorites, cx);
+                if let Some(source) = source.upgrade() {
+                    source.republish(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn update_overrides(&self, cx: &mut App, edit: impl FnOnce(&mut Overrides)) {
@@ -817,13 +888,60 @@ impl ComposerSource for LiveSource {
         self.update_overrides(cx, |overrides| overrides.interaction_mode = Some(mode));
     }
 
+    /// The star in the model picker: saved in the server settings, as the
+    /// provider settings panel's star is.
     fn toggle_favorite_model(&self, instance_id: &str, model: &str, cx: &mut App) {
+        use turin_contracts::provider_instance::ProviderInstanceId;
+        use turin_contracts::settings::{ServerSettingsPatch, SetModelFavorite};
         let key = crate::composer::model_picker::provider_model_key(instance_id, model);
-        self.update_overrides(cx, |overrides| {
-            if !overrides.favorites.remove(&key) {
-                overrides.favorites.insert(key);
-            }
+        let mut favorites = SavedModelFavorites::current(cx);
+        let favorite = !favorites.remove(&key);
+        if favorite {
+            favorites.insert(key);
+        }
+        // Show the star at once; the saved settings settle it below.
+        SavedModelFavorites::store(favorites, cx);
+        self.republish(cx);
+        let (Ok(provider), Ok(model)) = (
+            ProviderInstanceId::new(instance_id),
+            turin_contracts::base_schemas::TrimmedNonEmptyString::new(model),
+        ) else {
+            return;
+        };
+        let patch = ServerSettingsPatch {
+            set_model_favorites: Some(vec![SetModelFavorite {
+                provider,
+                model,
+                favorite,
+            }]),
+            ..Default::default()
+        };
+        let task = self.bus.task(cx, move |commands| async move {
+            let current = commands.server_settings().await?;
+            let patch = crate::settings_logic::use_settings::prepare_model_preferences_patch(
+                &current, patch,
+            )
+            .await
+            .map_err(|error| CommandError::new(error.to_string()))?;
+            commands.update_server_settings(patch).await?;
+            commands.server_settings().await
         });
+        let source = self.me.clone();
+        cx.spawn(async move |cx| {
+            let saved = task.await;
+            cx.update(|cx| {
+                match saved {
+                    Ok(settings) => SavedModelFavorites::store(favorite_keys(settings), cx),
+                    Err(error) => push_error(cx, "Could not update favorites", &error.message),
+                }
+                // On failure the star falls back to what is saved.
+                if let Some(source) = source.upgrade() {
+                    source.load_favorites(cx);
+                    source.republish(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// `/settings/providers?instanceId=<id>`.

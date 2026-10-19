@@ -303,6 +303,28 @@ impl LiveSettingsSource {
     fn report(&self, title: &str, description: &str, cx: &mut App) {
         self.ui().report(title, description, cx);
     }
+
+    /// Awaits a command on the UI thread and toasts `title` with the error
+    /// message when it fails (upstream's `toastManager.add({ type: "error" })`
+    /// on a rejected dispatch); either way the view republishes afterwards.
+    fn report_failure_of<T: 'static>(
+        &self,
+        task: gpui_kit::Task<Result<T, crate::app_runtime::write::commands::CommandError>>,
+        title: &'static str,
+        cx: &mut App,
+    ) {
+        let ui = self.ui();
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            cx.update(|cx| {
+                if let Err(error) = outcome {
+                    ui.report(title, &error.message, cx);
+                }
+                ui.publish(cx);
+            });
+        })
+        .detach();
+    }
 }
 
 /// Instances whose sign-in / install streams already have a watcher task.
@@ -1105,14 +1127,12 @@ impl SettingsSource for LiveSettingsSource {
             .services
             .bus
             .clone();
-        bus.spawn(
-            move |commands| async move {
-                commands
-                    .thread_command("thread.unarchive", &thread_id, serde_json::json!({}))
-                    .await
-            },
-            |_| {},
-        );
+        let task = bus.task(cx, move |commands| async move {
+            commands
+                .thread_command("thread.unarchive", &thread_id, serde_json::json!({}))
+                .await
+        });
+        self.report_failure_of(task, "Failed to unarchive thread", cx);
         self.publish(cx);
     }
 
@@ -1129,10 +1149,10 @@ impl SettingsSource for LiveSettingsSource {
             .services
             .bus
             .clone();
-        bus.spawn(
-            move |commands| async move { commands.rename_project(&project_id, &title).await },
-            |_| {},
-        );
+        let task = bus.task(cx, move |commands| async move {
+            commands.rename_project(&project_id, &title).await
+        });
+        self.report_failure_of(task, "Could not rename project", cx);
         self.publish(cx);
     }
 
@@ -1285,14 +1305,12 @@ impl SettingsSource for LiveSettingsSource {
             .services
             .bus
             .clone();
-        bus.spawn(
-            move |commands| async move {
-                commands
-                    .thread_command("thread.delete", &thread_id, serde_json::json!({}))
-                    .await
-            },
-            |_| {},
-        );
+        let task = bus.task(cx, move |commands| async move {
+            commands
+                .thread_command("thread.delete", &thread_id, serde_json::json!({}))
+                .await
+        });
+        self.report_failure_of(task, "Failed to delete thread", cx);
         self.publish(cx);
     }
 }

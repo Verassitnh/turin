@@ -8,6 +8,7 @@ pub mod desktop_client_settings;
 pub mod desktop_window;
 pub mod notification_badge;
 pub mod quit_hold;
+pub mod window_actions;
 pub mod window_bounds_persist;
 
 pub use desktop_application_menu::{bind_menu_keys, install_native_menus};

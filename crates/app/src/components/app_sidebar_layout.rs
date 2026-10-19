@@ -1247,13 +1247,34 @@ impl AppSidebarLayout {
         cx.quit();
     }
 
+    /// Cmd+Q pressed outside the shell (the settings window): the same
+    /// hold-to-quit / confirm-quit path as the shell's own binding. The main
+    /// window is brought forward so its hint shows and its modifier release
+    /// cancels the hold.
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.activate_window();
+        self.run_quit_shortcut(
+            QuitHoldKeyPhase::KeyDown,
+            QuitHoldKey::Character('q'),
+            false,
+            window,
+            cx,
+        );
+    }
+
+    /// Cmd+W through the app-level handler: the main window's bounds are
+    /// written before it closes, as the shell's own handler does.
+    pub fn close_main_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_bounds(window, cx);
+        window.remove_window();
+    }
+
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.open_live_settings("general", window, cx);
     }
 
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
-        self.flush_bounds(window, cx);
-        window.remove_window();
+        self.close_main_window(window, cx);
     }
 
     fn on_open_command_palette(

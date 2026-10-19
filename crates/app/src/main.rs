@@ -242,6 +242,68 @@ fn reopen_main_window(command_bus: &app_runtime::write::bus::CommandBus, cx: &mu
     cx.activate(true);
 }
 
+/// The main window and its shell, when it is still open.
+fn open_main(
+    cx: &mut App,
+) -> Option<(AnyWindowHandle, gpui_kit::Entity<components::app_sidebar_layout::AppSidebarLayout>)> {
+    let (handle, layout) = cx
+        .try_global::<MainWindow>()
+        .map(|main| (main.handle, main.layout.clone()))?;
+    let layout = layout.upgrade()?;
+    handle.update(cx, |_, _, _| ()).ok()?;
+    Some((handle, layout))
+}
+
+/// Cmd+Q and the menu's Quit with focus outside the shell: the shell runs its
+/// hold-to-quit / confirm-quit flow. With no main window there is nothing on
+/// screen to confirm, so the app quits.
+fn quit_through_shell(cx: &mut App) {
+    use desktop::window_actions::{quit_goes_through_shell, route_window_action};
+    let main = open_main(cx);
+    let route = route_window_action(
+        main.as_ref().map(|(handle, _)| handle.window_id()).as_ref(),
+        cx.active_window().map(|handle| handle.window_id()).as_ref(),
+    );
+    match main {
+        Some((handle, layout)) if quit_goes_through_shell(route, true) => {
+            let routed = handle.update(cx, |_, window, cx| {
+                layout.update(cx, |layout, cx| layout.request_quit(window, cx));
+            });
+            if routed.is_err() {
+                cx.quit();
+            }
+        }
+        _ => cx.quit(),
+    }
+}
+
+/// Cmd+W through the app-level handler: closes the active window, writing
+/// the main window's bounds first.
+fn close_active_window(cx: &mut App) {
+    use desktop::window_actions::{WindowActionRoute, route_window_action};
+    let main = open_main(cx);
+    let active = cx.active_window();
+    let route = route_window_action(
+        main.as_ref().map(|(handle, _)| handle.window_id()).as_ref(),
+        active.map(|handle| handle.window_id()).as_ref(),
+    );
+    match (route, main, active) {
+        (WindowActionRoute::MainShell, Some((handle, layout)), _) => {
+            handle
+                .update(cx, |_, window, cx| {
+                    layout.update(cx, |layout, cx| layout.close_main_window(window, cx));
+                })
+                .ok();
+        }
+        (WindowActionRoute::ActiveWindow, _, Some(handle)) => {
+            handle
+                .update(cx, |_, window, _| window.remove_window())
+                .ok();
+        }
+        _ => {}
+    }
+}
+
 /// App-level handlers for the menu, so Quit, Close Window, Settings and
 /// Full Screen work with no window or with focus outside the shell (the
 /// settings window, or none at all after the main window was closed).
@@ -263,17 +325,11 @@ fn install_window_lifecycle(command_bus: app_runtime::write::bus::CommandBus, cx
             handle.update(cx, |_, window, _| window.zoom_window()).ok();
         }
     });
-    cx.on_action(|_: &QuitApplication, cx| cx.quit());
+    cx.on_action(|_: &QuitApplication, cx| quit_through_shell(cx));
     cx.on_action(|_: &HideApplication, cx| cx.hide());
     cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
-    cx.on_action(|_: &CloseWindow, cx| {
-        if let Some(handle) = cx.active_window() {
-            handle
-                .update(cx, |_, window, _| window.remove_window())
-                .ok();
-        }
-    });
+    cx.on_action(|_: &CloseWindow, cx| close_active_window(cx));
     cx.on_action(|_: &ToggleFullScreen, cx| {
         if let Some(handle) = cx.active_window() {
             handle

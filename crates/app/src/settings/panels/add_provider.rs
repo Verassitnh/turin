@@ -32,6 +32,7 @@ use super::super::provider_form::{
 };
 use super::super::provider_meta::{PROVIDER_CLIENTS, driver_label};
 use super::super::view::{SettingsToastKind, SettingsView};
+use super::super::view_model::ProviderInstanceMutation;
 use super::super::wizard::{
     AddProviderWizardSteps, WizardSize, add_provider_wizard_steps, wizard_footer, wizard_header,
     wizard_panel, wizard_popup,
@@ -216,16 +217,38 @@ impl SettingsView {
         if config.as_object().is_some_and(|m| !m.is_empty()) {
             instance.insert("config".into(), config);
         }
-        self.write_provider_instance(&instance_id, Some(Value::Object(instance)), false, cx);
-        self.panels.providers.selected = Some(instance_id.clone());
         let driver_name = driver_label(&driver);
-        self.dialog = None;
-        self.toast(
-            SettingsToastKind::Success,
-            "Provider instance added",
-            format!("{driver_name} instance '{instance_id}' was added."),
+        // The "added" toast waits for the write: a rejected patch reports its
+        // error instead (the source's failure toast) and never claims success.
+        let view = cx.entity().downgrade();
+        let added_id = instance_id.clone();
+        let source = self.store.read(cx).source();
+        let mutation = ProviderInstanceMutation::Upsert {
+            instance_id: instance_id.clone(),
+            instance: Value::Object(instance),
+        };
+        source.mutate_provider_instance_then(
+            mutation,
+            None,
+            Box::new(move |result, cx| {
+                if result.is_err() {
+                    return;
+                }
+                view.update(cx, |this, cx| {
+                    this.toast(
+                        SettingsToastKind::Success,
+                        "Provider instance added",
+                        format!("{driver_name} instance '{added_id}' was added."),
+                        cx,
+                    );
+                })
+                .ok();
+            }),
             cx,
         );
+        self.panels.providers.selected = Some(instance_id);
+        self.dialog = None;
+        cx.notify();
     }
 
     pub(in crate::settings) fn render_add_provider_dialog(

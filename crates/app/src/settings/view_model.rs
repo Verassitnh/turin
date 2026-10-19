@@ -189,6 +189,8 @@ pub struct ProviderAuthDelivery {
 /// What a setup request answers: accepted, or the message the card shows.
 /// Progress itself arrives as a new view model.
 pub type SetupResult = Result<(), String>;
+/// Completion callback of [`SettingsSource::mutate_provider_instance_then`].
+pub type MutationDone = Box<dyn FnOnce(Result<(), String>, &mut App)>;
 
 /// `usePersistEnvironmentProviderInstanceMutation`'s operations: one instance is
 /// added, replaced or removed against the latest stored map, so a stale copy of
@@ -218,6 +220,19 @@ pub trait SettingsSource {
         patch: Option<Value>,
         cx: &mut App,
     );
+    /// [`Self::mutate_provider_instance`], then `done` on the UI thread with the
+    /// write's outcome (the Add provider wizard toasts success from it). The
+    /// default completes immediately, which suits sources that write synchronously.
+    fn mutate_provider_instance_then(
+        &self,
+        mutation: ProviderInstanceMutation,
+        patch: Option<Value>,
+        done: MutationDone,
+        cx: &mut App,
+    ) {
+        self.mutate_provider_instance(mutation, patch, cx);
+        done(Ok(()), cx);
+    }
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App);
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App);
     /// `refreshServerProviders({ refreshModels: true })`.

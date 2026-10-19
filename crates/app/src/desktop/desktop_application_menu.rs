@@ -1,6 +1,7 @@
 //! Port of upstream/apps/desktop/src/window/DesktopApplicationMenu.ts (menu
 //! actions, accelerators, and GPUI native menus with OS roles where supported).
 
+use gpui_kit::component::input;
 use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, actions};
 
 use crate::branding::APP_BASE_NAME;
@@ -64,14 +65,17 @@ fn build_menus() -> Vec<Menu> {
     }
 
     menus.push(Menu::new("File").items([MenuItem::action("Close Window", CloseWindow)]));
+    // The items dispatch the input actions to the focused field, which
+    // answers them (the composer's editor and every `Input`); with no field
+    // focused no one does, and the items are disabled.
     menus.push(Menu::new("Edit").items([
-        MenuItem::os_action("Undo", gpui_kit::NoAction, OsAction::Undo),
-        MenuItem::os_action("Redo", gpui_kit::NoAction, OsAction::Redo),
+        MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+        MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
         MenuItem::separator(),
-        MenuItem::os_action("Cut", gpui_kit::NoAction, OsAction::Cut),
-        MenuItem::os_action("Copy", gpui_kit::NoAction, OsAction::Copy),
-        MenuItem::os_action("Paste", gpui_kit::NoAction, OsAction::Paste),
-        MenuItem::os_action("Select All", gpui_kit::NoAction, OsAction::SelectAll),
+        MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+        MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+        MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+        MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         MenuItem::separator(),
         MenuItem::submenu(Menu::new("Speech").items([
             MenuItem::action("Start Speaking", gpui_kit::NoAction).disabled(true),
@@ -123,6 +127,57 @@ mod tests {
         assert_eq!(
             actions(menu(&menus, "Window")),
             [("Minimize".to_owned(), false), ("Zoom".to_owned(), false)]
+        );
+    }
+
+    #[test]
+    fn the_edit_menu_dispatches_the_input_actions() {
+        use gpui_kit::Action as _;
+        let menus = build_menus();
+        let edit: Vec<(String, &'static str, &'static str)> = menu(&menus, "Edit")
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action {
+                    name,
+                    action,
+                    os_action: Some(os_action),
+                    disabled: false,
+                    ..
+                } => Some((
+                    name.to_string(),
+                    action.name(),
+                    match os_action {
+                        OsAction::Cut => "cut",
+                        OsAction::Copy => "copy",
+                        OsAction::Paste => "paste",
+                        OsAction::SelectAll => "select-all",
+                        OsAction::Undo => "undo",
+                        OsAction::Redo => "redo",
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            edit,
+            [
+                ("Undo".to_owned(), input::Undo.name(), "undo"),
+                ("Redo".to_owned(), input::Redo.name(), "redo"),
+                ("Cut".to_owned(), input::Cut.name(), "cut"),
+                ("Copy".to_owned(), input::Copy.name(), "copy"),
+                ("Paste".to_owned(), input::Paste.name(), "paste"),
+                (
+                    "Select All".to_owned(),
+                    input::SelectAll.name(),
+                    "select-all"
+                ),
+            ]
+        );
+        // None of them is the do-nothing action the menu used to carry.
+        assert!(
+            edit.iter()
+                .all(|(_, name, _)| *name != gpui_kit::NoAction.name())
         );
     }
 

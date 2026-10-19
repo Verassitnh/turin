@@ -1220,6 +1220,23 @@ impl PromptEditor {
         }
     }
 
+    /// An edit asked for by an action rather than a key: refused while the
+    /// editor is read-only, and followed by what a key edit does after it.
+    fn run_edit_action(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+    ) {
+        if self.config.disabled {
+            return;
+        }
+        edit(self, window, cx);
+        self.goal_x = None;
+        self.restart_blink(window, cx);
+        self.after_change(cx);
+    }
+
     fn copy(&mut self, cx: &mut Context<Self>) {
         let text = self.state.selected_markdown();
         if !text.is_empty() {
@@ -2080,6 +2097,46 @@ impl Render for PromptEditor {
                     this.after_change(cx);
                 }
             }))
+            // The Edit menu's items (and the OS shortcuts they stand for) arrive
+            // as the input actions; the editor answers them as it does the keys.
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                    this.copy(cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Cut, window, cx| {
+                    this.run_edit_action(window, cx, |this, _, cx| this.cut(cx));
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Paste, window, cx| {
+                    this.run_edit_action(window, cx, |this, window, cx| {
+                        this.paste(window, cx);
+                    });
+                }),
+            )
+            .on_action(cx.listener(
+                |this, _: &gpui_kit::component::input::SelectAll, window, cx| {
+                    this.state.select_all();
+                    this.restart_blink(window, cx);
+                    this.after_change(cx);
+                },
+            ))
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Undo, window, cx| {
+                    this.run_edit_action(window, cx, |this, _, _| {
+                        this.state.undo();
+                    });
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Redo, window, cx| {
+                    this.run_edit_action(window, cx, |this, _, _| {
+                        this.state.redo();
+                    });
+                }),
+            )
             .track_focus(&self.focus)
             .relative()
             .w_full()

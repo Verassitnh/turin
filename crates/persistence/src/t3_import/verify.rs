@@ -4,6 +4,8 @@
 //! `PRAGMA optimize` creates them, and this build's SQLite also creates
 //! `sqlite_stat4` (see PORTING.md). They are statistics, not schema.
 //! `effect_sql_migrations` is allowed to grow by exactly the migrations that ran.
+//! Tables a Turin migration drops (063) may disappear; the schema diff against a
+//! fresh database proves the drop is Turin's own.
 
 use std::collections::BTreeMap;
 
@@ -88,6 +90,14 @@ pub(crate) fn migrate_and_verify(conn: &Connection) -> Result<ImportReport, T3Im
     }
 
     let after = row_counts(conn)?;
+    // A table that is gone after migrating was dropped by one of Turin's own
+    // migrations (063 drops the unused V1 projections): the schema check above
+    // already proved a fresh database lacks it too. Every other table keeps
+    // its rows.
+    let before: BTreeMap<String, i64> = before
+        .into_iter()
+        .filter(|(name, _)| after.contains_key(name))
+        .collect();
     if before != after {
         return Err(T3ImportError::RowCountChanged {
             message: count_diff(&before, &after),

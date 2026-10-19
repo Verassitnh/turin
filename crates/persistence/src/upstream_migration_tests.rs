@@ -1107,7 +1107,7 @@ fn migration_055_baselines_v1_projects_in_the_event_log() {
 #[test]
 fn migration_055_keeps_released_migrations_contiguous() {
     let ids: Vec<i64> = MIGRATIONS.iter().map(|migration| migration.id).collect();
-    assert_eq!(ids, (1..=62).collect::<Vec<_>>());
+    assert_eq!(ids, (1..=64).collect::<Vec<_>>());
 }
 
 #[test]
@@ -1127,6 +1127,8 @@ fn migration_055_upgrades_released_schema_53() {
             (60, "ThreadSnapshotWindowIndexes"),
             (61, "PullRequestReviewGuides"),
             (62, "ThreadFailureLookupIndex"),
+            (63, "DropUnusedV1Projections"),
+            (64, "CanonicalizeThreadPullRequestLinks"),
         ]
     );
     assert!(
@@ -1152,6 +1154,8 @@ fn migration_055_upgrades_released_schema_53() {
             (60, "ThreadSnapshotWindowIndexes"),
             (61, "PullRequestReviewGuides"),
             (62, "ThreadFailureLookupIndex"),
+            (63, "DropUnusedV1Projections"),
+            (64, "CanonicalizeThreadPullRequestLinks"),
         ]
         .into_iter()
         .map(|(id, name)| (id, name.to_owned()))
@@ -1316,4 +1320,244 @@ fn migration_057_keeps_existing_scheduled_tasks_and_adds_webhook_storage() {
         .unwrap(),
         0
     );
+}
+
+#[test]
+fn migration_063_drops_v1_projections_nothing_reads_and_keeps_the_transcript_import_sources() {
+    let conn = memory();
+    migrate_to(&conn, 62);
+    exec(
+        &conn,
+        "
+        INSERT INTO projection_thread_messages
+          (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('message-1', 'thread-1', 'user', 'hello', 0, '2026-01-01', '2026-01-01')
+        ",
+    );
+    migrate_to(&conn, 63);
+    let tables: std::collections::HashSet<String> =
+        strings(&conn, "SELECT name FROM sqlite_master WHERE type = 'table'")
+            .into_iter()
+            .collect();
+    for dropped in [
+        "projection_thread_activities",
+        "projection_turns",
+        "projection_thread_proposed_plans",
+        "projection_pending_approvals",
+        "projection_state",
+        "checkpoint_diff_blobs",
+    ] {
+        assert!(!tables.contains(dropped), "{dropped}");
+    }
+    for kept in [
+        "projection_threads",
+        "projection_thread_messages",
+        "projection_thread_pull_requests",
+    ] {
+        assert!(tables.contains(kept), "{kept}");
+    }
+    assert_eq!(
+        strings(&conn, "SELECT message_id FROM projection_thread_messages"),
+        vec!["message-1".to_owned()]
+    );
+}
+
+#[test]
+fn migration_064_migrates_single_links_once_and_preserves_arrays() {
+    let conn = memory();
+    migrate_to(&conn, 63);
+    let updated_at = "2026-09-01T00:00:00.000Z";
+    let linked = json!({
+        "projectId": "project-1",
+        "repository": "Acme/Web",
+        "number": 42,
+        "url": "https://github.com/acme/web/pull/42",
+    });
+    let current_link = json!({
+        "host": "github.com",
+        "repository": "acme/web",
+        "number": 43,
+        "url": "https://github.com/acme/web/pull/43",
+        "source": "agent",
+        "linkedAt": updated_at,
+        "snapshot": null,
+        "stack": null,
+    });
+    let thread = |id: &str| {
+        json!({
+            "id": id,
+            "projectId": "project-1",
+            "title": id,
+            "providerInstanceId": "codex",
+            "modelSelection": {"instanceId": "codex", "model": "gpt-5.4"},
+            "runtimeMode": "full-access",
+            "interactionMode": "default",
+            "createdBy": "user",
+            "creationSource": "web",
+            "branch": null,
+            "worktreePath": null,
+            "activeProviderThreadId": null,
+            "lineage": {"parentThreadId": null, "relationshipToParent": null, "rootThreadId": id},
+            "forkedFrom": null,
+            "createdAt": updated_at,
+            "updatedAt": updated_at,
+            "archivedAt": null,
+            "deletedAt": null,
+        })
+    };
+    let with = |mut base: Value, extra: Value| {
+        base.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        base
+    };
+    let mut fixtures = vec![
+        with(thread("github"), json!({"linkedPullRequest": linked})),
+        with(
+            thread("forgejo"),
+            json!({"linkedPullRequest": with(linked.clone(), json!({"url": "http://forge.example:3000/acme/web/pulls/42"}))}),
+        ),
+        with(
+            thread("azure"),
+            json!({"linkedPullRequest": with(linked.clone(), json!({
+                "repository": "project/_git/web",
+                "url": "https://dev.azure.com/org/project/_git/web/pullrequest/42",
+            }))}),
+        ),
+        with(
+            thread("empty"),
+            json!({"linkedPullRequest": linked, "pullRequests": []}),
+        ),
+        with(
+            thread("current"),
+            json!({"linkedPullRequest": linked, "pullRequests": [current_link]}),
+        ),
+        with(thread("unlinked"), json!({"linkedPullRequest": null})),
+    ];
+    for index in 0..501 {
+        fixtures.push(with(
+            thread(&format!("page-{index:03}")),
+            json!({"linkedPullRequest": with(linked.clone(), json!({
+                "number": 9000,
+                "url": "https://github.com/acme/web/pull/9000",
+            }))}),
+        ));
+    }
+    for fixture in &fixtures {
+        let id = fixture["id"].as_str().unwrap();
+        let payload = fixture.to_string();
+        conn.execute(
+            "
+            INSERT INTO orchestration_v2_projection_threads (
+              thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+              created_at, updated_at, payload_json
+            ) VALUES (?1, 'project-1', ?1, 'codex', 'full-access', 'default', ?2, ?2, ?3)
+            ",
+            rusqlite::params![id, updated_at, payload],
+        )
+        .unwrap();
+        conn.execute(
+            "
+            INSERT INTO orchestration_events (
+              event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+              actor_kind, payload_json, metadata_json, application_event_version
+            ) VALUES (?1, 'thread', ?2, 0, 'thread.created', ?3, 'user', ?4, '{}', 2)
+            ",
+            rusqlite::params![format!("event:{id}"), id, updated_at, payload],
+        )
+        .unwrap();
+    }
+    let v1_payload = json!({"linkedPullRequest": linked}).to_string();
+    conn.execute(
+        "
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          actor_kind, payload_json, metadata_json, application_event_version
+        ) VALUES ('event:v1', 'thread', 'v1', 0, 'thread.created', ?1, 'user', ?2, '{}', 1)
+        ",
+        rusqlite::params![updated_at, v1_payload],
+    )
+    .unwrap();
+
+    assert_eq!(
+        run_migrations(&conn, RunMigrationsOptions::default()).unwrap(),
+        vec![(64, "CanonicalizeThreadPullRequestLinks")]
+    );
+    assert!(
+        run_migrations(&conn, RunMigrationsOptions::default())
+            .unwrap()
+            .is_empty()
+    );
+
+    let migrated: std::collections::BTreeMap<String, Value> = {
+        let mut stmt = conn
+            .prepare("SELECT thread_id, payload_json FROM orchestration_v2_projection_threads")
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                serde_json::from_str::<Value>(&row.get::<_, String>(1)?).unwrap(),
+            ))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    };
+    assert_eq!(
+        migrated["github"]["pullRequests"],
+        json!([with(
+            current_link.clone(),
+            json!({"number": 42, "url": linked["url"], "source": "manual"})
+        )])
+    );
+    assert_eq!(
+        migrated["forgejo"]["pullRequests"][0]["host"],
+        json!("forge.example:3000")
+    );
+    assert_eq!(
+        migrated["azure"]["pullRequests"][0]["host"],
+        json!("dev.azure.com")
+    );
+    assert_eq!(
+        migrated["azure"]["pullRequests"][0]["repository"],
+        json!("org/project/_git/web")
+    );
+    assert_eq!(migrated["empty"]["pullRequests"], json!([]));
+    assert_eq!(migrated["current"]["pullRequests"], json!([current_link]));
+    assert!(migrated["unlinked"].get("pullRequests").is_none());
+    assert_eq!(
+        migrated["page-500"]["pullRequests"][0]["number"],
+        json!(9000)
+    );
+    assert!(
+        migrated
+            .values()
+            .all(|value| value["updatedAt"] == json!(updated_at))
+    );
+
+    let events: std::collections::BTreeMap<String, Value> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT stream_id, payload_json FROM orchestration_events WHERE application_event_version = 2",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                serde_json::from_str::<Value>(&row.get::<_, String>(1)?).unwrap(),
+            ))
+        })
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+    };
+    assert_eq!(events, migrated);
+    let v1: String = conn
+        .query_row(
+            "SELECT payload_json FROM orchestration_events WHERE event_id = 'event:v1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(v1, v1_payload);
 }

@@ -1,0 +1,7 @@
+-- Port of upstream/apps/server/src/persistence/Migrations/064_CanonicalizeThreadPullRequestLinks.ts
+-- No SQL template: the migration body is
+-- `legacy_pull_request_key::canonicalize_thread_pull_request_links` (MigrationKind::CanonicalizeThreadPullRequestLinks).
+-- It rewrites `orchestration_v2_projection_threads.payload_json` and the v2
+-- `thread.*` rows of `orchestration_events` whose payload has a legacy
+-- `linkedPullRequest` object and no `pullRequests` array, setting
+-- `pullRequests` to a one-element array with the legacy key.

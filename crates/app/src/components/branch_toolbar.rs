@@ -25,6 +25,7 @@ pub mod env_selectors;
 pub mod live_source;
 pub mod mock_source;
 pub mod paginated_branches;
+pub mod pull_request_thread_dialog;
 
 use gpui_kit::component::Selectable as _;
 use gpui_kit::component::popover::Popover;
@@ -145,7 +146,9 @@ fn selector_props(
         active_thread_branch_override: props.active_thread_branch_override.clone(),
         start_from_origin: props.start_from_origin,
         compact_labels: props.compact_labels,
-        can_checkout_pull_request: true,
+        // Upstream offers it on a draft thread only (`canCheckoutPullRequestIntoThread`): a
+        // started thread keeps its workspace.
+        can_checkout_pull_request: !props.env_locked,
     }
 }
 

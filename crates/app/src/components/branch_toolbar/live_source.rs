@@ -12,7 +12,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui_kit::{App, Task};
-use turin_contracts::git::{VcsCreateRefInput, VcsListRefsInput, VcsRef, VcsSwitchRefInput};
+use turin_contracts::git::{
+    GitPreparePullRequestThreadInput, GitPreparePullRequestThreadMode,
+    GitPreparePullRequestThreadResult, GitResolvedPullRequest, VcsCreateRefInput, VcsListRefsInput,
+    VcsRef, VcsSwitchRefInput,
+};
 use turin_contracts::{EnvironmentId, PositiveInt, ThreadId, TrimmedNonEmptyString};
 
 use super::backend::{BranchBackend, RefPage, SwitchRefResult};
@@ -269,6 +273,56 @@ impl BranchBackend for LiveBranchBackend {
                 .await
         });
         cx.spawn(async move |_| task.await.map_err(|error| error.message))
+    }
+
+    fn resolve_pull_request(
+        &self,
+        cwd: &str,
+        reference: &str,
+        cx: &mut App,
+    ) -> Task<Result<GitResolvedPullRequest, String>> {
+        let (cwd, reference) = (cwd.to_owned(), reference.to_owned());
+        let task = self.bus.task(cx, move |commands| async move {
+            commands.git_resolve_pull_request(&cwd, &reference).await
+        });
+        cx.spawn(async move |_| task.await.map_err(|error| error.message))
+    }
+
+    fn prepare_pull_request_thread(
+        &self,
+        cwd: &str,
+        reference: &str,
+        mode: GitPreparePullRequestThreadMode,
+        thread_id: Option<ThreadId>,
+        cx: &mut App,
+    ) -> Task<Result<GitPreparePullRequestThreadResult, String>> {
+        let input = (|| -> Result<GitPreparePullRequestThreadInput, String> {
+            Ok(GitPreparePullRequestThreadInput {
+                cwd: TrimmedNonEmptyString::new(cwd).map_err(|error| error.to_string())?,
+                reference: TrimmedNonEmptyString::new(reference)
+                    .map_err(|error| error.to_string())?,
+                mode,
+                thread_id,
+            })
+        })();
+        let input = match input {
+            Ok(input) => input,
+            Err(message) => return Task::ready(Err(message)),
+        };
+        let (pages, git, cwd) = (self.pages.clone(), self.git.clone(), cwd.to_owned());
+        let task = self.bus.task(cx, move |commands| async move {
+            commands.git_prepare_pull_request_thread(input).await
+        });
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            pages.borrow_mut().retain(|(key, _), _| *key != cwd);
+            cx.update(|cx| {
+                // The checkout changed: drop its cached refs and re-read its status.
+                git.refresh_status(&cwd, cx);
+                cx.refresh_windows();
+            });
+            outcome.map_err(|error| error.message)
+        })
     }
 
     fn stop_thread_session(&self, _: &EnvironmentId, thread_id: &ThreadId, _: &mut App) {

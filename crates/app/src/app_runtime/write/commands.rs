@@ -1099,6 +1099,44 @@ impl Commands {
         result
     }
 
+    /// `gitEnvironment.resolvePullRequest`: the pull request a pasted reference names,
+    /// as the checkout dialog previews it.
+    pub async fn git_resolve_pull_request(
+        &self,
+        cwd: &str,
+        reference: &str,
+    ) -> Result<turin_contracts::git::GitResolvedPullRequest, CommandError> {
+        let input = turin_contracts::git::GitPullRequestRefInput {
+            cwd: turin_contracts::TrimmedNonEmptyString::new(cwd)
+                .map_err(|error| CommandError::new(error.to_string()))?,
+            reference: turin_contracts::TrimmedNonEmptyString::new(reference)
+                .map_err(|error| CommandError::new(error.to_string()))?,
+        };
+        self.runtime
+            .git_manager
+            .resolve_pull_request(&input)
+            .await
+            .map(|result| result.pull_request)
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `gitEnvironment.preparePullRequestThread`: checks the pull request's branch out in
+    /// the project checkout (`local`) or in a new worktree, and runs the project's setup there.
+    pub async fn git_prepare_pull_request_thread(
+        &self,
+        input: turin_contracts::git::GitPreparePullRequestThreadInput,
+    ) -> Result<turin_contracts::git::GitPreparePullRequestThreadResult, CommandError> {
+        let cwd = input.cwd.as_str().to_owned();
+        let result = self
+            .runtime
+            .git_manager
+            .prepare_pull_request_thread(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error));
+        self.runtime.git_manager.invalidate_status(&cwd);
+        result
+    }
+
     /// `vcsEnvironment.runStackedAction`: commit, push and pull request steps.
     /// `progress` hears every phase and hook event as it happens.
     pub async fn git_run_stacked_action(

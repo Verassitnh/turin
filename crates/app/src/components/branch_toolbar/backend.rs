@@ -15,7 +15,10 @@
 use std::rc::Rc;
 
 use gpui_kit::{App, Task};
-use turin_contracts::git::VcsRef;
+use turin_contracts::git::{
+    GitPreparePullRequestThreadMode, GitPreparePullRequestThreadResult, GitResolvedPullRequest,
+    VcsRef,
+};
 use turin_contracts::{EnvironmentId, ThreadId};
 
 use super::branch_toolbar_logic::{EnvMode, EnvironmentOption, WorktreeThread};
@@ -110,6 +113,27 @@ pub trait BranchBackend {
         thread_id: &ThreadId,
         cx: &mut App,
     );
+    /// `gitEnvironment.resolvePullRequest`: previews the pull request a reference names.
+    fn resolve_pull_request(
+        &self,
+        _cwd: &str,
+        _reference: &str,
+        _cx: &mut App,
+    ) -> Task<Result<GitResolvedPullRequest, String>> {
+        Task::ready(Err("Pull requests are not available here.".to_owned()))
+    }
+    /// `gitEnvironment.preparePullRequestThread`: checks the pull request's branch out in the
+    /// project checkout or in a new worktree.
+    fn prepare_pull_request_thread(
+        &self,
+        _cwd: &str,
+        _reference: &str,
+        _mode: GitPreparePullRequestThreadMode,
+        _thread_id: Option<ThreadId>,
+        _cx: &mut App,
+    ) -> Task<Result<GitPreparePullRequestThreadResult, String>> {
+        Task::ready(Err("Pull requests are not available here.".to_owned()))
+    }
     /// The machines a thread can run on.
     fn environments(&self, cx: &App) -> Vec<EnvironmentOption>;
     /// Copies text (`writeTextToClipboard`).

@@ -24,6 +24,9 @@ use crate::components::branch_toolbar::backend::{
 use crate::components::branch_toolbar::branch_toolbar_logic::{
     EnvMode, ResolveEffectiveEnvModeInput, resolve_effective_env_mode,
 };
+use crate::components::branch_toolbar::pull_request_thread_dialog::{
+    self, OnPrepared, PreparedPullRequestThread,
+};
 use crate::components::branch_toolbar::{
     BranchToolbar, BranchToolbarEvent, BranchToolbarLayout, BranchToolbarProps, PanelSection,
 };
@@ -253,9 +256,10 @@ impl ChatGitHost {
                 self,
             );
             for toolbar in [&composer, &workspace, &branch] {
-                self._subscriptions.push(cx.subscribe(
+                self._subscriptions.push(cx.subscribe_in(
                     toolbar,
-                    |this, _, event: &BranchToolbarEvent, cx| {
+                    window,
+                    |this, _, event: &BranchToolbarEvent, window, cx| {
                         match event {
                             BranchToolbarEvent::EnvModeChanged(mode) => this.env_mode = Some(*mode),
                             BranchToolbarEvent::StartFromOriginChanged(value) => {
@@ -264,9 +268,11 @@ impl ChatGitHost {
                             BranchToolbarEvent::ActiveBranchOverrideChanged(branch) => {
                                 this.branch_override = Some(branch.clone())
                             }
+                            BranchToolbarEvent::CheckoutPullRequestRequested(reference) => {
+                                this.open_pull_request_dialog(reference.clone(), window, cx)
+                            }
                             BranchToolbarEvent::DraftContextChanged { .. }
-                            | BranchToolbarEvent::ComposerFocusRequested
-                            | BranchToolbarEvent::CheckoutPullRequestRequested(_) => {}
+                            | BranchToolbarEvent::ComposerFocusRequested => {}
                         }
                         cx.notify();
                     },
@@ -318,6 +324,76 @@ impl ChatGitHost {
             let cwd = open_in_cwd(&routed);
             open_in.update(cx, |open_in, cx| open_in.set_cwd(cwd, cx));
         }
+    }
+
+    /// `openPullRequestDialog`: the branch picker's "Checkout pull request" row.
+    fn open_pull_request_dialog(
+        &mut self,
+        reference: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(routed) = self.routed.clone() else {
+            return;
+        };
+        // A started thread keeps its workspace (`canCheckoutPullRequestIntoThread`).
+        if routed.has_session {
+            return;
+        }
+        let host = cx.entity().downgrade();
+        let on_prepared: OnPrepared = std::rc::Rc::new(move |prepared, _, cx| {
+            host.update(cx, |host, cx| host.bind_prepared_pull_request(prepared, cx))
+                .ok();
+        });
+        pull_request_thread_dialog::open(
+            self.backends.branch.clone(),
+            routed.project_cwd.clone(),
+            routed.thread_id.clone(),
+            Some(reference),
+            on_prepared,
+            window,
+            cx,
+        );
+    }
+
+    /// `handlePreparedPullRequestThread`: the not yet started thread takes the pull request's
+    /// branch, in the new worktree when there is one. Turin has no draft store, so the thread
+    /// the dialog was opened from is the draft (`setDraftThreadContext`).
+    fn bind_prepared_pull_request(
+        &mut self,
+        prepared: PreparedPullRequestThread,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(routed) = self.routed.clone() else {
+            return;
+        };
+        self.env_mode = Some(if prepared.worktree_path.is_some() {
+            EnvMode::Worktree
+        } else {
+            EnvMode::Local
+        });
+        self.branch_override = Some(Some(prepared.branch.clone()));
+        let task = self.backends.branch.update_thread_metadata(
+            &routed.environment_id,
+            &routed.thread_id,
+            Some(prepared.branch),
+            prepared.worktree_path,
+            false,
+            cx,
+        );
+        cx.spawn(async move |_, cx| {
+            if let Err(message) = task.await {
+                cx.update(|cx| {
+                    crate::components::chat::live_chat::push_error(
+                        cx,
+                        "Could not use the pull request",
+                        &message,
+                    )
+                });
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// The strip under the composer (`ComposerSurface.ContextStrip`).

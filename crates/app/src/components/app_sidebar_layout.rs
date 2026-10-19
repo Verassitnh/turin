@@ -126,9 +126,6 @@ actions!(
 
 pub const KEY_CONTEXT: &str = "AppShell";
 
-/// The model a new thread starts on until the default-model setting is read.
-const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-6";
-
 /// Upstream default keybindings (packages/shared/src/keybindings.ts) for the
 /// shell's actions.
 pub fn bind_keys(cx: &mut App) {
@@ -245,6 +242,22 @@ pub struct AppSidebarLayout {
     _keybindings_warning: Option<Subscription>,
     /// Launch toast and sidebar pill for provider updates (live shell only).
     provider_updates: Option<Entity<crate::shell::provider_updates::ProviderUpdateHost>>,
+}
+
+/// Where a sidebar `NewThread` event goes.
+#[derive(Debug, PartialEq, Eq)]
+enum NewThreadTarget {
+    InProject(String),
+    Picker,
+}
+
+/// The sidebar resolves the project itself (single project, Shift or
+/// `chat.newLocal`); `None` means the "New thread in…" picker.
+fn sidebar_new_thread_target(project_key: Option<&str>) -> NewThreadTarget {
+    match project_key {
+        Some(key) => NewThreadTarget::InProject(key.to_owned()),
+        None => NewThreadTarget::Picker,
+    }
 }
 
 impl AppSidebarLayout {
@@ -714,14 +727,22 @@ impl AppSidebarLayout {
                 window,
                 cx,
             ),
-            SidebarEvent::NewThread {
-                project_key: Some(project_key),
-                ..
-            } if self.live.is_some() => {
-                self.create_thread_in_project(project_key.clone(), window, cx)
-            }
-            SidebarEvent::NewThread { .. } if self.live.is_some() => {
-                self.new_thread_from_context(window, cx)
+            SidebarEvent::NewThread { project_key, .. } if self.live.is_some() => {
+                match sidebar_new_thread_target(project_key.as_deref()) {
+                    NewThreadTarget::InProject(project_key) => {
+                        self.create_thread_in_project(project_key, window, cx)
+                    }
+                    // `handleNewThreadClick`: several projects without Shift open
+                    // the "New thread in…" picker even when a thread is open.
+                    NewThreadTarget::Picker => self.open_command_palette(
+                        CommandPaletteOpenDetail {
+                            open: Some(OpenTarget::NewThreadIn),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    ),
+                }
             }
             SidebarEvent::NewThread { .. } if self.live.is_none() => {
                 Self::notify_unavailable("New thread", window, cx);
@@ -779,15 +800,13 @@ impl AppSidebarLayout {
             return;
         };
         let task = live.bus.task(cx, move |commands| async move {
+            let defaults = commands.new_thread_defaults(&project_id).await?;
             commands
                 .create_thread(CreateThread {
                     project_id,
                     title: "New thread".into(),
-                    model_selection: serde_json::json!({
-                        "instanceId": "claudeAgent",
-                        "model": DEFAULT_CLAUDE_MODEL,
-                    }),
-                    runtime_mode: "full-access".into(),
+                    model_selection: defaults.model_selection,
+                    runtime_mode: defaults.runtime_mode,
                     interaction_mode: "default".into(),
                 })
                 .await
@@ -1691,4 +1710,18 @@ fn forward_sidebar_actions(
         ThreadJump8,
         ThreadJump9
     )
+}
+
+#[cfg(test)]
+mod new_thread_target_tests {
+    use super::*;
+
+    #[test]
+    fn an_unresolved_project_opens_the_picker_instead_of_the_routed_project() {
+        assert_eq!(sidebar_new_thread_target(None), NewThreadTarget::Picker);
+        assert_eq!(
+            sidebar_new_thread_target(Some("local:p1")),
+            NewThreadTarget::InProject("local:p1".into())
+        );
+    }
 }

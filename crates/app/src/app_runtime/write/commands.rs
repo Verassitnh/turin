@@ -490,6 +490,34 @@ impl Commands {
         self.dispatch(command).await.map(drop)
     }
 
+    /// The model and runtime mode a new thread in `project_id` starts with
+    /// (project default, then settings default, then the first ready provider).
+    pub async fn new_thread_defaults(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<super::new_thread_defaults::NewThreadDefaults, CommandError> {
+        let settings = self.server_settings().await?;
+        let legacy = self
+            .runtime
+            .stores
+            .projects
+            .get(project_id.clone(), true)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?
+            .map(
+                |row| turin_shared::project_settings::LegacyProjectSettingsFields {
+                    default_model_selection: row.default_model_selection,
+                    default_thread_env_mode: row.default_thread_env_mode,
+                },
+            );
+        Ok(super::new_thread_defaults::resolve_new_thread_defaults(
+            &settings,
+            project_id,
+            legacy.as_ref(),
+            &self.provider_snapshots(),
+        ))
+    }
+
     pub async fn server_settings(
         &self,
     ) -> Result<turin_contracts::settings::ServerSettings, CommandError> {

@@ -17,6 +17,7 @@ pub mod composer_inline_token_paste;
 pub mod confirm_dialog_host;
 pub mod context_presentation_registry;
 pub mod drag_region;
+mod entity_reentrancy_lint;
 pub mod git_actions_control;
 pub mod jetbrains_icons;
 pub mod keybindings_config_warning;

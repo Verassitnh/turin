@@ -46,6 +46,9 @@ use self::lifecycle::{
 };
 use crate::timestamp_format::now_ms;
 
+/// Seconds between idle status refreshes.
+const STATUS_POLL_TICKS: u32 = 10;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GitDisplayMode {
     #[default]
@@ -115,12 +118,22 @@ impl GitActionsControl {
         // Elapsed counters and the progress rows tick by the second, and the
         // window-focus refresh debounce of upstream is the host's concern.
         let ticker = cx.spawn(async move |this, cx| {
+            let mut ticks = 0u32;
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
+                ticks = ticks.wrapping_add(1);
                 if this
                     .update(cx, |this, cx| {
                         if this.needs_tick(cx) {
                             cx.notify();
+                        }
+                        // Upstream pushes status changes; here the idle control
+                        // polls (a cheap, cached call) so edits made by the
+                        // agent or another tool show up.
+                        if ticks % STATUS_POLL_TICKS == 0
+                            && let Some(cwd) = this.props.git_cwd.clone()
+                        {
+                            this.backend.refresh_status(&cwd, cx);
                         }
                     })
                     .is_err()
@@ -450,6 +463,8 @@ impl GitActionsControl {
         let Some(target) = self.current_target() else {
             return;
         };
+        // Provider readiness is discovered lazily; make sure it is current.
+        self.backend.refresh_status(&target.cwd, cx);
         publish_dialog::open(
             cx.entity().downgrade(),
             self.backend.clone(),

@@ -284,10 +284,13 @@ impl AppSidebarLayout {
         let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
         let git_host = cx.new(|_| {
             let backends = match &live {
-                Some(live) => ChatGitBackends {
-                    git: Rc::new(LiveGitActionsBackend::new(live.bus.clone())),
-                    branch: Rc::new(LiveBranchBackend::new(live.bus.clone())),
-                },
+                Some(live) => {
+                    let git = LiveGitActionsBackend::new(live.bus.clone());
+                    ChatGitBackends {
+                        branch: Rc::new(LiveBranchBackend::new(live.bus.clone(), git.clone())),
+                        git: Rc::new(git),
+                    }
+                }
                 None => ChatGitBackends {
                     git: Rc::new(MockGitActionsBackend::new()),
                     branch: Rc::new(MockBranchBackend::new()),

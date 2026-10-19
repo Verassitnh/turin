@@ -582,6 +582,129 @@ impl Commands {
         Ok(result)
     }
 
+    /// `vcsEnvironment.createRef`: creates `ref_name` and, when asked, switches to it.
+    pub async fn git_create_ref(
+        &self,
+        input: turin_contracts::git::VcsCreateRefInput,
+    ) -> Result<turin_contracts::git::VcsCreateRefResult, CommandError> {
+        let result = self
+            .runtime
+            .git
+            .create_ref(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        self.runtime
+            .git_manager
+            .invalidate_status(input.cwd.as_str());
+        Ok(result)
+    }
+
+    /// `vcsEnvironment.pull`: fast-forwards the current branch from its upstream.
+    pub async fn git_pull(
+        &self,
+        cwd: &str,
+    ) -> Result<turin_contracts::git::VcsPullResult, CommandError> {
+        self.runtime
+            .git_manager
+            .pull_current_branch(cwd)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `vcsEnvironment.init`: `git init` in `cwd`.
+    pub async fn git_init(&self, cwd: &str) -> Result<(), CommandError> {
+        let input = turin_contracts::git::VcsInitInput {
+            cwd: turin_contracts::TrimmedNonEmptyString::new(cwd)
+                .map_err(|error| CommandError::new(error.to_string()))?,
+            kind: None,
+        };
+        let result = self
+            .runtime
+            .git
+            .init_repo(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error));
+        self.runtime.git_manager.invalidate_status(cwd);
+        result
+    }
+
+    /// `vcsEnvironment.runStackedAction`: commit, push and pull request steps.
+    /// `progress` hears every phase and hook event as it happens.
+    pub async fn git_run_stacked_action(
+        &self,
+        input: turin_contracts::git::GitRunStackedActionInput,
+        progress: Option<Arc<dyn Fn(turin_contracts::git::GitActionProgressEvent) + Send + Sync>>,
+    ) -> Result<turin_contracts::git::GitRunStackedActionResult, CommandError> {
+        let options = turin_git::git_manager::GitRunStackedActionOptions {
+            progress,
+            project: None,
+        };
+        self.runtime
+            .git_manager
+            .run_stacked_action(&input, options)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `sourceControlEnvironment.publishRepository`: creates the remote, wires it
+    /// up and pushes the current branch.
+    pub async fn git_publish_repository(
+        &self,
+        input: turin_contracts::source_control::SourceControlPublishRepositoryInput,
+    ) -> Result<turin_contracts::source_control::SourceControlPublishRepositoryResult, CommandError>
+    {
+        let cwd = input.cwd.as_str().to_owned();
+        let service =
+            turin_source_control::source_control::repository_service::SourceControlRepositoryService::new(
+                turin_source_control::shared::host_process::working_directory(),
+                std::env::var("HOME").unwrap_or_default(),
+                Arc::clone(&self.runtime.source_control) as Arc<_>,
+                Arc::new(turin_git::source_control_bridge::GitRepositoryGit::new(
+                    Arc::clone(&self.runtime.git),
+                )),
+            );
+        let result = service
+            .publish_repository(input)
+            .await
+            .map_err(|error| CommandError::from_error(&error));
+        self.runtime.git_manager.invalidate_status(&cwd);
+        result
+    }
+
+    /// Which source control providers are installed and signed in (Publish needs one).
+    pub async fn source_control_providers(
+        &self,
+    ) -> Vec<turin_contracts::source_control::SourceControlProviderDiscoveryItem> {
+        self.runtime.source_control.discover().await
+    }
+
+    /// `threadEnvironment.updateMetadata` with a branch (and worktree) patch. `None`
+    /// clears the field; `expected_empty` makes the update lose to any launch that
+    /// lands first.
+    pub async fn update_thread_branch(
+        &self,
+        thread_id: &ThreadId,
+        branch: Option<String>,
+        worktree_path: Option<Option<String>>,
+        expected_empty: bool,
+    ) -> Result<(), CommandError> {
+        let mut command = json!({
+            "type": "thread.metadata.update",
+            "commandId": command_id(),
+            "threadId": thread_id,
+            "branch": branch,
+        });
+        if let Some(object) = command.as_object_mut() {
+            if let Some(worktree_path) = worktree_path {
+                object.insert("worktreePath".into(), json!(worktree_path));
+            }
+            if expected_empty {
+                object.insert("expectedEmpty".into(), json!(true));
+            }
+        }
+        self.dispatch(command).await.map(drop)
+    }
+
     /// A missing production reader is unavailable, never a successful zero total.
     pub async fn usage_summary(
         &self,

@@ -822,3 +822,167 @@ async fn at_completion_finds_workspace_files_and_folders() {
         "{folders:?}"
     );
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A repository with one commit on `main`.
+fn git_repo(dir: &Path) {
+    git(dir, &["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("a.txt"), "one\n").expect("write");
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "init"]);
+}
+
+// The live git control: commit, pull, init, create/switch ref and the thread
+// branch update all run through the runtime instead of reporting "not wired".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn git_actions_run_against_a_real_repository() {
+    use turin_contracts::git::{
+        GitRunStackedActionInput, GitStackedAction, VcsCreateRefInput, VcsListRefsInput,
+        VcsSwitchRefInput,
+    };
+    use turin_contracts::{PositiveInt, TrimmedNonEmptyString};
+
+    let harness = harness().await;
+    let commands = &harness.commands;
+    let repo = harness.workspace.clone();
+    git_repo(&repo);
+    let cwd = repo.to_str().expect("utf-8");
+    let text = |value: &str| TrimmedNonEmptyString::new(value).expect("text");
+
+    // Status is a real read: a dirty tree is visible.
+    std::fs::write(repo.join("a.txt"), "one\ntwo\n").expect("edit");
+    let status = commands.git_status(cwd).await.expect("status");
+    assert!(status.is_repo && status.has_working_tree_changes);
+    assert_eq!(status.ref_name.as_ref().map(|n| n.as_str()), Some("main"));
+
+    // Commit through the stacked action, hearing its progress.
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let result = commands
+        .git_run_stacked_action(
+            GitRunStackedActionInput {
+                action_id: text("run-1"),
+                cwd: text(cwd),
+                action: GitStackedAction::Commit,
+                commit_message: Some(text("feat: two")),
+                feature_branch: None,
+                file_paths: None,
+                thread_id: None,
+                project_id: None,
+            },
+            Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        )
+        .await
+        .expect("commit");
+    assert_eq!(
+        result.commit.subject.as_ref().map(|s| s.as_str()),
+        Some("feat: two")
+    );
+    assert!(
+        !events.lock().unwrap().is_empty(),
+        "progress events are reported"
+    );
+    let status = commands.git_status(cwd).await.expect("status");
+    assert!(
+        !status.has_working_tree_changes,
+        "the commit cleaned the tree"
+    );
+
+    // Pull without an upstream reports git's reason, not a stub.
+    let pull = commands.git_pull(cwd).await.expect_err("no upstream");
+    assert!(!pull.message.contains("not wired"), "{pull}");
+
+    // Create + switch refs, and the list shows them.
+    commands
+        .git_create_ref(VcsCreateRefInput {
+            cwd: text(cwd),
+            ref_name: text("feature/x"),
+            switch_ref: Some(true),
+        })
+        .await
+        .expect("create ref");
+    let status = commands.git_status(cwd).await.expect("status");
+    assert_eq!(
+        status.ref_name.as_ref().map(|n| n.as_str()),
+        Some("feature/x")
+    );
+    let switched = commands
+        .git_switch_branch(VcsSwitchRefInput {
+            cwd: text(cwd),
+            ref_name: text("main"),
+        })
+        .await
+        .expect("switch");
+    assert_eq!(switched.ref_name.as_ref().map(|n| n.as_str()), Some("main"));
+    let listed = commands
+        .git_list_refs(&VcsListRefsInput {
+            cwd: text(cwd),
+            query: None,
+            cursor: None,
+            include_matching_remote_refs: Some(true),
+            ref_kind: None,
+            refresh: Some(true),
+            limit: PositiveInt::new(100),
+        })
+        .await
+        .expect("list refs");
+    let names: Vec<_> = listed.refs.iter().map(|r| r.name.as_str()).collect();
+    assert!(
+        names.contains(&"main") && names.contains(&"feature/x"),
+        "{names:?}"
+    );
+
+    // Init in a folder that is not a repository.
+    let plain = tempfile::tempdir().expect("plain dir");
+    let plain_cwd = plain.path().to_str().expect("utf-8");
+    assert!(
+        !commands
+            .git_status(plain_cwd)
+            .await
+            .expect("status")
+            .is_repo
+    );
+    commands.git_init(plain_cwd).await.expect("init");
+    assert!(
+        commands
+            .git_status(plain_cwd)
+            .await
+            .expect("status")
+            .is_repo
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_thread_branch_update_reaches_the_read_model() {
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    harness
+        .commands
+        .update_thread_branch(&thread, Some("feature/x".into()), Some(None), false)
+        .await
+        .expect("update branch");
+    let shell = harness
+        .stores
+        .projections
+        .get_thread_shell(&thread)
+        .await
+        .expect("read shell")
+        .expect("shell");
+    assert_eq!(shell.branch.as_ref().map(|b| b.as_str()), Some("feature/x"));
+}

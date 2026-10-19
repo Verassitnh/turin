@@ -172,6 +172,8 @@ fn label(text: &'static str) -> gpui_kit::Div {
 
 impl Render for PublishForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Readiness is discovered asynchronously; follow it while the dialog is open.
+        self.provider = self.backend.publish_provider(cx);
         let theme = cx.app_theme().clone();
         let weak = cx.entity().downgrade();
         let step = self.step;

@@ -850,6 +850,50 @@ async fn at_completion_finds_workspace_files_and_folders() {
     );
 }
 
+// The project icon picker only lists image files (upstream passes
+// `{ kind: "file", imageOnly: true }`), never source files or folders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn favicon_picker_search_returns_only_image_files() {
+    let harness = harness().await;
+    std::fs::create_dir_all(harness.workspace.join("assets/logos")).expect("dirs");
+    std::fs::write(harness.workspace.join("assets/logo.png"), "").expect("file");
+    std::fs::write(harness.workspace.join("assets/logos/mark.svg"), "").expect("file");
+    std::fs::write(harness.workspace.join("assets/logo-notes.md"), "").expect("file");
+    std::fs::write(harness.workspace.join("logo.rs"), "").expect("file");
+    let cwd = harness.workspace.to_str().expect("utf-8");
+
+    let images = harness
+        .commands
+        .search_image_files(cwd, "logo", 40)
+        .await
+        .expect("search");
+    let mut paths: Vec<&str> = images.iter().map(|(path, _)| path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        ["assets/logo.png", "assets/logos/mark.svg"],
+        "{images:?}"
+    );
+    assert!(images.iter().all(|(_, directory)| !directory), "{images:?}");
+
+    let browse = harness
+        .commands
+        .search_image_files(cwd, "", 40)
+        .await
+        .expect("browse");
+    assert!(
+        browse.iter().all(|(path, directory)| !directory
+            && turin_shared::project_favicon::is_project_favicon_path(path)),
+        "{browse:?}"
+    );
+    assert!(
+        browse
+            .iter()
+            .any(|(path, _)| path == "assets/logos/mark.svg"),
+        "{browse:?}"
+    );
+}
+
 // Settings reports a rejected unarchive / rename / delete as a toast, which only
 // works while the command returns the rejection with a message to show.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

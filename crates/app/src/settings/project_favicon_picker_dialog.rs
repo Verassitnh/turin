@@ -159,6 +159,9 @@ impl SettingsView {
                         .hover(|style| style.bg(theme.accent))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.close_favicon_picker(cx);
+                            if !turin_shared::project_favicon::is_project_favicon_path(&path) {
+                                return;
+                            }
                             this.set_project_icon(
                                 project_ids.clone(),
                                 Some(path.clone()),

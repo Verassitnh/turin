@@ -1236,9 +1236,9 @@ impl SettingsSource for LiveSettingsSource {
         let cwd = cwd.to_owned();
         let query = query.to_owned();
         let paths = bus
-            .run_blocking(
-                move |commands| async move { commands.search_paths(&cwd, &query, 40).await },
-            )
+            .run_blocking(move |commands| async move {
+                commands.search_image_files(&cwd, &query, 40).await
+            })
             .map_err(|error| error.message)?;
         Ok(paths
             .into_iter()

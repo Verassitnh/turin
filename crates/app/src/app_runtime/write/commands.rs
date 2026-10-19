@@ -869,10 +869,35 @@ impl Commands {
         query: &str,
         limit: u32,
     ) -> Result<Vec<(String, bool)>, CommandError> {
+        self.search_paths_with(cwd, query, limit, false).await
+    }
+
+    /// `projectEnvironment.searchEntries` for the favicon picker: files only,
+    /// restricted to image extensions (`{ kind: "file", imageOnly: true }`).
+    pub async fn search_image_files(
+        &self,
+        cwd: &str,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, bool)>, CommandError> {
+        self.search_paths_with(cwd, query, limit, true).await
+    }
+
+    async fn search_paths_with(
+        &self,
+        cwd: &str,
+        query: &str,
+        limit: u32,
+        image_only: bool,
+    ) -> Result<Vec<(String, bool)>, CommandError> {
         use turin_contracts::project::{ProjectEntryKind, ProjectSearchEntriesInput};
-        let input: ProjectSearchEntriesInput =
-            serde_json::from_value(json!({"cwd": cwd, "query": query, "limit": limit}))
-                .map_err(|error| CommandError::new(format!("Invalid path search: {error}")))?;
+        let mut request = json!({"cwd": cwd, "query": query, "limit": limit});
+        if image_only && let Some(object) = request.as_object_mut() {
+            object.insert("kind".into(), json!("file"));
+            object.insert("imageOnly".into(), json!(true));
+        }
+        let input: ProjectSearchEntriesInput = serde_json::from_value(request)
+            .map_err(|error| CommandError::new(format!("Invalid path search: {error}")))?;
         let result = self
             .runtime
             .workspace_entries

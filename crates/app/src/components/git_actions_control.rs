@@ -130,7 +130,7 @@ impl GitActionsControl {
                         // Upstream pushes status changes; here the idle control
                         // polls (a cheap, cached call) so edits made by the
                         // agent or another tool show up.
-                        if ticks % STATUS_POLL_TICKS == 0
+                        if ticks.is_multiple_of(STATUS_POLL_TICKS)
                             && let Some(cwd) = this.props.git_cwd.clone()
                         {
                             this.backend.refresh_status(&cwd, cx);

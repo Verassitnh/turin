@@ -283,6 +283,12 @@ impl LiveChat {
         if !cx.has_global::<ThreadLinkLookup>() {
             install_thread_link_lookup(client.clone(), cx);
         }
+        // A file chip or link in a message opens in the editor on this runtime.
+        if !cx.has_global::<super::markdown::file_link_open::MarkdownFileLinkRuntime>() {
+            cx.set_global(super::markdown::file_link_open::MarkdownFileLinkRuntime(
+                bus.handle().clone(),
+            ));
+        }
         let timeline = cx.new(|_| ThreadTimelineStore::new(Default::default()));
         let composer = cx.new(|_| ComposerStore::new(ComposerViewModel::default()));
         // `ComposerSource` / `TimelineSource` are `Arc<dyn _>` seams used on the

@@ -361,6 +361,7 @@ fn collapsible_user_message_body(message: &ChatMessage, cx: &RowCx) -> AnyElemen
     let is_collapsed = can_collapse && !expanded;
     let surface = cx.theme.message_surface;
     let markdown = ChatMarkdown::new(("user-md", cx.order), text)
+        .workspace_root(cx.workspace_root())
         .line_breaks(true)
         .full_foreground(true)
         .skills(cx.snapshot.skills.clone())
@@ -455,6 +456,7 @@ pub fn assistant_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
         .py(rems(0.125))
         .child(
             ChatMarkdown::new(("assistant-md", cx.order), text.clone())
+                .workspace_root(cx.workspace_root())
                 .line_breaks(line_breaks)
                 .streaming(message.streaming)
                 .find(cx.markdown_find(&message.id))
@@ -901,6 +903,7 @@ fn proposed_plan_card(plan_id: &str, markdown: &str, cx: &RowCx) -> AnyElement {
                 .when(is_collapsed, |this| this.max_h(rems(26.)).overflow_hidden())
                 .child(
                     ChatMarkdown::new(("plan-md", cx.order), text)
+                        .workspace_root(cx.workspace_root())
                         .find(cx.markdown_find(plan_id))
                         .document_order(cx.order + 1),
                 )

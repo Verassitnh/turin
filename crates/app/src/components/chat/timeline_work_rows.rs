@@ -509,6 +509,7 @@ fn reasoning_trace_content(id: &str, entries: &[&WorkLogEntry], cx: &RowCx) -> A
                 ElementId::Name(format!("reasoning-md-{}", entry.id).into()),
                 entry.detail.clone().unwrap_or_default(),
             )
+            .workspace_root(cx.workspace_root())
             .full_foreground(true)
             .line_breaks(true)
             .streaming(streaming)

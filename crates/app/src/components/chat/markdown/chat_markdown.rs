@@ -22,6 +22,7 @@ use gpui_kit::{
     Styled as _, Window, div, px, relative, rems,
 };
 
+use super::file_link_open::open_markdown_file_link;
 use super::code_highlight::{cached_highlight, highlight_code, plain_highlight};
 use super::inline_flow::{
     FindMatchProbe, FlowHighlight, FlowSpan, FlowSpanStyle, FlowText, InlineFlow, SpanChrome,
@@ -146,6 +147,8 @@ pub struct ChatMarkdown {
     skills: Vec<InlineSkill>,
     assistant_message_id: Option<SharedString>,
     find: Option<MarkdownFind>,
+    /// The thread's workspace root: file links resolve against it.
+    workspace_root: Option<SharedString>,
 }
 
 impl ChatMarkdown {
@@ -161,7 +164,14 @@ impl ChatMarkdown {
             skills: Vec::new(),
             assistant_message_id: None,
             find: None,
+            workspace_root: None,
         }
+    }
+
+    /// The root a relative file link or chip opens under.
+    pub fn workspace_root(mut self, root: Option<&str>) -> Self {
+        self.workspace_root = root.map(|root| SharedString::from(root.to_owned()));
+        self
     }
 
     /// Paints the find bar's matches (`threadFindHighlights`).
@@ -240,6 +250,7 @@ struct Md<'a> {
     find_next: Cell<u64>,
     assistant_message_id: Option<&'a str>,
     assistant_message_text: Option<&'a str>,
+    workspace_root: Option<&'a str>,
 }
 
 /// Inherited text properties (`color`, `font-size`, `line-height`).
@@ -559,6 +570,7 @@ impl Md<'_> {
         white_space: WhiteSpace,
     ) -> InlineFlow {
         let (id, order) = self.next_leaf();
+        let workspace_root = self.workspace_root.map(str::to_owned);
         let content = self.flow_text(inlines, inherit);
         let highlights = self.find_highlights(&content.text);
         let mut flow = InlineFlow::new(id, content, white_space)
@@ -566,10 +578,12 @@ impl Md<'_> {
             .strut(self.fonts.sans.clone(), inherit.size, inherit.line_height)
             .document_order(order)
             .selection_color(self.selection)
-            .on_link(Rc::new(|url, _, cx| {
+            .on_link(Rc::new(move |url, _, cx| {
                 if let Some(citation) = parse_assistant_citation_href(url) {
                     chat_media::open_quote(citation, cx);
-                } else if !open_thread_link(url, cx) {
+                } else if !open_thread_link(url, cx)
+                    && !open_markdown_file_link(url, workspace_root.as_deref(), cx)
+                {
                     cx.open_url(url);
                 }
             }));
@@ -1772,6 +1786,7 @@ impl RenderOnce for ChatMarkdown {
                 .assistant_message_id
                 .as_ref()
                 .map(|_| self.text.as_ref()),
+            workspace_root: self.workspace_root.as_deref(),
         };
         let _ = md.streaming;
         let inherit = Inherit {

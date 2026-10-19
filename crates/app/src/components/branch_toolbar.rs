@@ -68,6 +68,18 @@ pub enum BranchToolbarLayout {
     #[default]
     Composer,
     Panel,
+    /// The chat header's compact, low-chrome ghost buttons.
+    Header,
+}
+
+impl BranchToolbarLayout {
+    fn display_mode(self) -> BranchDisplayMode {
+        match self {
+            Self::Composer => BranchDisplayMode::Toolbar,
+            Self::Panel => BranchDisplayMode::Panel,
+            Self::Header => BranchDisplayMode::Header,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,11 +169,7 @@ impl BranchToolbar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let display_mode = if props.layout == BranchToolbarLayout::Panel {
-            BranchDisplayMode::Panel
-        } else {
-            BranchDisplayMode::Toolbar
-        };
+        let display_mode = props.layout.display_mode();
         let selector_props = selector_props(&props, display_mode);
         let selector = {
             let backend = backend.clone();
@@ -209,11 +217,7 @@ impl BranchToolbar {
         if self.props == props {
             return;
         }
-        let display_mode = if props.layout == BranchToolbarLayout::Panel {
-            BranchDisplayMode::Panel
-        } else {
-            BranchDisplayMode::Toolbar
-        };
+        let display_mode = props.layout.display_mode();
         let selector_props = selector_props(&props, display_mode);
         self.props = props;
         self.selector
@@ -488,6 +492,7 @@ impl BranchToolbar {
         } else {
             labels.trigger.clone()
         };
+        let header = self.props.layout == BranchToolbarLayout::Header;
         let weak = cx.entity().downgrade();
 
         if locked {
@@ -546,13 +551,13 @@ impl BranchToolbar {
                     labels.trigger,
                     self.props.compact_labels,
                 ))
-                .child(composer_control_chevron(&theme))
+                .children((!header).then(|| composer_control_chevron(&theme)))
                 .into_any_element()
         };
         let weak_open = weak.clone();
         let popover = Popover::new("run-context-menu")
             .appearance(false)
-            .anchor(if panel {
+            .anchor(if panel || header {
                 gpui_kit::Anchor::TopLeft
             } else {
                 gpui_kit::Anchor::BottomLeft
@@ -634,6 +639,38 @@ impl Render for BranchToolbar {
                 column = column.child(self.selector.clone());
             }
             return column.into_any_element();
+        }
+
+        if self.props.layout == BranchToolbarLayout::Header {
+            // Header layout: compact ghost buttons, workspace then branch.
+            let mut strip = div()
+                .id("header-branch-strip")
+                .flex()
+                .min_w_0()
+                .items_center()
+                .gap_1()
+                .overflow_hidden()
+                .text_size(TEXT_XS.size)
+                .text_color(with_alpha(theme.muted_foreground, 0.7));
+            if show_git {
+                strip = strip.child(self.render_run_context(false, cx));
+            }
+            if show_environment {
+                let active = self
+                    .props
+                    .available_environments
+                    .iter()
+                    .find(|env| env.environment_id == self.props.environment_id);
+                strip = strip.child(environment_indicator(
+                    active,
+                    self.props.compact_labels,
+                    &theme,
+                ));
+            }
+            if show_git {
+                strip = strip.child(self.selector.clone());
+            }
+            return strip.into_any_element();
         }
 
         // Composer layout: workspace left, branch right. The wide layout's

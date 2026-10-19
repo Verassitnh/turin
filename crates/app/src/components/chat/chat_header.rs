@@ -5,7 +5,8 @@
 //! parent-thread crumb arrive with the thread view task.
 
 use gpui_kit::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, rems,
+    AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    Window, div, rems,
 };
 
 use std::sync::Arc;
@@ -31,6 +32,11 @@ pub struct ChatHeader {
     /// `pr-10` when the right panel owns the titlebar, else `pr-24` to clear
     /// the fixed layout controls.
     pub right_panel_open: bool,
+    /// The env / branch strip, right after the breadcrumb. It shrinks (its
+    /// branch name truncates) before the title does.
+    pub trailing: Option<AnyElement>,
+    /// Without a thread (a draft) only the trailing strip shows.
+    pub show_breadcrumb: bool,
 }
 
 impl RenderOnce for ChatHeader {
@@ -60,7 +66,7 @@ impl RenderOnce for ChatHeader {
             } else {
                 rems(6.)
             })
-            .child(
+            .children(self.show_breadcrumb.then(|| {
                 WorkspaceBreadcrumb::new()
                     .child(
                         // `className="shrink"`: the project crumb gives up width
@@ -81,7 +87,16 @@ impl RenderOnce for ChatHeader {
                             .min_w(rems(2.5))
                             .flex_1()
                             .child(workspace_breadcrumb_text(self.title)),
-                    ),
-            )
+                    )
+            }))
+            .children(self.trailing.map(|trailing| {
+                div()
+                    .flex()
+                    .min_w_0()
+                    .flex_shrink(1.)
+                    .justify_end()
+                    .overflow_hidden()
+                    .child(trailing)
+            }))
     }
 }

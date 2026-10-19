@@ -57,6 +57,8 @@ pub struct RoutedGitThread {
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub has_session: bool,
+    /// An unsent draft: no server thread yet, so env mode and workspace stay editable.
+    pub is_draft: bool,
     pub pull_requests: Vec<crate::state::models::ThreadPullRequestLink>,
     pub project_threads: Vec<ProjectThreadInfo>,
 }
@@ -72,7 +74,7 @@ pub struct ChatGitBackends {
 
 pub struct ChatGitHost {
     backends: ChatGitBackends,
-    composer_toolbar: Option<Entity<BranchToolbar>>,
+    header_toolbar: Option<Entity<BranchToolbar>>,
     workspace_toolbar: Option<Entity<BranchToolbar>>,
     branch_toolbar: Option<Entity<BranchToolbar>>,
     git: Option<Entity<GitActionsControl>>,
@@ -83,6 +85,8 @@ pub struct ChatGitHost {
     env_mode: Option<EnvMode>,
     start_from_origin: bool,
     branch_override: Option<Option<String>>,
+    /// A draft's worktree picked in the header (the draft store is not wired yet).
+    worktree_override: Option<Option<String>>,
     /// The checkout whose git status was last requested.
     refreshed_cwd: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -92,7 +96,7 @@ impl ChatGitHost {
     pub fn new(backends: ChatGitBackends) -> Self {
         Self {
             backends,
-            composer_toolbar: None,
+            header_toolbar: None,
             workspace_toolbar: None,
             branch_toolbar: None,
             git: None,
@@ -101,21 +105,26 @@ impl ChatGitHost {
             env_mode: None,
             start_from_origin: false,
             branch_override: None,
+            worktree_override: None,
             refreshed_cwd: None,
             _subscriptions: Vec::new(),
         }
     }
 
-    fn thread_context(routed: &RoutedGitThread) -> BranchThreadContext {
+    fn thread_context(&self, routed: &RoutedGitThread) -> BranchThreadContext {
         BranchThreadContext {
-            is_server_thread: true,
+            is_server_thread: !routed.is_draft,
             has_session: routed.has_session,
             has_active_project: true,
             project_cwd: Some(routed.project_cwd.clone()),
             project_workspace_root: Some(routed.project_cwd.clone()),
-            worktree_path: routed.worktree_path.clone(),
+            worktree_path: self
+                .worktree_override
+                .clone()
+                .filter(|_| routed.is_draft)
+                .unwrap_or_else(|| routed.worktree_path.clone()),
             branch: routed.branch.clone(),
-            draft_env_mode: None,
+            draft_env_mode: if routed.is_draft { self.env_mode } else { None },
             project_threads: routed.project_threads.clone(),
             pull_requests: routed.pull_requests.clone(),
         }
@@ -127,12 +136,12 @@ impl ChatGitHost {
         layout: BranchToolbarLayout,
         section: PanelSection,
     ) -> BranchToolbarProps {
-        let thread = Self::thread_context(routed);
+        let thread = self.thread_context(routed);
         let env_mode = self.env_mode.unwrap_or_else(|| {
             resolve_effective_env_mode(&ResolveEffectiveEnvModeInput {
                 active_worktree_path: thread.worktree_path.as_deref(),
-                has_server_thread: true,
-                draft_thread_env_mode: None,
+                has_server_thread: !routed.is_draft,
+                draft_thread_env_mode: self.env_mode.filter(|_| routed.is_draft),
                 preparing_worktree: false,
             })
         });
@@ -146,7 +155,7 @@ impl ChatGitHost {
             env_mode,
             start_from_origin: self.start_from_origin,
             // A started thread's workspace is pinned.
-            env_locked: routed.has_session,
+            env_locked: routed.has_session && !routed.is_draft,
             thread,
             active_thread_branch_override: self.branch_override.clone(),
             available_environments: Vec::new(),
@@ -202,6 +211,7 @@ impl ChatGitHost {
                 self.env_mode = None;
                 self.start_from_origin = false;
                 self.branch_override = None;
+                self.worktree_override = None;
             }
             self.routed = Some(routed.clone());
         }
@@ -214,7 +224,7 @@ impl ChatGitHost {
             }
             self.refreshed_cwd = cwd;
         }
-        if self.composer_toolbar.is_none() {
+        if self.header_toolbar.is_none() {
             self._subscriptions
                 .push(cx.observe_window_activation(window, |this, window, cx| {
                     if window.is_window_active()
@@ -232,7 +242,7 @@ impl ChatGitHost {
                     })
                 };
             let composer = make(
-                BranchToolbarLayout::Composer,
+                BranchToolbarLayout::Header,
                 PanelSection::All,
                 window,
                 cx,
@@ -264,8 +274,17 @@ impl ChatGitHost {
                             BranchToolbarEvent::ActiveBranchOverrideChanged(branch) => {
                                 this.branch_override = Some(branch.clone())
                             }
-                            BranchToolbarEvent::DraftContextChanged { .. }
-                            | BranchToolbarEvent::ComposerFocusRequested
+                            BranchToolbarEvent::DraftContextChanged {
+                                branch,
+                                worktree_path,
+                                env_mode,
+                                ..
+                            } => {
+                                this.branch_override = Some(branch.clone());
+                                this.worktree_override = Some(worktree_path.clone());
+                                this.env_mode = Some(*env_mode);
+                            }
+                            BranchToolbarEvent::ComposerFocusRequested
                             | BranchToolbarEvent::CheckoutPullRequestRequested(_) => {}
                         }
                         cx.notify();
@@ -289,20 +308,20 @@ impl ChatGitHost {
                 self.open_in =
                     Some(cx.new(|cx| OpenInPickerView::new(cwd, true, runtime, window, cx)));
             }
-            self.composer_toolbar = Some(composer);
+            self.header_toolbar = Some(composer);
             self.workspace_toolbar = Some(workspace);
             self.branch_toolbar = Some(branch);
             self.git = Some(git);
             return;
         }
         let composer_props =
-            self.toolbar_props(&routed, BranchToolbarLayout::Composer, PanelSection::All);
+            self.toolbar_props(&routed, BranchToolbarLayout::Header, PanelSection::All);
         let workspace_props =
             self.toolbar_props(&routed, BranchToolbarLayout::Panel, PanelSection::Workspace);
         let branch_props =
             self.toolbar_props(&routed, BranchToolbarLayout::Panel, PanelSection::Branch);
         let git_props = self.git_props(&routed);
-        if let Some(toolbar) = &self.composer_toolbar {
+        if let Some(toolbar) = &self.header_toolbar {
             toolbar.update(cx, |toolbar, cx| toolbar.set_props(composer_props, cx));
         }
         if let Some(toolbar) = &self.workspace_toolbar {
@@ -320,9 +339,10 @@ impl ChatGitHost {
         }
     }
 
-    /// The strip under the composer (`ComposerSurface.ContextStrip`).
-    pub fn composer_strip(&self) -> Option<AnyElement> {
-        self.composer_toolbar
+    /// The env / branch strip in the chat header (Turin: moved up from the
+    /// composer's `ContextStrip`, see Deviations).
+    pub fn header_strip(&self) -> Option<AnyElement> {
+        self.header_toolbar
             .as_ref()
             .filter(|_| self.routed.is_some())
             .map(|toolbar| toolbar.clone().into_any_element())
@@ -455,12 +475,12 @@ impl ChatGitHost {
                 }
             }
             "branch-picker" => {
-                if let Some(toolbar) = &self.composer_toolbar {
+                if let Some(toolbar) = &self.header_toolbar {
                     toolbar.update(cx, |toolbar, cx| toolbar.open_branch_picker(window, cx));
                 }
             }
             "workspace-menu" => {
-                if let Some(toolbar) = &self.composer_toolbar {
+                if let Some(toolbar) = &self.header_toolbar {
                     toolbar.update(cx, |toolbar, cx| toolbar.open_workspace_menu(cx));
                 }
             }
@@ -481,6 +501,7 @@ mod tests {
             branch: None,
             worktree_path: worktree.map(str::to_owned),
             has_session: false,
+            is_draft: false,
             pull_requests: Vec::new(),
             project_threads: Vec::new(),
         }

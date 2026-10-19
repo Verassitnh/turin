@@ -109,9 +109,12 @@ struct ScanState {
     error: Option<String>,
 }
 
+/// Called once setup finishes, with the project to land in (`onDone(projectRef)`).
+pub type OnDone = Rc<dyn Fn(Option<ProjectId>, &mut Window, &mut App)>;
+
 pub struct WelcomeWizard {
     backend: Rc<dyn OnboardingBackend>,
-    on_done: Rc<dyn Fn(&mut App)>,
+    on_done: OnDone,
     step: Step,
     is_importing: bool,
     finishing: bool,
@@ -138,7 +141,7 @@ pub fn open_welcome_wizard(
     backend: Rc<dyn OnboardingBackend>,
     window: &mut Window,
     cx: &mut App,
-    on_done: impl Fn(&mut App) + 'static,
+    on_done: impl Fn(Option<ProjectId>, &mut Window, &mut App) + 'static,
 ) {
     let wizard = cx.new(|cx| WelcomeWizard::new(backend, Rc::new(on_done), window, cx));
     open_dialog(
@@ -160,7 +163,7 @@ fn plural(count: u64, one: &str, many: &str) -> String {
 impl WelcomeWizard {
     pub fn new(
         backend: Rc<dyn OnboardingBackend>,
-        on_done: Rc<dyn Fn(&mut App)>,
+        on_done: OnDone,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -264,8 +267,7 @@ impl WelcomeWizard {
                 match result {
                     Ok(()) => {
                         window.close_dialog(cx);
-                        on_done(cx);
-                        let _ = landing;
+                        on_done(landing, window, cx);
                         if !warning.is_empty() {
                             window.push_notification(
                                 Notification::warning(warning)

@@ -798,6 +798,18 @@ impl AppSidebarLayout {
         ThreadId::new(thread_id).ok()
     }
 
+    /// Onboarding landing (`openNewThread(projectRef)`): a new thread in the
+    /// local project the wizard just imported.
+    pub fn open_new_thread_in_project(
+        &mut self,
+        project_id: &turin_contracts::ProjectId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = crate::shell::app_route::scoped_project_key(&local_environment_id(), project_id);
+        self.create_thread_in_project(key, window, cx);
+    }
+
     /// `handleNewThread(projectRef)`: creates the thread at once and opens it.
     /// Upstream keeps an unsent draft and creates the thread with its first
     /// message; Turin has no draft store yet (docs/handoff/T22.md).
@@ -1755,5 +1767,15 @@ mod new_thread_target_tests {
             sidebar_new_thread_target(Some("local:p1")),
             NewThreadTarget::InProject("local:p1".into())
         );
+    }
+
+    #[test]
+    fn wizard_landing_key_resolves_back_to_the_imported_project() {
+        let project_id = turin_contracts::ProjectId::new("imported-1").unwrap();
+        let key = crate::shell::app_route::scoped_project_key(&local_environment_id(), &project_id);
+        let parsed = key
+            .split_once(':')
+            .and_then(|(_, id)| turin_contracts::ProjectId::new(id).ok());
+        assert_eq!(parsed, Some(project_id));
     }
 }

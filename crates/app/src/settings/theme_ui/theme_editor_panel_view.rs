@@ -248,7 +248,7 @@ impl ThemeEditorPanelView {
                 },
             ),
         ];
-        let mut this = Self {
+        let this = Self {
             draft,
             editing_theme,
             on_saved,

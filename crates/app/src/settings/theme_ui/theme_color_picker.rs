@@ -27,9 +27,7 @@ use crate::theme::theme_palette_library::{is_theme_color, theme_color_to_hex};
 use crate::theme::tokens::{self, TEXT_2XS, TEXT_3XS, TEXT_SM, TEXT_XS};
 use crate::ui::Tooltip;
 use crate::ui::color::{hex_to_hsv, hsv_to_hex};
-use crate::ui::color_picker::{
-    ColorHueSlider, ColorSaturationValuePlane, HsvColor, PlaneVariant, hue_at, saturation_value_at,
-};
+use crate::ui::color_picker::{ColorHueSlider, ColorSaturationValuePlane, HsvColor, PlaneVariant};
 use crate::ui::popover::{PopoverOptions, PopoverPadding, popover};
 
 // ── Pure rules ───────────────────────────────────────────────────────
@@ -737,6 +735,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::ui::color_picker::{hue_at, saturation_value_at};
 
     #[test]
     fn labels_roles_with_the_listed_names_or_their_words() {

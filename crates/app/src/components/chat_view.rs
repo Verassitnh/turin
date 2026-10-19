@@ -42,7 +42,7 @@ use super::chat::thread_error_banner::{
     is_thread_error_banner_dismissed_for_session, should_show_thread_error_banner,
 };
 use super::chat::thread_find_bar::THREAD_FIND_BAR_RESERVED_HEIGHT;
-use super::chat::thread_find_provider::ThreadFind;
+use super::chat::thread_find_provider::{CloseHandler, ThreadFind};
 use super::chat::thread_navigation::request_open_thread;
 use super::chat::thread_relationships_panel::{LineageActions, ThreadRelationshipsPanel};
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
@@ -222,7 +222,7 @@ impl ChatView {
                         cx,
                         move |window, cx| {
                             // `onClose: focusComposer`.
-                            let on_close: Rc<dyn Fn(&mut Window, &mut App)> =
+                            let on_close: CloseHandler =
                                 Rc::new(move |window, cx| {
                                     let focus = composer.read(cx).focus_handle(cx);
                                     window.focus(&focus, cx);

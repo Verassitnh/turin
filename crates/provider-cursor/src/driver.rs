@@ -481,10 +481,12 @@ mod tests {
         let refreshed = instance.snapshot.refresh().await;
 
         let published = refreshed.draft.usage_limits.expect("limits are published");
-        assert_eq!(format!("{published:?}").contains("totalPercentUsed"), true);
-        let reads = limits.reads.lock().unwrap();
-        assert_eq!(reads.len(), 1);
-        assert_eq!(reads[0].0.as_deref(), Some("https://api.example.test"));
+        assert!(format!("{published:?}").contains("totalPercentUsed"));
+        {
+            let reads = limits.reads.lock().unwrap();
+            assert_eq!(reads.len(), 1);
+            assert_eq!(reads[0].0.as_deref(), Some("https://api.example.test"));
+        }
         assert_eq!(
             instance.snapshot.get_snapshot().await.draft.usage_limits,
             Some(published)

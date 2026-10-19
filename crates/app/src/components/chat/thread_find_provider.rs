@@ -16,7 +16,7 @@ use futures::StreamExt as _;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div,
+    ParentElement as _, Render, Subscription, Task, Window, div,
 };
 use turin_contracts::ThreadId;
 use turin_contracts::base_schemas::js_trim;
@@ -38,7 +38,8 @@ use super::timeline::source::ThreadTimelineStore;
 use crate::app_runtime::write::bus::CommandBus;
 use crate::state::local_environment_id;
 
-type CloseHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+/// What closing the find does besides forgetting the query (`onClose: focusComposer`).
+pub type CloseHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// The arguments of one search (`useServerResults`' atom input). A change starts a new
 /// search; the same arguments are only ever refreshed.

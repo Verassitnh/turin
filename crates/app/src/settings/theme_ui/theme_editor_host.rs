@@ -15,8 +15,8 @@ use std::rc::Rc;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Window, div,
+    App, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    Window, div,
 };
 
 use super::theme_editor_panel::ThemeSavedContext;

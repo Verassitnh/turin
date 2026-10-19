@@ -94,7 +94,7 @@ pub fn resolve_thread_link(
     let thread = lookup(written).or_else(|| {
         percent_decoded_thread_link_id(written)
             .as_ref()
-            .and_then(|decoded| lookup(decoded))
+            .and_then(lookup)
     });
     let thread_id = thread
         .as_ref()

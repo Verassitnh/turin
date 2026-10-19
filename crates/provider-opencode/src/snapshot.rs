@@ -5,6 +5,8 @@
 //!
 //! The live probe and inventory fetch belong to the driver. This module takes their
 //! results, so the mapping can be tested without a server.
+//!
+//! Port of upstream/packages/provider-opencode/src/server/status.ts (snapshot assembly).
 
 use serde_json::Value;
 use turin_contracts::base_schemas::js_trim;

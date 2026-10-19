@@ -13,6 +13,7 @@ pub mod js_text;
 pub mod live_projection;
 pub mod messages_timeline_logic;
 pub mod orchestration_timing;
+pub mod item_positions;
 pub mod orchestration_v2_timeline;
 pub mod scroll_anchor;
 pub mod session_logic;

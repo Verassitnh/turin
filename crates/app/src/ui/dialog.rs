@@ -8,6 +8,8 @@
 //! blur (GPUI has none, so the popup fill is opaque), no scale/opacity
 //! transition, and the popup sits a tenth of the way down rather than
 //! centered (its height is not known when it opens).
+//!
+//! Port of upstream/apps/web/src/components/ui/dialog-styles.ts.
 
 use std::rc::Rc;
 

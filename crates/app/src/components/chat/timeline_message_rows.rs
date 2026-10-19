@@ -3,8 +3,10 @@
 //! `RevertUserMessageButton`, `AssistantTimelineRow`, `AssistantMessageMeta`,
 //! `AssistantMetaTimelineRow`, `AssistantCopyButton` and
 //! `ProposedPlanTimelineRow` (with ProposedPlanCard.tsx).
-//! Also ports upstream/apps/web/src/proposedPlan.ts
+//! Also: Port of upstream/apps/web/src/proposedPlan.ts
 //! (`buildCollapsedProposedPlanPreviewMarkdown`; the rest is `composer::proposed_plan`).
+//!
+//! Port of upstream/apps/web/src/components/chat/ProposedPlanCard.tsx.
 
 use std::rc::Rc;
 use std::sync::Arc;

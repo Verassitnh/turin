@@ -1,6 +1,8 @@
 //! The composer footer: model trigger, mode controls, attach button and the
 //! primary action (ChatComposer.tsx footer, ComposerFooterModeControls,
 //! ComposerPrimaryActions.tsx).
+//!
+//! Port of upstream/apps/web/src/components/chat/runtimeModeConfig.ts.
 
 use std::sync::Arc;
 

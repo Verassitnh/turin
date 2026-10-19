@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-cursor/src/server/skills.ts`.
+//! Port of upstream/packages/provider-cursor/src/server/skills.ts.
 //!
 //! Cursor discovers Agent Skills recursively from user and project roots.
 //! Scanning the same roots avoids starting an agent just to populate a menu.

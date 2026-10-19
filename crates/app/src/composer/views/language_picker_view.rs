@@ -1,5 +1,7 @@
 //! Port of ComposerCodeBlockLanguagePicker.tsx: the searchable language list
 //! a fence header opens.
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerCodeBlockLanguagePicker.tsx.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

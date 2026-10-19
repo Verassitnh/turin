@@ -5,6 +5,8 @@
 //!
 //! The snapshot is probed on refresh, not at creation: a probe spawns
 //! `cursor-agent`, so it waits for the first refresh the host asks for.
+//!
+//! Port of upstream/packages/provider-cursor/src/server/driver.ts.
 
 use std::sync::Arc;
 
@@ -240,8 +242,9 @@ impl ManagedServerProvider for CursorSnapshot {
         }))
     }
 
-    /// Cursor's plan limit windows come from the Cursor API (`usageLimits.ts`), which is
-    /// not ported. See PORTING.md Deviations.
+    /// Cursor's plan limit windows come from the Cursor API (`usageLimits.ts`). The reader
+    /// is `usage_limits::read_cursor_usage_limits`; the driver does not call it yet. See
+    /// PORTING.md Deviations.
     async fn apply_usage_limits(&self, _update: ProviderUsageLimitsUpdate, _checked_at: &str) {}
 }
 

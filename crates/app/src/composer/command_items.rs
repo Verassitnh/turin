@@ -1,5 +1,8 @@
 //! `ComposerCommandItem` (ComposerCommandMenu.tsx) and its search/filter
 //! rules: composerSlashCommandSearch.ts.
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerCommandMenu.tsx.
+//! Port of upstream/apps/web/src/components/chat/composerSlashCommandSearch.ts.
 
 use std::sync::OnceLock;
 

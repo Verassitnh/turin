@@ -1,5 +1,7 @@
 //! Port of `GeneralSettingsPanel` (upstream SettingsPanels.tsx) and
 //! ProjectDefaultsSettings.tsx / NotificationSettings.tsx.
+//!
+//! Port of upstream/apps/web/src/components/settings/NotificationSettings.tsx.
 
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,

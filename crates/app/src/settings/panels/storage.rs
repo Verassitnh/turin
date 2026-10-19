@@ -4,7 +4,7 @@
 //! At a project scope the page shows the project's own worktree cleanup tier
 //! (inherit, off or custom rules); the environment-wide rows return at the
 //! all-projects scope.
-//! Also ports upstream/apps/web/src/lib/formatBytes.ts.
+//! Also: Port of upstream/apps/web/src/lib/formatBytes.ts.
 //!
 //! Not ported (PORTING.md Deviations): the browser-artifact retention row
 //! (the browser integration is cut) and the "Mixed across selected machines"

@@ -5,6 +5,8 @@
 //! this struct. Their default implementations do not talk to a host. Thread
 //! launch worktrees are not created here; `create_worktree` is the explicit
 //! and pull-request worktree path.
+//!
+//! Port of upstream/apps/server/src/git/refreshPushedPullRequests.ts (`refresh_pushed_pull_requests`).
 
 #![allow(clippy::result_large_err)]
 

@@ -8,6 +8,8 @@
 //! Provider events are the only output. A turn streams items while its prompt
 //! runs, and every card (approval, question, plan) is a runtime request plus a
 //! turn item, so a client sees the same content whichever way it renders them.
+//!
+//! Port of upstream/packages/provider-acp/src/server/adapter.ts (`AcpAdapterV2` as the Cursor flavor over `cursor-agent acp`; see Deviations).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

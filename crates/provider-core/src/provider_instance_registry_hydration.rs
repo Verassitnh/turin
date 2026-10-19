@@ -3,6 +3,8 @@
 //!
 //! A scoped watcher subscribes through `ProviderHost` and reconciles the
 //! registry when provider settings change.
+//!
+//! Port of upstream/apps/server/src/provider/ProviderInstanceRegistryHydration.ts.
 
 use std::sync::Arc;
 

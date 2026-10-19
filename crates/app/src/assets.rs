@@ -3,6 +3,8 @@
 //!
 //! Only the icons listed in [`AppIcons`] are embedded; add one here before
 //! using it, otherwise it renders blank.
+//!
+//! Port of upstream/apps/web/src/components/Icons.tsx (provider marks as SVG assets).
 
 use std::borrow::Cow;
 

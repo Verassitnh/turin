@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/OpenCodeServerLedger.ts`.
+//! Port of upstream/packages/provider-opencode/src/server/OpenCodeServerLedger.ts.
 //!
 //! A local `opencode serve` runs in its own process group, so it outlives a
 //! T3 server that is SIGKILLed. Each spawn is recorded under the state

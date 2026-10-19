@@ -21,6 +21,8 @@
 //! cut with the terminal). The row's badge still draws from the narrowed
 //! `ThreadPullRequestLink`; the stack badge and the `+N` list open the PR
 //! task's surface (T19).
+//!
+//! Port of upstream/apps/web/src/components/ThreadStatusIndicators.tsx (sidebar parts).
 
 // A faithful port keeps upstream's whole API (rule 3); the row wires the
 // rest as the PR surface (T19) and the snapshot store (T14) land.

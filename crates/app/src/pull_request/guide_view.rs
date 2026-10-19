@@ -12,6 +12,14 @@
 //! line), "Ask an agent" about a stop or lines (no agent seam in `DetailNav`), the `J`/`K`
 //! shortcut when focus is outside the tour (keys work while the tour holds focus), sticky rail,
 //! `DiffWorkerPoolProvider`.
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/guide/GuideTour.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/guide/GuideStop.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/guide/GuideRail.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/guide/GuideNotes.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/guide/GuideProse.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/guide/GuideFileDiff.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/guide/useGuideDiffFiles.ts (file read in guide_excerpt_expansion.rs).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;

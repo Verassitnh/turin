@@ -6,6 +6,8 @@
 //! these tests pass the spans in. `starts` and `ends` are indexed by UTF-16
 //! code units of the decoded script, matching JavaScript `token.content.length`.
 //! The stored values are byte ranges into the outer source.
+//!
+//! Port of upstream/apps/web/src/components/chat/HighlightedCodeLines.tsx (text-identity half).
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SyntaxToken {

@@ -1,5 +1,5 @@
 //! Port of upstream/packages/effect-codex-app-server/src/errors.ts
-//! Also ports upstream/packages/effect-codex-app-server/src/_internal/shared.ts.
+//! Also: Port of upstream/packages/effect-codex-app-server/src/_internal/shared.ts.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;

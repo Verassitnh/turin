@@ -4,6 +4,8 @@
 //! The async installer probe (npm, Homebrew, mise, volta) lives in
 //! `package_managed_maintenance`. The advisory here is what upstream emits when
 //! no latest version is resolved.
+//!
+//! Port of upstream/packages/provider-core/src/server/maintenanceResolver.ts (installer-probe half in package_managed_maintenance.rs).
 
 use std::cmp::Ordering;
 

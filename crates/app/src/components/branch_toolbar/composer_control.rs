@@ -5,6 +5,10 @@
 //! GPUI has no element transforms, so the press scale is not ported; the
 //! strip's label collapse animation is replaced by an instant swap (see
 //! Deviations).
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerControl.tsx.
+//! Port of upstream/apps/web/src/components/ComposerContextLabel.tsx.
+//! Port of upstream/apps/web/src/components/chat/ComposerSurface.tsx (`ContextStrip` frame).
 
 // A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
 // the rest as the composer, thread details and settings tasks land.

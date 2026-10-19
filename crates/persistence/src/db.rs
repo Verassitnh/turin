@@ -11,6 +11,8 @@
 //! autocheckpoint is raised. SQLite older than 3.51 has no `NOOP` checkpoint
 //! mode, so the side connection stays off and the writer keeps the default.
 //! Bundled SQLite is 3.53, so file databases start the worker.
+//!
+//! Port of upstream/packages/shared/src/nodeSqliteClient.ts (writer/reader split; node:sqlite is replaced by rusqlite).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

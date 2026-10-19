@@ -4,6 +4,8 @@
 //! Turin vendors the same bytes. Wire messages stay JSON. Forward-compatible
 //! unions follow the generator's `not` rewrite: a known discriminator that fails
 //! its variant is rejected, and any other discriminator is kept.
+//!
+//! Port of upstream/packages/effect-acp/src/schema.ts.
 
 use serde_json::Value;
 

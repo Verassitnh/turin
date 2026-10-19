@@ -3,6 +3,8 @@
 //! `shortcutLabelForCommand` over the default keybindings. T20 (settings)
 //! owns user-customised bindings; until it feeds resolved rules in, labels
 //! come from the defaults (packages/shared/src/keybindings.ts).
+//!
+//! Port of upstream/apps/web/src/keybindings.ts (the slice the palette reads).
 
 use turin_shared::keybindings::{
     ParsedShortcut, default_keybinding_rules, parse_keybinding_shortcut,

@@ -8,6 +8,8 @@
 //! glyph), `PullRequestLinkPreview` (the pull request chip's tooltip is the
 //! text of `PullRequestContextDetails`), and the CORS retry of the image
 //! thumbnail (the bytes are in memory).
+//!
+//! Port of upstream/apps/web/src/components/PullRequestContextDetails.tsx (text form).
 
 use std::cell::Cell;
 use std::rc::Rc;

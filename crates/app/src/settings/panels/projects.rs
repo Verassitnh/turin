@@ -14,6 +14,10 @@
 //! command and the setup toggle only), the remembered-members follow when a
 //! grouping change replaces the project key, and the composer draft cleanup
 //! after removal (the chat store owns it).
+//!
+//! Port of upstream/apps/web/src/components/settings/ProjectSettingsPanel.tsx.
+//! Port of upstream/apps/web/src/components/settings/ProjectActionsSettings.tsx.
+//! Port of upstream/apps/web/src/components/settings/ProjectActionsList.tsx.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

@@ -1,5 +1,7 @@
 //! Port of the pure helpers in upstream/apps/web/src/lib/utils.ts that the
 //! command palette and branch toolbar read.
+//!
+//! Port of upstream/apps/web/src/lib/utils.ts (pure helpers the app uses).
 
 use unicode_normalization::UnicodeNormalization as _;
 use unicode_normalization::char::is_combining_mark;

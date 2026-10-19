@@ -1,7 +1,7 @@
 //! Port of upstream/packages/shared/src/markdownPipeline.ts,
 //! markdownGithubAlerts.ts and markdownListIndentation.ts.
-//! Also ports upstream/packages/shared/src/markdownListIndentation.ts.
-//! Also ports upstream/packages/shared/src/markdownGithubAlerts.ts.
+//! Also: Port of upstream/packages/shared/src/markdownListIndentation.ts.
+//! Also: Port of upstream/packages/shared/src/markdownGithubAlerts.ts.
 //!
 //! Upstream runs remark (`remark-gfm`, `remark-breaks` when `lineBreaks`)
 //! plus its own plugins, then rehype, then React components. Turin parses

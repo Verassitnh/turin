@@ -5,6 +5,11 @@
 //! Not ported: "Merge stack" / "Rebase stack" and their confirmation dialog (the source has no
 //! stack action: `run_action` carries neither the stack number nor the expected heads), and the
 //! "Retry stack lookup" button (the store holds no stack error).
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestStackPopover.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestStackLayers.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestStackLayerContent.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestStackHeader.tsx.
 
 use std::rc::Rc;
 

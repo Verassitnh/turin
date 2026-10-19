@@ -10,6 +10,8 @@
 //! `ThreadActions` runs, so a notice can be stored and compared without
 //! capturing the hook. The 5 s expiry timer and the zustand notice store are
 //! the caller's: `expire` and `current_notice` are the seams.
+//!
+//! Port of upstream/apps/web/src/hooks/showThreadUndoNotice.ts (grouping and undo queue).
 // Consumers are wired by T20/T22.
 #![allow(dead_code)]
 

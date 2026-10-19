@@ -10,6 +10,12 @@
 //! scopes, and the `Collapsible` height animation. The other hosts' marks are
 //! bundled (`assets::source_control_icon_path`) and drawn if a discovery row
 //! names the kind.
+//!
+//! Port of upstream/apps/web/src/components/settings/SourceControlSettings.tsx.
+//! Port of upstream/apps/web/src/components/settings/SourceControlWritingSettings.tsx.
+//! Port of upstream/apps/web/src/components/settings/BranchNamingSettings.tsx.
+//! Port of upstream/apps/web/src/components/settings/GitHubTokenSettings.tsx.
+//! Port of upstream/apps/web/src/components/settings/GitHubAccountSettings.tsx (view; logic in github_account_logic.rs).
 
 use std::collections::HashSet;
 

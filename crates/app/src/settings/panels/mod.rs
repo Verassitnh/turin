@@ -1,6 +1,8 @@
 //! The settings pages. Each panel is an `impl SettingsView` block that returns
 //! the page's sections; [`SettingsView::render_page`] routes and frames them
 //! (`SettingsPageContainer`).
+//!
+//! Port of upstream/apps/web/src/components/settings/SettingsPanels.tsx (panels live in the sibling modules).
 
 mod add_provider;
 mod appearance;

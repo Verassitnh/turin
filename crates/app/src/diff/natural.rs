@@ -2,6 +2,8 @@
 //! (`filePathCollator` in useReviewFilePatches.ts), which orders a diff's
 //! files by path. The collation itself is `turin_shared::js_string`'s
 //! `locale_compare_with`, shared with `localeCompare`.
+//!
+//! Port of upstream/apps/web/src/components/diffs/useReviewFilePatches.ts (`filePathCollator`; lazy path in mock_source.rs).
 
 use std::cmp::Ordering;
 

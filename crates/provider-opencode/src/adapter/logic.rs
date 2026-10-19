@@ -3,6 +3,8 @@
 //! Port of the pure functions in
 //! `upstream/packages/provider-opencode/src/server/adapter.ts`,
 //! `server/toolItems.ts`, `server/status.ts`, and `server/v2/adapter.ts`.
+//!
+//! Port of upstream/packages/provider-opencode/src/server/toolItems.ts.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;

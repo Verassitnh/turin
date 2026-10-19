@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/openCode2Catalog.ts`.
+//! Port of upstream/packages/provider-opencode/src/server/openCode2Catalog.ts.
 //!
 //! An OpenCode 2 server fronts several providers whose model lists overlap, so the
 //! provider list is read on the same connection to name each model's provider. The

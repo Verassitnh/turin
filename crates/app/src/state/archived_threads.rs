@@ -1,5 +1,5 @@
 //! Port of upstream/packages/client-runtime/src/state/archivedThreads.ts
-//! Also ports upstream/apps/web/src/lib/archivedThreadsState.ts.
+//! Also: Port of upstream/apps/web/src/lib/archivedThreadsState.ts.
 //!
 //! The archived-thread list is just another snapshot the event source hands
 //! over (there is no per-environment query to fail or wait on), so only the

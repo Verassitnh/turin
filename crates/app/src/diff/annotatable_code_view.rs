@@ -1,5 +1,7 @@
 //! Pure helpers from upstream/apps/web/src/components/diffs/AnnotatableCodeView.tsx
 //! (annotation grouping; rendering stays in `panel_view.rs` / `rows.rs`).
+//!
+//! Port of upstream/apps/web/src/components/diffs/AnnotatableCodeView.tsx (pure helpers).
 
 use super::diff_rendering::fnv1a32;
 use super::pierre::types::{

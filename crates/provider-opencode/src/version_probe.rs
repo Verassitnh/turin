@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/versionProbe.ts`.
+//! Port of upstream/packages/provider-opencode/src/server/versionProbe.ts.
 //!
 //! A spawned binary is classified from `opencode --version`. An external URL is
 //! classified from `GET /api/info` (`{version,pid}` JSON) and then

@@ -1,5 +1,5 @@
 //! Port of upstream/packages/shared/src/path.ts
-//! Also ports upstream/apps/web/src/lib/projectPaths.ts.
+//! Also: Port of upstream/apps/web/src/lib/projectPaths.ts.
 
 use crate::js_string::{slice_utf16, utf16_len};
 use turin_contracts::base_schemas::js_trim;

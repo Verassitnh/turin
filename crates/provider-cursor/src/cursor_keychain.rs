@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-cursor/src/server/CursorKeychain.ts`.
+//! Port of upstream/packages/provider-cursor/src/server/CursorKeychain.ts.
 //!
 //! macOS shows the Keychain access prompt on the server's own screen, which a
 //! remote client cannot answer, so a read gives up after a timeout. Production

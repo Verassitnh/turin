@@ -6,6 +6,8 @@
 //! auth private. The filesystem work is sync `std::fs` and expects a blocking
 //! context. Windows symlinks are not implemented: materializing an overlay
 //! there returns an error.
+//!
+//! Port of upstream/apps/server/src/provider/CodexManagedHome.ts (with codex_managed_runtime.rs).
 
 use std::{
     fs, io,

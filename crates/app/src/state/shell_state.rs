@@ -5,6 +5,8 @@
 //! snapshot loader, deferred pull-request link fills, resume cursors and the
 //! reconnect/wake-up handling. The producer (the orchestrator) hands over
 //! `ShellStreamItem`s; this applies them.
+//!
+//! Port of upstream/packages/client-runtime/src/state/shell.ts (state machine).
 
 use std::sync::Arc;
 

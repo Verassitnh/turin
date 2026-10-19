@@ -9,6 +9,8 @@
 //! one environment (this machine), so the multi-environment machinery
 //! (`useEnvironments`, WSL, connection phases) collapses into the snapshot's
 //! single `environment_label`.
+//!
+//! Port of upstream/apps/web/src/components/settings/useAvailableSettingsSearchItems.ts.
 
 // A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
 // the rest as the composer, thread details and settings tasks land.

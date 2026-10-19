@@ -19,6 +19,8 @@
 //! Atom `get.once` / `get.subscribe` / `get.mount` are the caller's.
 //!
 //! Single environment, so upstream's per-environment map is one set.
+//!
+//! Port of upstream/apps/web/src/state/threads.ts (running-thread logic).
 
 use std::collections::HashSet;
 use std::hash::Hash;

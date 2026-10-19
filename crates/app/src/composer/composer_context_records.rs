@@ -11,6 +11,8 @@
 //! `formatTerminalContextLabel` / `normalizeTerminalContextText` (`terminalContext.ts`).
 //! The review draft includes `pullRequest`; `diff/review_comment_context.rs`
 //! omitted that field.
+//!
+//! Port of upstream/apps/web/src/lib/composerContextReferences.ts.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;

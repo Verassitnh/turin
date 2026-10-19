@@ -7,6 +7,8 @@
 //! needs concrete colors, so [`DiffColors::resolve`] evaluates them once per
 //! theme. `color-mix(in lab, …)` is CIE Lab, mixed here with [`lab_mix`]
 //! (the theme module only has sRGB and Oklab).
+//!
+//! Port of upstream/apps/web/src/components/diffs/StyledDiffCodeView.tsx (overrides).
 
 use gpui_kit::{Hsla, Rgba};
 

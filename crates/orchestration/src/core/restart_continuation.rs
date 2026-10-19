@@ -5,6 +5,8 @@
 //! The effectful half (`continueRestartedRun`, which dispatches the continuation
 //! prompt through `ThreadManagementService`) is `restart_continuation_service.rs`;
 //! it reuses the blocked check here.
+//!
+//! Port of upstream/apps/server/src/orchestration-v2/RestartContinuation.ts (pure part; effectful half in restart_continuation_service.rs).
 
 use chrono::{DateTime, Utc};
 use turin_contracts::orchestration_v2::{

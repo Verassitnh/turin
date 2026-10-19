@@ -1,7 +1,7 @@
 //! Port of upstream/apps/web/src/hooks/useThreadActions.ts (+ its tests): settle,
 //! unsettle, snooze, pin, unpin, archive, delete, mark unread, the Woke ack,
 //! and the Undo notices those actions raise.
-//! Also ports upstream/apps/web/src/lib/archivedThreadsState.ts.
+//! Also: Port of upstream/apps/web/src/lib/archivedThreadsState.ts.
 //!
 //! Upstream's hook is React glue over orchestration atoms. Here the logic is
 //! `ThreadActions`, generic over two seams:

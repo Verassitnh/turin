@@ -12,6 +12,9 @@
 //! `PullRequestContextDetails.tsx` (its only logic is `resolvePullRequestState`, ported in
 //! `pull_request_presentation.rs`). `pullRequestLinkContextMenu.ts` is ported in
 //! `pull_request_editing_logic.rs`. Thread-dialog styling (`statusTone`) is presentation only.
+//!
+//! Port of upstream/apps/web/src/components/PullRequestThreadDialog.tsx.
+//! Port of upstream/apps/web/src/lib/openPullRequestLink.ts (pure finders).
 
 use crate::state::helpers::source_control_clients::{
     ChangeRequestUrlInput, SOURCE_CONTROL_CLIENTS, SourceControlClientDefinition,

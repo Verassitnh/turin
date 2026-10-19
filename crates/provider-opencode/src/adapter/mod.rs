@@ -1,6 +1,6 @@
 //! OpenCode `ProviderAdapter` for both server generations.
 //!
-//! Port of `upstream/packages/provider-opencode/src/server/adapter.ts` and
+//! Port of upstream/packages/provider-opencode/src/server/adapter.ts and
 //! `server/v2/adapter.ts`. The traits are `turin_provider_core`'s
 //! `ProviderAdapterV2` and `ProviderSessionRuntime`.
 

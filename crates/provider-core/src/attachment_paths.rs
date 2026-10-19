@@ -5,6 +5,9 @@
 //!
 //! Providers receive attachment files by path, so this is the only place a
 //! chat attachment id turns into a file under the attachments directory.
+//!
+//! Port of upstream/apps/server/src/imageMime.ts.
+//! Port of upstream/apps/server/src/attachmentPaths.ts (path rules).
 
 use std::{path::Path, sync::LazyLock};
 

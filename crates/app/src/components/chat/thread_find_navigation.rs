@@ -6,6 +6,8 @@
 //! decisions the hook makes from them: the match key, when to page earlier history, how
 //! far to scroll so the match sits in the readable band, and how a pinned paging
 //! position follows an insert. The view calls these with the geometry it measured.
+//!
+//! Port of upstream/apps/web/src/components/chat/useThreadFindNavigation.ts (pure rules).
 
 use std::collections::HashSet;
 

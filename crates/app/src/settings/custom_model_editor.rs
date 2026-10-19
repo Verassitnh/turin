@@ -1,5 +1,6 @@
 //! Port of upstream/apps/web/src/components/settings/CustomModelEditor.tsx
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -98,7 +99,7 @@ impl SettingsView {
             .rounded(RADIUS_MD)
             .border_1()
             .border_color(theme.border)
-            .bg(with_alpha(theme.muted, 0.2))
+            .bg(solid_over(theme.muted, 0.2, theme.background))
             .p_3()
             .child(
                 div()
@@ -506,7 +507,7 @@ impl SettingsView {
             .rounded(RADIUS_MD)
             .border_1()
             .border_color(with_alpha(theme.border, 0.6))
-            .bg(with_alpha(theme.background, 0.4))
+            .bg(solid_over(theme.background, 0.4, theme.background))
             .p_2()
             .child(
                 div()

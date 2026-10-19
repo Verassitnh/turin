@@ -17,6 +17,7 @@
 //! base" refs query by the native stack's position. Transitions (`transition-[opacity,transform]`,
 //! `grid-template-rows`) are instant swaps.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -1260,7 +1261,7 @@ impl PullRequestDetailPanel {
                     .h(rems(0.75))
                     .w(px(1.))
                     .flex_shrink_0()
-                    .bg(alpha(theme.border, 0.7)),
+                    .bg(solid_over(theme.border, 0.7, theme.background)),
             )
             .child(
                 div()

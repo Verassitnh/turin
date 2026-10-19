@@ -4,6 +4,7 @@
 //! gpui-component's `DropdownMenu` only attaches to its own `Button`, so the
 //! panel positions this surface itself under its trigger.
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, CursorStyle, Div, ElementId, InteractiveElement as _, IntoElement,
@@ -11,7 +12,7 @@ use gpui_kit::{
 };
 
 use crate::theme::tokens::{self, RADIUS_LG, TEXT_SM};
-use crate::theme::{ActiveAppTheme, color::with_alpha};
+use crate::theme::ActiveAppTheme;
 use crate::ui::tooltip::dropdown_glass_border;
 
 /// `MenuPopup`: the `dropdown-glass` surface, `rounded-lg`, `p-1`. Opaque
@@ -54,7 +55,7 @@ pub fn menu_radio_item(
         .py_1()
         .cursor(CursorStyle::PointingHand)
         .text_color(theme.foreground)
-        .when(checked, |this| this.bg(with_alpha(theme.foreground, 0.08)))
+        .when(checked, |this| this.bg(solid_over(theme.foreground, 0.08, theme.background)))
         .hover(move |style| style.bg(accent).text_color(accent_fg))
         .child(div().min_w_0().flex_1().child(child))
 }

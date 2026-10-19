@@ -9,6 +9,7 @@
 //! ([`LiveDiffSource`]); the fixture source backs the mock UI. The resize
 //! handle is drawn by `AppSidebarLayout`, which owns the width.
 
+use crate::theme::color::solid_over;
 use std::sync::Arc;
 
 use gpui_kit::{
@@ -27,7 +28,6 @@ use crate::diff::panel::DiffPanel;
 use crate::diff::view_model::DiffSource;
 use crate::state::store::ClientStore;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
 use crate::ui::{Icon, IconName};
 
@@ -84,7 +84,7 @@ fn surface_tab(
     } else {
         tab.text_color(theme.muted_foreground).hover(|style| {
             style
-                .bg(with_alpha(theme.accent, 0.6))
+                .bg(solid_over(theme.accent, 0.6, theme.background))
                 .text_color(theme.foreground)
         })
     }

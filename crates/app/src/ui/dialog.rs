@@ -11,6 +11,7 @@
 //!
 //! Port of upstream/apps/web/src/components/ui/dialog-styles.ts.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::component::WindowExt as _;
@@ -168,7 +169,7 @@ pub fn dialog_footer(theme: &AppTheme, bare: bool) -> Div {
         footer
             .border_t_1()
             .border_color(theme.border)
-            .bg(with_alpha(theme.muted, 0.72))
+            .bg(solid_over(theme.muted, 0.72, theme.background))
             .rounded_b(px(17.))
     }
 }
@@ -329,6 +330,6 @@ pub fn overlay_dialog_footer(cx: &App) -> Div {
         .py_4()
         .border_t_1()
         .border_color(theme.border)
-        .bg(with_alpha(theme.muted, 0.72))
+        .bg(solid_over(theme.muted, 0.72, theme.background))
         .rounded_b(px(17.))
 }

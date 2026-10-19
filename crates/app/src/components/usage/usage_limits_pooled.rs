@@ -11,6 +11,7 @@
 //! not blurred; and the `@2xl/pool` container query is measured from the
 //! previous frame's bounds.
 
+use crate::theme::color::solid_over;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -713,7 +714,7 @@ impl UsageLimitsPooled {
                                 .items_center()
                                 .gap(rems(0.375))
                                 .rounded(px(4.))
-                                .bg(with_alpha(theme.background, 0.85))
+                                .bg(solid_over(theme.background, 0.85, theme.background))
                                 .px(rems(0.375))
                                 .py(px(2.))
                                 .text_size(TEXT_2XS.size)

@@ -18,6 +18,7 @@
 //!   (`turin_persistence::T3Import`), driven through `OnboardingBackend`.
 //! - Identity reads "Turin" instead of the T3 wordmark and "Code".
 
+use crate::theme::color::solid_over;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -654,7 +655,7 @@ impl CircleStyle for gpui_kit::Div {
                 .border_color(theme.primary)
                 .text_color(theme.primary_foreground)
         } else if index == current {
-            self.bg(with_alpha(theme.primary, 0.1))
+            self.bg(solid_over(theme.primary, 0.1, theme.background))
                 .border_color(with_alpha(theme.primary, 0.3))
                 .text_color(theme.primary)
         } else {
@@ -843,7 +844,7 @@ impl WelcomeWizard {
                         .justify_between()
                         .border_b_1()
                         .border_color(with_alpha(theme.border, 0.6))
-                        .bg(with_alpha(theme.background, 0.6))
+                        .bg(solid_over(theme.background, 0.6, theme.background))
                         .px_3()
                         .py(rems(0.375))
                         .child(

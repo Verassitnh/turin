@@ -11,6 +11,7 @@
 //! ASCII: an empty query matches, otherwise a case-insensitive substring.
 //! Not ported: locale collation, chips, and the virtualized list.
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Window,
@@ -125,7 +126,7 @@ impl RenderOnce for ComboboxItem {
             row = row.bg(theme.accent).text_color(theme.accent_foreground);
         } else if self.selected {
             row = row
-                .bg(with_alpha(theme.foreground, 0.08))
+                .bg(solid_over(theme.foreground, 0.08, theme.background))
                 .text_color(theme.foreground);
         } else {
             row = row.text_color(theme.foreground);

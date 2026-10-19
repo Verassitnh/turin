@@ -12,7 +12,6 @@ use gpui_kit::{
     Styled, Window, div, px, rems,
 };
 
-use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, LEADING_RELAXED, LEADING_SNUG, RADIUS_MD, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 

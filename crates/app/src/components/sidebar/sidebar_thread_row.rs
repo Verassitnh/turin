@@ -7,6 +7,7 @@
 //! Files dropped on rows, per-thread unsent-draft markers and terminal
 //! status are not ported (composer/terminal tasks).
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::component::Selectable;
@@ -151,7 +152,7 @@ fn drop_verb_badge(verb: SidebarDropVerb, theme: &AppTheme) -> AnyElement {
         .rounded(RADIUS_SM)
         .border_1()
         .border_color(with_alpha(theme.primary, 0.4))
-        .bg(with_alpha(theme.primary, 0.1))
+        .bg(solid_over(theme.primary, 0.1, theme.background))
         .px(rems(0.375))
         .text_size(TEXT_2XS.size)
         .line_height(TEXT_2XS.line_height)
@@ -179,7 +180,7 @@ fn jump_hint_badge(label: String, theme: &AppTheme) -> AnyElement {
                 .rounded_full()
                 .border_1()
                 .border_color(with_alpha(theme.border, 0.8))
-                .bg(with_alpha(theme.background, 0.95))
+                .bg(solid_over(theme.background, 0.95, theme.background))
                 .px(rems(0.375))
                 .shadow(tokens::shadow_sm(0.05))
                 .font_family(theme.fonts.mono.clone())

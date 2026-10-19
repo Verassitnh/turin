@@ -8,6 +8,7 @@
 //! space, so motion and drag work from the layout this frame will produce
 //! rather than last frame's DOM measurement.
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Bounds, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
@@ -542,7 +543,7 @@ impl Sidebar {
                                 } else {
                                     with_alpha(scope.sidebar_foreground, 0.25)
                                 })
-                                .when(is_target, |this| this.bg(with_alpha(theme.primary, 0.05)))
+                                .when(is_target, |this| this.bg(solid_over(theme.primary, 0.05, theme.background)))
                                 .text_size(TEXT_XS.size)
                                 .text_color(if is_target {
                                     theme.primary

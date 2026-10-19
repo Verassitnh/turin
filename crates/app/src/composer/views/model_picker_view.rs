@@ -5,6 +5,7 @@
 //! Port of upstream/apps/web/src/components/chat/ModelPickerSidebar.tsx.
 //! Port of upstream/apps/web/src/components/chat/ModelListRow.tsx.
 
+use crate::theme::color::solid_over;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -284,10 +285,10 @@ impl ModelPickerView {
                 .items_center()
                 .justify_center()
                 .rounded(RADIUS_MD)
-                .when(selected, |this| this.bg(with_alpha(theme.foreground, 0.08)))
+                .when(selected, |this| this.bg(solid_over(theme.foreground, 0.08, theme.background)))
                 .when(!disabled, |this| {
                     this.cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(with_alpha(theme.foreground, 0.10)))
+                        .hover(|style| style.bg(solid_over(theme.foreground, 0.10, theme.background)))
                 })
                 .when(disabled, |this| {
                     this.opacity(0.5).cursor(CursorStyle::OperationNotAllowed)
@@ -366,7 +367,7 @@ impl ModelPickerView {
             .w(rems(2.75))
             .flex_shrink_0()
             .overflow_hidden()
-            .bg(with_alpha(theme.muted, 0.3))
+            .bg(solid_over(theme.muted, 0.3, theme.background))
             .child(column)
             .into_any_element()
     }
@@ -402,7 +403,7 @@ impl ModelPickerView {
             cx,
         )
         .when(is_active && !highlighted, |this| {
-            this.bg(with_alpha(theme.foreground, 0.08))
+            this.bg(solid_over(theme.foreground, 0.08, theme.background))
         })
         .w_full()
         .child(
@@ -431,7 +432,7 @@ impl ModelPickerView {
                                     .rounded(px(4.))
                                     .border_1()
                                     .border_color(with_alpha(theme.update, 0.35))
-                                    .bg(with_alpha(theme.update, 0.15))
+                                    .bg(solid_over(theme.update, 0.15, theme.background))
                                     .px(px(2.))
                                     .text_color(theme.update_foreground)
                                     .text_size(rems(0.625))
@@ -495,7 +496,7 @@ impl ModelPickerView {
                         .justify_center()
                         .rounded(px(6.))
                         .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.bg(with_alpha(theme.foreground, 0.1)))
+                        .hover(|style| style.bg(solid_over(theme.foreground, 0.1, theme.background)))
                         .child(
                             Icon::new(IconName::Star)
                                 .size(rems(0.75))
@@ -624,7 +625,7 @@ impl Render for ModelPickerView {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .bg(with_alpha(theme.muted, 0.4))
+            .bg(solid_over(theme.muted, 0.4, theme.background))
             .when(list.show_sidebar, |this| {
                 this.border_l_1()
                     .border_color(with_alpha(theme.border, 0.7))

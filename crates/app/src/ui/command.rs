@@ -7,6 +7,7 @@
 //! belongs to the palette; Base UI's Autocomplete has no counterpart here.
 //! GPUI has no backdrop blur, so the glass layers are translucent fills only.
 
+use crate::theme::color::solid_over;
 use gpui_kit::{
     AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, px, rems,
@@ -192,7 +193,7 @@ pub fn command_footer(cx: &App) -> Div {
         .gap_2()
         .px(COMMAND_CONTENT_INSET)
         .py(rems(0.625))
-        .bg(with_alpha(theme.foreground, 0.025))
+        .bg(solid_over(theme.foreground, 0.025, theme.background))
         .font_family(theme.fonts.sans.clone())
         .font_weight(FontWeight::MEDIUM)
         .text_size(TEXT_SM.size)
@@ -216,7 +217,7 @@ pub fn command_footer_hint(keys: Vec<FooterKey>, label: impl Into<SharedString>,
                 .min_w(rems(1.25))
                 .px_1()
                 .rounded(tokens::RADIUS_DEFAULT)
-                .bg(with_alpha(theme.foreground, 0.08))
+                .bg(solid_over(theme.foreground, 0.08, theme.background))
                 .text_size(TEXT_XS.size)
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.foreground)

@@ -8,6 +8,7 @@
 //! Port of upstream/apps/web/src/lib/turnDiffTree.ts (per-turn changed files).
 //! Port of upstream/apps/web/src/components/chat/DiffStatLabel.tsx.
 
+use crate::theme::color::solid_over;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -416,7 +417,7 @@ fn render_node(
             .pr(rems(0.5))
             .pl(left)
             .cursor_pointer()
-            .hover(|s| s.bg(with_alpha(theme.accent, 0.6)))
+            .hover(|s| s.bg(solid_over(theme.accent, 0.6, theme.background)))
     };
     match node {
         TurnDiffTreeNode::Directory {

@@ -12,6 +12,7 @@
 //! Port of upstream/apps/web/src/components/chat/V2ItemInspector.tsx (reduced).
 //! Port of upstream/apps/web/src/components/chat/TimelineSystemDivider.tsx.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
@@ -1204,7 +1205,7 @@ fn v2_item_inspector(projected: &ProjectedTurnItem, cx: &RowCx) -> AnyElement {
                     .rounded(RADIUS_MD)
                     .border_1()
                     .border_color(with_alpha(theme.border, 0.45))
-                    .bg(with_alpha(theme.muted, 0.15))
+                    .bg(solid_over(theme.muted, 0.15, theme.background))
                     .p(rems(0.5))
                     .italic()
                     .text_color(muted)
@@ -1718,11 +1719,11 @@ pub fn attempt_fold_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
         .rounded(RADIUS_MD)
         .border_1()
         .border_color(with_alpha(theme.border, 0.6))
-        .bg(with_alpha(theme.muted, 0.2))
+        .bg(solid_over(theme.muted, 0.2, theme.background))
         .px(rems(0.625))
         .py(rems(0.5))
         .cursor_pointer()
-        .hover(|s| s.bg(with_alpha(theme.muted, 0.35)))
+        .hover(|s| s.bg(solid_over(theme.muted, 0.35, theme.background)))
         .child(
             Icon::new(if *expanded {
                 IconName::ChevronDown
@@ -1763,7 +1764,7 @@ pub fn context_compaction_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyEleme
         return div().into_any_element();
     };
     let theme = &cx.theme;
-    let rule = || div().h(px(1.)).flex_1().bg(with_alpha(theme.border, 0.7));
+    let rule = || div().h(px(1.)).flex_1().bg(solid_over(theme.border, 0.7, theme.background));
     div()
         .flex()
         .w_full()
@@ -1838,7 +1839,7 @@ fn timeline_system_divider(
 
 fn system_divider(props: SystemDivider<'_>, cx: &RowCx) -> AnyElement {
     let theme = &cx.theme;
-    let rule = || div().h(px(1.)).flex_1().bg(with_alpha(theme.border, 0.7));
+    let rule = || div().h(px(1.)).flex_1().bg(solid_over(theme.border, 0.7, theme.background));
     let SystemDivider {
         label,
         detail,
@@ -2314,7 +2315,7 @@ pub fn event_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
                             .items_center()
                             .justify_center()
                             .rounded(RADIUS_LG)
-                            .bg(with_alpha(theme.muted, 0.6))
+                            .bg(solid_over(theme.muted, 0.6, theme.background))
                             .child(
                                 Icon::new(IconName::MessageSquare)
                                     .size(rems(1.))
@@ -2727,7 +2728,7 @@ fn subagent_link(item: &TurnItem, cx: &RowCx) -> AnyElement {
         .py(rems(0.375))
         .when(thread.is_some(), |this| {
             this.cursor_pointer()
-                .hover(|s| s.bg(with_alpha(theme.accent, 0.2)))
+                .hover(|s| s.bg(solid_over(theme.accent, 0.2, theme.background)))
         })
         .child(subagent_avatar(Some(status), theme))
         .child(
@@ -2983,7 +2984,7 @@ fn subagent_group(id: &str, members: &[&TurnItem], cx: &RowCx) -> AnyElement {
                 .rounded(RADIUS_LG)
                 .border_1()
                 .border_color(with_alpha(theme.border, 0.6))
-                .bg(with_alpha(theme.card, 0.3))
+                .bg(solid_over(theme.card, 0.3, theme.background))
                 .p(rems(0.25));
             for member in members {
                 list = list.child(subagent_link(member, cx));

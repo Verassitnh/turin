@@ -13,6 +13,7 @@
 //!
 //! Port of upstream/apps/web/src/components/settings/ThemeSettings.tsx (built-in theme library).
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, CursorStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement,
@@ -456,12 +457,12 @@ impl SettingsView {
                 .cursor(CursorStyle::PointingHand)
                 .when(active, |this| {
                     this.border_color(theme.ring)
-                        .bg(with_alpha(theme.accent, 0.3))
+                        .bg(solid_over(theme.accent, 0.3, theme.background))
                 })
                 .when(!active, |this| {
                     this.border_color(with_alpha(theme.border, 0.7))
-                        .bg(with_alpha(theme.card, 0.6))
-                        .hover(|style| style.bg(with_alpha(theme.accent, 0.1)))
+                        .bg(solid_over(theme.card, 0.6, theme.background))
+                        .hover(|style| style.bg(solid_over(theme.accent, 0.1, theme.background)))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let source = this.store.read(cx).source();
@@ -636,7 +637,7 @@ impl SettingsView {
                     } else {
                         with_alpha(theme.card, 0.6)
                     })
-                    .hover(|style| style.bg(with_alpha(theme.accent, 0.1)))
+                    .hover(|style| style.bg(solid_over(theme.accent, 0.1, theme.background)))
                     .on_click(use_card)
                     .child(
                         div()
@@ -960,21 +961,21 @@ impl SettingsView {
                                     .h(px(2.))
                                     .w_full()
                                     .rounded_full()
-                                    .bg(with_alpha(theme.muted_foreground, 0.25)),
+                                    .bg(solid_over(theme.muted_foreground, 0.25, theme.background)),
                             )
                             .child(
                                 div()
                                     .h(px(2.))
                                     .w(relative(0.8))
                                     .rounded_full()
-                                    .bg(with_alpha(theme.muted_foreground, 0.2)),
+                                    .bg(solid_over(theme.muted_foreground, 0.2, theme.background)),
                             )
                             .child(
                                 div()
                                     .h(px(2.))
                                     .w(relative(0.6))
                                     .rounded_full()
-                                    .bg(with_alpha(theme.muted_foreground, 0.15)),
+                                    .bg(solid_over(theme.muted_foreground, 0.15, theme.background)),
                             ),
                     )
                     .child(
@@ -984,14 +985,14 @@ impl SettingsView {
                             .items_center()
                             .border_t_1()
                             .border_color(with_alpha(theme.border, 0.7))
-                            .bg(with_alpha(theme.foreground, 0.05))
+                            .bg(solid_over(theme.foreground, 0.05, theme.background))
                             .px_2()
                             .child(
                                 div()
                                     .h(px(1.))
                                     .w(relative(0.66))
                                     .rounded_full()
-                                    .bg(with_alpha(theme.muted_foreground, 0.25)),
+                                    .bg(solid_over(theme.muted_foreground, 0.25, theme.background)),
                             ),
                     ),
             )

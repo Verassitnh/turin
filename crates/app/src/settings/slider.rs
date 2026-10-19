@@ -1,6 +1,7 @@
 //! `.settings-slider` (upstream index.css): a native range input restyled as a
 //! 6px track filled with `--primary` up to a 16px thumb.
 
+use crate::theme::color::solid_over;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -106,7 +107,7 @@ impl SettingsView {
                     .top(px(9.))
                     .h(px(6.))
                     .rounded_full()
-                    .bg(with_alpha(theme.muted_foreground, 0.22))
+                    .bg(solid_over(theme.muted_foreground, 0.22, theme.background))
                     .border_1()
                     .border_color(with_alpha(theme.border, 0.55))
                     .overflow_hidden()

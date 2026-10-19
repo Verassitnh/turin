@@ -8,6 +8,7 @@
 //! expectations (icons first, the Icon type group, the Icon color group) are
 //! asserted on [`IconPickerDraft`] and [`ICON_MODES`].
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
@@ -207,7 +208,7 @@ impl SettingsView {
             .gap(px(2.))
             .p(px(2.))
             .rounded(crate::theme::tokens::RADIUS_LG)
-            .bg(with_alpha(theme.input, 0.4))
+            .bg(solid_over(theme.input, 0.4, theme.background))
             .children(ICON_MODES.iter().map(|(mode, label)| {
                 let mode = *mode;
                 div().flex_1().child(

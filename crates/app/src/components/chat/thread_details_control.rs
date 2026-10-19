@@ -13,6 +13,7 @@
 // the rest as the composer, thread details and settings tasks land.
 #![allow(dead_code)]
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::component::Selectable;
@@ -49,7 +50,7 @@ pub fn panel_split_separator(theme: &AppTheme) -> AnyElement {
         .h(rems(1.))
         .w(px(1.))
         .flex_shrink_0()
-        .bg(with_alpha(theme.border, 0.65))
+        .bg(solid_over(theme.border, 0.65, theme.background))
         .into_any_element()
 }
 
@@ -297,7 +298,7 @@ pub fn panel_select_chevron(theme: &AppTheme) -> AnyElement {
                     div()
                         .h(rems(1.))
                         .w(px(1.))
-                        .bg(with_alpha(theme.border, 0.65)),
+                        .bg(solid_over(theme.border, 0.65, theme.background)),
                 ),
         )
         .child(panel_icon(IconName::ChevronDown, theme))

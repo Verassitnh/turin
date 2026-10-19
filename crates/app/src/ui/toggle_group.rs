@@ -5,11 +5,11 @@
 //! Children are [`super::toggle::Toggle`]s; pass the resolved variant and size
 //! from [`resolved_toggle`] so they match the group context.
 
+use crate::theme::color::solid_over;
 use gpui_kit::{AnyElement, App, IntoElement, ParentElement, RenderOnce, Styled, Window, div};
 
 use super::toggle::{ToggleSize, ToggleVariant};
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::RADIUS_LG;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -85,7 +85,7 @@ impl RenderOnce for ToggleGroup {
                 .gap(gpui_kit::px(2.))
                 .rounded(RADIUS_LG)
                 .p(gpui_kit::px(2.))
-                .bg(with_alpha(theme.input, 0.4)),
+                .bg(solid_over(theme.input, 0.4, theme.background)),
             ToggleVariant::Default => root.gap(gpui_kit::px(2.)),
             _ => root,
         };

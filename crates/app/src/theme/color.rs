@@ -204,6 +204,16 @@ pub fn with_alpha(color: impl Into<Rgba>, alpha: f32) -> Rgba {
     color
 }
 
+/// `color` at `fraction` flattened over an opaque `base`: the result has no
+/// transparency, so the surface never shows what is behind it.
+pub fn solid_over(
+    color: impl Into<Rgba>,
+    fraction: f32,
+    base: impl Into<Rgba>,
+) -> gpui_kit::Hsla {
+    color_mix(MixSpace::Srgb, color, fraction, base).into()
+}
+
 /// Upstream `oklabToHex`: opaque `#rrggbb`. Alpha, when present, is appended
 /// so gpui-component's theme parser keeps it.
 pub fn to_hex(color: impl Into<Rgba>) -> String {

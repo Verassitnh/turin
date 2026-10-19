@@ -2,6 +2,7 @@
 //! highlight and selection (ChatComposer.tsx `composerMenuItems` /
 //! `onSelectComposerItem`, ComposerCommandMenu.tsx, useComposerTriggerState).
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, CursorStyle, FontWeight, InteractiveElement as _, IntoElement,
@@ -31,7 +32,6 @@ use crate::composer::view_model::{ComposerViewModel, InteractionMode};
 use crate::composer::views::chat_composer::{ChatComposer, Layer};
 use crate::composer::views::prompt_editor::CommandKey;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, TEXT_XS};
 use crate::ui::{Icon, IconName};
 
@@ -597,7 +597,7 @@ impl ChatComposer {
                 this.bg(theme.accent).text_color(theme.accent_foreground)
             })
             .when(!active, |this| {
-                this.hover(|style| style.bg(with_alpha(theme.accent, 0.5)))
+                this.hover(|style| style.bg(solid_over(theme.accent, 0.5, theme.background)))
             })
             .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
                 if this.menu.highlighted.as_deref() != Some(id.as_str()) {

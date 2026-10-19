@@ -90,6 +90,42 @@ pub struct CreateThread {
     pub interaction_mode: String,
 }
 
+/// The message a manual continuation sends (`onResume` in upstream's `ChatView`).
+const RESUME_PROMPT: &str = "Continue where you left off.";
+
+const REWIND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const REWIND_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether a run after the first `turn_count` turns has been rolled back.
+fn rolled_back_after(
+    runs: &[turin_contracts::orchestration_v2::OrchestrationV2Run],
+    turn_count: u64,
+) -> bool {
+    runs.iter().any(|run| {
+        run.ordinal.get() > turn_count
+            && run.status == turin_contracts::orchestration_v2::OrchestrationV2RunStatus::RolledBack
+    })
+}
+
+/// The ready checkpoint a turn count names: the baseline for `0`, else the
+/// checkpoint of the run with that ordinal (`revertCheckpoint`).
+pub fn rollback_checkpoint(
+    checkpoints: &[turin_contracts::orchestration_v2::OrchestrationV2Checkpoint],
+    turn_count: u64,
+) -> Option<&turin_contracts::orchestration_v2::OrchestrationV2Checkpoint> {
+    use turin_contracts::orchestration_v2::OrchestrationV2CheckpointStatus as Status;
+    checkpoints
+        .iter()
+        .rfind(|candidate| {
+            if turn_count == 0 {
+                candidate.ordinal_within_scope == 0 && candidate.app_run_ordinal.is_none()
+            } else {
+                candidate.app_run_ordinal.map(|ordinal| ordinal.get()) == Some(turn_count)
+            }
+        })
+        .filter(|checkpoint| checkpoint.status == Status::Ready)
+}
+
 fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
@@ -270,6 +306,108 @@ impl Commands {
 
     /// `message.dispatch` from the composer.
     pub async fn send_message(&self, input: SendMessage) -> Result<SendReceipt, CommandError> {
+        self.dispatch_message(input, None).await
+    }
+
+    /// The composer's Resume (`onResume`): with a resumable run, a manual
+    /// continuation of it (`manualContinuationOfRunId`), then the held queue
+    /// is released; with only held queued runs, just `queue.resume`.
+    pub async fn resume_thread(
+        &self,
+        thread_id: &ThreadId,
+        resumable_run_id: Option<String>,
+        has_held_queued_runs: bool,
+        model_selection: Option<Value>,
+    ) -> Result<(), CommandError> {
+        if let Some(run_id) = resumable_run_id {
+            self.dispatch_message(
+                SendMessage {
+                    thread_id: thread_id.clone(),
+                    text: RESUME_PROMPT.to_owned(),
+                    attachments: Vec::new(),
+                    model_selection,
+                    delivery: Delivery::StartImmediately,
+                    title_seed: None,
+                    source_plan_id: None,
+                },
+                Some(run_id),
+            )
+            .await?;
+            if !has_held_queued_runs {
+                return Ok(());
+            }
+        }
+        self.thread_command("queue.resume", thread_id, json!({}))
+            .await
+    }
+
+    /// `revertCheckpoint` ("Edit from here"): rolls the thread back to just
+    /// before the turn after `turn_count` (`checkpoint.rollback`) and waits
+    /// until that turn's run is rolled back, or fails with the thread's
+    /// recorded reason (`waitForRevertedMessage`).
+    pub async fn revert_to_turn_count(
+        &self,
+        thread_id: &ThreadId,
+        turn_count: u64,
+        restore_files: bool,
+    ) -> Result<(), CommandError> {
+        let records = self
+            .runtime
+            .orchestrator
+            .get_thread_records(
+                thread_id,
+                &[RecordField::Checkpoints],
+                &RecordFilter::default(),
+            )
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let checkpoint = rollback_checkpoint(&records.checkpoints, turn_count).ok_or_else(|| {
+            CommandError::new(format!(
+                "Checkpoint for turn {turn_count} is not available for thread {thread_id}."
+            ))
+        })?;
+        let request_id = command_id();
+        self.dispatch(json!({
+            "type": "checkpoint.rollback",
+            "commandId": request_id,
+            "threadId": thread_id,
+            "restoreFiles": restore_files,
+            "scopeId": checkpoint.scope_id,
+            "checkpointId": checkpoint.id,
+        }))
+        .await?;
+        tokio::time::timeout(REWIND_TIMEOUT, async {
+            loop {
+                let projection = self
+                    .runtime
+                    .orchestrator
+                    .get_thread_projection(thread_id)
+                    .await
+                    .map_err(|error| CommandError::from_error(&error))?;
+                if let Some(Some(failure)) = &projection.thread.rollback_failure
+                    && failure.request_id == request_id
+                {
+                    return Err(CommandError::new(failure.message.to_string()));
+                }
+                if rolled_back_after(&projection.runs, turn_count) {
+                    return Ok(());
+                }
+                tokio::time::sleep(REWIND_POLL).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(CommandError::new(
+                "Timed out waiting for the thread to rewind.",
+            ))
+        })
+    }
+
+    async fn dispatch_message(
+        &self,
+        input: SendMessage,
+        manual_continuation_of_run_id: Option<String>,
+    ) -> Result<SendReceipt, CommandError> {
         let command_id = command_id();
         let message_id = MessageId::new(new_id()).expect("uuid message id");
         let dispatch_mode = match &input.delivery {
@@ -299,6 +437,9 @@ impl Commands {
         }
         if let Some(seed) = input.title_seed {
             object.insert("titleSeed".into(), json!(seed));
+        }
+        if let Some(run_id) = manual_continuation_of_run_id {
+            object.insert("manualContinuationOfRunId".into(), json!(run_id));
         }
         if let Some(plan_id) = input.source_plan_id {
             object.insert(
@@ -1071,5 +1212,44 @@ impl Commands {
             outcome,
             warning: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use turin_contracts::orchestration_v2::OrchestrationV2Checkpoint;
+
+    fn checkpoint(
+        id: &str,
+        ordinal_within_scope: u64,
+        app_run_ordinal: Option<u64>,
+        status: &str,
+    ) -> OrchestrationV2Checkpoint {
+        serde_json::from_value(json!({
+            "id": id, "threadId": "thread-1", "scopeId": "scope-1", "runId": null,
+            "nodeId": "node-1", "parentCheckpointId": null,
+            "ordinalWithinScope": ordinal_within_scope, "appRunOrdinal": app_run_ordinal,
+            "ref": format!("refs/checkpoints/{id}"), "status": status, "files": [],
+            "capturedAt": "2026-06-20T00:00:00.000Z",
+        }))
+        .expect("checkpoint")
+    }
+
+    #[test]
+    fn a_turn_count_names_its_ready_checkpoint() {
+        let checkpoints = vec![
+            checkpoint("base", 0, None, "ready"),
+            checkpoint("one", 1, Some(1), "ready"),
+            checkpoint("two", 2, Some(2), "stale"),
+        ];
+        let id = |turn| rollback_checkpoint(&checkpoints, turn).map(|c| c.id.to_string());
+        // Turn 0 is the baseline taken before the first run.
+        assert_eq!(id(0).as_deref(), Some("base"));
+        assert_eq!(id(1).as_deref(), Some("one"));
+        // A stale checkpoint was already rewound past, and turn 3 never ran.
+        assert_eq!(id(2), None);
+        assert_eq!(id(3), None);
     }
 }

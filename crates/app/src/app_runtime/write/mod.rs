@@ -10,6 +10,7 @@ pub mod path_search;
 #[cfg(test)]
 mod provider_smoke_tests;
 pub mod providers;
+pub mod rollback;
 pub mod runtime;
 pub mod settings;
 pub mod smoke;

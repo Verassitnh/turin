@@ -229,11 +229,11 @@ impl WriteRuntime {
                 checkpoint_driver.clone(),
             ),
         );
-        let checkpoints = Arc::new(CheckpointService::new(Arc::new(TurinCheckpointGit::new(
-            checkpoint_driver,
-        ))));
+        let checkpoint_service = Arc::new(CheckpointService::new(Arc::new(
+            TurinCheckpointGit::new(checkpoint_driver),
+        )));
         let capture = Arc::new(CheckpointCaptureService::new(
-            Arc::clone(&checkpoints),
+            Arc::clone(&checkpoint_service),
             Arc::clone(&sink),
             Arc::clone(&projection),
         ));
@@ -270,7 +270,7 @@ impl WriteRuntime {
 
         // Turn services.
         let run_execution = Arc::new(RunExecutionService::new(
-            checkpoints.clone(),
+            checkpoint_service.clone(),
             sink.clone(),
             ingestor.clone(),
             host_settings.clone(),
@@ -327,7 +327,7 @@ impl WriteRuntime {
                 restart.clone(),
             )
             .with_dispatch_seams(DispatchSeams {
-                checkpoints: Arc::new(ServiceCheckpointScopes(checkpoints)),
+                checkpoints: Arc::new(ServiceCheckpointScopes(checkpoint_service.clone())),
                 adapters: instances.clone(),
                 project_roots: projects.clone(),
                 sessions: sessions.clone(),
@@ -343,8 +343,9 @@ impl WriteRuntime {
             }),
         );
         let attachments_dir = std::path::PathBuf::from(&providers.host.paths.attachments_dir);
+        let thread_executor = ThreadCommandExecutor::new();
         let threads = Arc::new(ThreadManagementService::new(
-            ThreadCommandExecutor::new(),
+            thread_executor.clone(),
             orchestrator.clone() as Arc<dyn OrchestratorPort>,
             Arc::new(ManagerSessions(sessions.clone())),
             host_settings.clone(),
@@ -394,6 +395,16 @@ impl WriteRuntime {
                 &providers.settings.settings().await,
                 instances.clone(),
             )),
+            rollback: Arc::new(super::rollback::build(super::rollback::RollbackSources {
+                orchestrator: orchestrator.clone(),
+                projections: Arc::clone(&projection),
+                projects: Arc::clone(&stores.projects),
+                stored_projects: projects.clone(),
+                checkpoints: checkpoint_service.clone(),
+                sink: sink.clone(),
+                sessions: sessions.clone(),
+                thread_commands: thread_executor,
+            })),
         });
         let worker = EffectWorker::new(
             stores.outbox.clone(),

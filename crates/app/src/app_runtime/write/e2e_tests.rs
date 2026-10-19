@@ -1276,3 +1276,301 @@ async fn the_diff_panel_reads_a_turn_checkpoint_and_the_working_tree() {
         .expect("a working tree source");
     assert!(working.diff.contains("+two"), "{}", working.diff);
 }
+
+/// Opens `thread` on a client store over the harness' stores.
+async fn open_client(harness: &Harness, thread: &turin_contracts::ThreadId) -> crate::state::store::ClientStateHandle {
+    let client = start(harness.stores.clone());
+    wait_for(&client, "the shell", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.threads.len() == 1)
+    })
+    .await;
+    client.open_thread(thread_id(thread.as_str()));
+    client
+}
+
+/// Sends `text` and stops the turn once it runs; returns when the run is interrupted.
+async fn send_and_interrupt(
+    harness: &Harness,
+    client: &crate::state::store::ClientStateHandle,
+    thread: &turin_contracts::ThreadId,
+    text: &str,
+) {
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: text.into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    let target = thread_id(thread.as_str());
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(client, "a running turn", |state| {
+            state.thread(&target).is_some_and(|entry| {
+                entry.state.data.as_ref().is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Running)
+                })
+            })
+        }),
+    )
+    .await
+    .expect("the turn runs in time");
+    harness.commands.stop_thread(thread).await.expect("stop");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(client, "an interrupted turn", |state| {
+            state.thread(&target).is_some_and(|entry| {
+                entry.state.data.as_ref().is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Interrupted)
+                })
+            })
+        }),
+    )
+    .await
+    .expect("the turn is interrupted in time");
+}
+
+fn projection_of(
+    state: &crate::state::client_state::ClientState,
+    thread: &turin_contracts::ThreadId,
+) -> Arc<crate::state::thread_projection::ThreadProjection> {
+    state
+        .thread(&thread_id(thread.as_str()))
+        .and_then(|entry| entry.state.data.clone())
+        .expect("thread projection")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_continues_an_interrupted_run() {
+    use crate::components::chat::live_resume::resume_plan;
+
+    let harness = harness_with("claude_turn_interrupt.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let client = open_client(&harness, &thread).await;
+    send_and_interrupt(&harness, &client, &thread, "Do not answer immediately.").await;
+
+    let state = client.snapshot();
+    let plan = resume_plan(&projection_of(&state, &thread));
+    let interrupted = plan.resumable_run_id.clone().expect("the interrupted run resumes");
+    assert!(plan.can_resume());
+
+    harness
+        .commands
+        .resume_thread(&thread, Some(interrupted.to_string()), plan.has_held_queued_runs, None)
+        .await
+        .expect("resume");
+
+    let state = tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the continuation turn", |state| {
+            state
+                .thread(&thread_id(thread.as_str()))
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| {
+                    data.runs.len() == 2
+                        && data.messages.iter().any(|message| {
+                            message.role == OrchestrationV2ConversationMessageRole::User
+                                && message.text == "Continue where you left off."
+                        })
+                })
+        }),
+    )
+    .await
+    .expect("continuation in time");
+    let projection = projection_of(&state, &thread);
+    let continuation = projection
+        .runs
+        .iter()
+        .find(|run| run.id != interrupted)
+        .expect("a second run");
+    assert_ne!(continuation.status, OrchestrationV2RunStatus::Interrupted);
+    // Resuming a run that is no longer the latest one is refused by the orchestrator.
+    let again = harness
+        .commands
+        .resume_thread(&thread, Some(interrupted.to_string()), false, None)
+        .await;
+    assert!(again.is_err(), "the interrupted run is not resumable twice");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_releases_the_queue_a_stop_held() {
+    use crate::components::chat::live_resume::resume_plan;
+
+    let harness = harness_with("claude_turn_interrupt.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let client = open_client(&harness, &thread).await;
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "first".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "second".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::QueueAfterActive,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("queue");
+    let target = thread_id(thread.as_str());
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "a running turn", |state| {
+            state.thread(&target).is_some_and(|entry| {
+                entry.state.data.as_ref().is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Running)
+                })
+            })
+        }),
+    )
+    .await
+    .expect("the turn runs in time");
+    harness.commands.stop_thread(&thread).await.expect("stop");
+    let state = tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "a held queue", |state| {
+            state
+                .thread(&target)
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Interrupted)
+                        && resume_plan(data).has_held_queued_runs
+                })
+        }),
+    )
+    .await
+    .expect("the stop holds the queue");
+    assert!(resume_plan(&projection_of(&state, &thread)).can_resume());
+
+    // Only the held queue is released (no run to continue).
+    harness
+        .commands
+        .resume_thread(&thread, None, true, None)
+        .await
+        .expect("resume the queue");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the queue released", |state| {
+            state
+                .thread(&target)
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| !resume_plan(data).has_held_queued_runs)
+        }),
+    )
+    .await
+    .expect("the queue is released in time");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reverting_to_a_turn_rewinds_the_thread() {
+    let harness = harness().await;
+    git_repo(&harness.workspace);
+    let thread = project_and_thread(&harness).await;
+    let client = open_client(&harness, &thread).await;
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    let target = thread_id(thread.as_str());
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "a ready checkpoint", |state| {
+            state
+                .thread(&target)
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+                        && data
+                            .checkpoints
+                            .iter()
+                            .any(|checkpoint| checkpoint.app_run_ordinal.is_some())
+                })
+        }),
+    )
+    .await
+    .expect("checkpoint in time");
+
+    // Restoring files needs an isolated worktree; the project checkout is shared.
+    let refused = harness
+        .commands
+        .revert_to_turn_count(&thread, 0, true)
+        .await
+        .expect_err("files cannot be restored in a shared checkout");
+    assert!(
+        refused.message.contains("isolated worktree"),
+        "{}",
+        refused.message
+    );
+
+    // "Edit from here" on the first message targets turn count 0; the call
+    // returns once the run is rolled back.
+    harness
+        .commands
+        .revert_to_turn_count(&thread, 0, false)
+        .await
+        .expect("revert");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the rolled back run", |state| {
+            state
+                .thread(&target)
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::RolledBack)
+                })
+        }),
+    )
+    .await
+    .expect("the read model shows the rollback");
+
+    // A turn that has no checkpoint is refused with a message, not a panic.
+    let error = harness
+        .commands
+        .revert_to_turn_count(&thread, 7, false)
+        .await
+        .expect_err("no checkpoint for turn 7");
+    assert!(error.message.contains("turn 7"), "{}", error.message);
+}

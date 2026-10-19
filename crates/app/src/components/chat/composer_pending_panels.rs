@@ -183,6 +183,18 @@ struct ApprovalState {
     responding: Option<String>,
 }
 
+impl ApprovalState {
+    /// A response that failed leaves its approval pending: the buttons work
+    /// again. A newer request keeps its own in-flight response.
+    fn response_failed(&mut self, request_id: &str) -> bool {
+        let release = self.responding.as_deref() == Some(request_id);
+        if release {
+            self.responding = None;
+        }
+        release
+    }
+}
+
 /// The approval drawer: `ComposerBanner.Row layout="approval"` with the panel
 /// and its actions.
 #[derive(IntoElement)]
@@ -278,7 +290,16 @@ impl RenderOnce for ComposerPendingApprovalBanner {
                     cx.notify();
                 });
                 if let Some(source) = source.as_ref() {
-                    source.respond_to_approval(&request_id, decision, cx);
+                    // A failed response leaves the approval pending: offer the buttons again.
+                    let (state, failed_id) = (state.clone(), request_id.clone());
+                    let failed = Box::new(move |cx: &mut App| {
+                        state.update(cx, |state, cx| {
+                            if state.response_failed(&failed_id) {
+                                cx.notify();
+                            }
+                        });
+                    });
+                    source.respond_to_approval(&request_id, decision, failed, cx);
                 }
             }
         };
@@ -913,6 +934,17 @@ impl RenderOnce for ComposerPendingUserInputBanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_response_makes_the_approval_answerable_again() {
+        let mut state = ApprovalState {
+            responding: Some("req-1".into()),
+        };
+        assert!(!state.response_failed("req-2"));
+        assert_eq!(state.responding.as_deref(), Some("req-1"));
+        assert!(state.response_failed("req-1"));
+        assert_eq!(state.responding, None);
+    }
 
     #[test]
     fn default_options_split_primary_and_more() {

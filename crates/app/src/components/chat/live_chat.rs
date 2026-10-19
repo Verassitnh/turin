@@ -1051,23 +1051,29 @@ impl TimelineSource for LiveSource {
         &self,
         request_id: &str,
         decision: ProviderApprovalDecision,
+        failed: Box<dyn FnOnce(&mut App)>,
         cx: &mut App,
     ) {
         let (thread_id, request_id) = (self.thread_id.clone(), request_id.to_owned());
-        self.run_command(
-            "Failed to respond to approval",
-            cx,
-            move |commands| async move {
-                commands
-                    .respond_to_request(
-                        &thread_id,
-                        &request_id,
-                        Some(decision_wire(decision)),
-                        None,
-                    )
-                    .await
-            },
-        );
+        let task = self.bus.task(cx, move |commands| async move {
+            commands
+                .respond_to_request(
+                    &thread_id,
+                    &request_id,
+                    Some(decision_wire(decision)),
+                    None,
+                )
+                .await
+        });
+        cx.spawn(async move |cx| {
+            if let Err(error) = task.await {
+                cx.update(|cx| {
+                    push_error(cx, "Failed to respond to approval", &error.message);
+                    failed(cx);
+                });
+            }
+        })
+        .detach();
     }
 
     fn respond_to_user_input(

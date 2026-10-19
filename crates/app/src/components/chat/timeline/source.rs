@@ -28,11 +28,14 @@ use super::types::{RunStatus, ThreadTimelineSnapshot};
 pub type WriteDone = Box<dyn FnOnce(Result<String, String>, &mut App)>;
 
 pub trait TimelineSource: 'static {
-    /// `onRespondToApproval`.
+    /// `onRespondToApproval`. `failed` runs when the response did not go
+    /// through, so the drawer can offer the buttons again (upstream clears
+    /// `respondingRequestIds` in `finally`).
     fn respond_to_approval(
         &self,
         request_id: &str,
         decision: ProviderApprovalDecision,
+        failed: Box<dyn FnOnce(&mut App)>,
         cx: &mut App,
     );
     /// The composer's pending-user-input submit: answers keyed by question id.
@@ -242,6 +245,7 @@ impl TimelineSource for MockTimelineSource {
         &self,
         request_id: &str,
         decision: ProviderApprovalDecision,
+        _failed: Box<dyn FnOnce(&mut App)>,
         cx: &mut App,
     ) {
         tracing::info!(request_id, ?decision, "mock: approval response");

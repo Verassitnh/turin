@@ -628,7 +628,13 @@ pub struct FlowHighlight {
     pub color: Hsla,
     /// The selection continues past the end of the text: cover the line end too.
     pub through_line_end: bool,
+    /// Receives the window bounds the highlight painted, so a caller can scroll the
+    /// match into view (the active thread-find match).
+    pub probe: Option<FindMatchProbe>,
 }
+
+/// Where a painted highlight reports its bounds, in window coordinates.
+pub type FindMatchProbe = Rc<std::cell::Cell<Option<Bounds<Pixels>>>>;
 
 /// A caret painted over the text at a byte index.
 #[derive(Clone, Copy, Debug)]
@@ -1193,6 +1199,7 @@ impl Element for InlineFlow {
 
         // Highlights set by an editor.
         for highlight in &self.highlights {
+            let mut painted: Option<Bounds<Pixels>> = None;
             for line in &layout.lines {
                 let line_end = line
                     .fragments
@@ -1209,11 +1216,13 @@ impl Element for InlineFlow {
                     x1 = x1.max(line.width) + px(4.);
                 }
                 if x1 > x0 {
+                    let quad = Bounds::new(
+                        bounds.origin + point(x0, line.top),
+                        size(x1 - x0, line.height),
+                    );
+                    painted = Some(painted.map_or(quad, |union| union.union(&quad)));
                     window.paint_quad(PaintQuad {
-                        bounds: Bounds::new(
-                            bounds.origin + point(x0, line.top),
-                            size(x1 - x0, line.height),
-                        ),
+                        bounds: quad,
                         corner_radii: Corners::default(),
                         background: highlight.color.into(),
                         border_widths: Edges::default(),
@@ -1221,6 +1230,9 @@ impl Element for InlineFlow {
                         border_style: Default::default(),
                     });
                 }
+            }
+            if let Some(probe) = &highlight.probe {
+                probe.set(painted);
             }
         }
 

@@ -21,13 +21,19 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, App, Context, Entity, FollowMode, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div, list, px, rems,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, list,
+    px, rems,
 };
 
 use super::assistant_citation_source::citation_highlight_opacity;
 use super::assistant_citation_target::{
     AssistantCitationController, AssistantCitationRequest, CitationEntryView, CitationRowView,
     CitationTargetEffect, CitationTargetInput,
+};
+use super::markdown::chat_markdown::MarkdownFind;
+use super::markdown::inline_flow::FindMatchProbe;
+use super::thread_find_navigation::{
+    find_match_key, is_visible_delta, reveal_margin, vertical_reveal_delta,
 };
 use super::timeline::assistant_citations::AssistantCitation;
 use super::timeline::messages_timeline_logic::{
@@ -71,6 +77,35 @@ pub struct TimelineUiState {
     pub open_events: HashSet<String>,
 }
 
+/// The active match of the open find (`activeFindMatch`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimelineFindMatch {
+    pub entry_id: String,
+    pub run_id: Option<String>,
+    pub occurrence: u64,
+}
+
+/// What the open find bar tells the timeline (`timelineProps`: `findQuery`,
+/// `activeFindMatch`, `findNavigationId`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimelineFind {
+    /// The query to paint. Empty while there is no result to paint.
+    pub query: String,
+    pub active: Option<TimelineFindMatch>,
+    pub navigation_id: u64,
+}
+
+/// The find state the rows paint from.
+#[derive(Clone)]
+pub struct RowFind {
+    pub query: SharedString,
+    pub active: Option<TimelineFindMatch>,
+    pub probe: FindMatchProbe,
+}
+
+/// Frames the reveal keeps adjusting for while the list measures rows.
+const FIND_REVEAL_MAX_FRAMES: u32 = 90;
+
 /// Shared per-frame state for row renderers (upstream's `TimelineRowCtx` and
 /// `TimelineRowActivityCtx`).
 #[derive(Clone)]
@@ -86,9 +121,25 @@ pub struct RowCx {
     /// Assistant message currently pulsing as a citation source, and its opacity.
     pub citation_message: Option<String>,
     pub citation_opacity: f32,
+    /// The open find's matches, painted into message text.
+    pub find: Option<RowFind>,
 }
 
 impl RowCx {
+    /// What `ChatMarkdown` paints for the row of timeline entry `entry_id`.
+    pub fn markdown_find(&self, entry_id: &str) -> Option<MarkdownFind> {
+        let find = self.find.as_ref()?;
+        Some(MarkdownFind {
+            query: find.query.clone(),
+            active: find
+                .active
+                .as_ref()
+                .filter(|active| active.entry_id == entry_id)
+                .map(|active| active.occurrence),
+            probe: find.probe.clone(),
+        })
+    }
+
     pub fn workspace_root(&self) -> Option<&str> {
         self.snapshot.workspace_root.as_deref()
     }
@@ -130,6 +181,13 @@ pub struct MessagesTimeline {
     citation: AssistantCitationController,
     pulse: Option<(String, Instant)>,
     pulse_task: Option<Task<()>>,
+    find: TimelineFind,
+    /// Where the active match painted last frame (window coordinates).
+    find_probe: FindMatchProbe,
+    /// The navigation step whose row was last scrolled to.
+    find_revealed_key: Option<String>,
+    /// Frames spent settling the active match into the readable band; `None` once settled.
+    find_reveal_frames: Option<u32>,
     _observe: Subscription,
 }
 
@@ -153,6 +211,10 @@ impl MessagesTimeline {
             citation: AssistantCitationController::default(),
             pulse: None,
             pulse_task: None,
+            find: TimelineFind::default(),
+            find_probe: FindMatchProbe::default(),
+            find_revealed_key: None,
+            find_reveal_frames: None,
             _observe: observe,
         };
         this.recompute(cx);
@@ -328,6 +390,180 @@ impl MessagesTimeline {
         cx.notify();
     }
 
+    /// `timelineProps` from the find bar. A new active match unfolds what hides it and
+    /// scrolls its row into view; the frames after that settle the match itself into the
+    /// readable band once it has painted (`useThreadFindNavigation`).
+    pub fn set_find(&mut self, find: TimelineFind, cx: &mut Context<Self>) {
+        if self.find == find {
+            return;
+        }
+        self.find = find;
+        match self.find.active.clone() {
+            Some(active) => {
+                let key = find_match_key(
+                    self.find.navigation_id,
+                    &self.find.query,
+                    &active.entry_id,
+                    active.occurrence,
+                );
+                if self.find_revealed_key.as_deref() != Some(key.as_str()) {
+                    self.find_revealed_key = Some(key);
+                    self.reveal_find_row(&active, cx);
+                }
+            }
+            None => {
+                self.find_revealed_key = None;
+                self.find_reveal_frames = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// `findPositionReaderRef`: where the next search starts, from the rows on screen. The
+    /// first searchable row in view anchors it; occurrences within a row are not measured
+    /// (see PORTING.md Deviations), so the anchor is that row's first occurrence.
+    pub fn read_find_position(&self) -> Option<super::thread_find::ThreadFindStart> {
+        use super::thread_find_position::{
+            ThreadFindBand, ThreadFindRowGeometry, read_thread_find_position,
+        };
+        let viewport = self.list.viewport_bounds();
+        let band = ThreadFindBand {
+            top: f32::from(viewport.top()) as f64,
+            bottom: f32::from(viewport.bottom()) as f64,
+        };
+        let first = self.list.logical_scroll_top().item_ix.max(1);
+        let mut rows = Vec::new();
+        for item_ix in first..=self.rows.len() {
+            let Some(bounds) = self.list.bounds_for_item(item_ix) else {
+                continue;
+            };
+            let top = f32::from(bounds.top()) as f64;
+            let row_id = match &self.rows[item_ix - 1].content {
+                MessagesTimelineRowContent::Message { message, .. } => Some(message.id.clone()),
+                MessagesTimelineRowContent::ProposedPlan { proposed_plan, .. } => {
+                    Some(proposed_plan.id.clone())
+                }
+                _ => None,
+            };
+            rows.push(ThreadFindRowGeometry {
+                row_id,
+                top,
+                bottom: f32::from(bounds.bottom()) as f64,
+                match_bottoms: Vec::new(),
+            });
+            if top >= band.bottom {
+                break;
+            }
+        }
+        read_thread_find_position(
+            band,
+            &rows,
+            |id| turin_contracts::base_schemas::TrimmedNonEmptyString::new(id).ok(),
+            0.0,
+        )
+    }
+
+    /// The index in `rows` of the message or plan row for timeline entry `entry_id`.
+    fn find_row_index(&self, entry_id: &str) -> Option<usize> {
+        self.rows.iter().position(|row| match &row.content {
+            MessagesTimelineRowContent::Message { message, .. } => message.id == entry_id,
+            MessagesTimelineRowContent::ProposedPlan { proposed_plan, .. } => {
+                proposed_plan.id == entry_id
+            }
+            _ => false,
+        })
+    }
+
+    /// Opens the turn fold, the collapsed message or the collapsed plan that hides the
+    /// match, then scrolls its row to the top of the list.
+    fn reveal_find_row(&mut self, active: &TimelineFindMatch, cx: &mut Context<Self>) {
+        // A match inside a folded turn has no row until the turn opens; nested folds
+        // need a pass each.
+        for _ in 0..3 {
+            if self.find_row_index(&active.entry_id).is_some() {
+                break;
+            }
+            let Some(run_id) = active.run_id.clone() else {
+                break;
+            };
+            if !self.ui.expanded_run_ids.contains(&run_id) {
+                let mut ui = (*self.ui).clone();
+                ui.expanded_run_ids.insert(run_id);
+                self.ui = Arc::new(ui);
+                self.recompute(cx);
+            } else {
+                break;
+            }
+        }
+        let Some(index) = self.find_row_index(&active.entry_id) else {
+            self.find_reveal_frames = None;
+            return;
+        };
+        // A collapsed body clips the match; open it so the whole text is there.
+        let is_plan = matches!(
+            self.rows[index].content,
+            MessagesTimelineRowContent::ProposedPlan { .. }
+        );
+        let mut ui = (*self.ui).clone();
+        let opened = if is_plan {
+            ui.expanded_plans.insert(active.entry_id.clone())
+        } else {
+            ui.expanded_user_messages.insert(active.entry_id.clone())
+        };
+        if opened {
+            self.ui = Arc::new(ui);
+            self.recompute(cx);
+        }
+        self.list.set_follow_mode(FollowMode::Normal);
+        self.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: index + 1,
+            offset_in_item: px(0.),
+        });
+        self.find_probe.set(None);
+        self.find_reveal_frames = Some(0);
+    }
+
+    /// One frame of settling the active match into view, run after the frame painted it.
+    fn settle_find_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(frames) = self.find_reveal_frames else {
+            return;
+        };
+        let frames = frames + 1;
+        let viewport = self.list.viewport_bounds();
+        match self.find_probe.get() {
+            // Not painted yet: the list is still measuring around the row.
+            None => {}
+            Some(rect) => {
+                let (rect_top, rect_bottom) = (
+                    f32::from(rect.top()) as f64,
+                    f32::from(rect.bottom()) as f64,
+                );
+                let (view_top, view_bottom) = (
+                    f32::from(viewport.top()) as f64,
+                    f32::from(viewport.bottom()) as f64,
+                );
+                // The composer sits below the list, not over it: no end inset.
+                let margin = reveal_margin(view_bottom - view_top, 0.0, rect_bottom - rect_top);
+                let delta = vertical_reveal_delta(
+                    rect_top,
+                    rect_bottom,
+                    view_top,
+                    view_bottom,
+                    margin,
+                    0.0,
+                );
+                if is_visible_delta(delta) {
+                    self.list.scroll_by(px(delta as f32));
+                } else {
+                    self.find_reveal_frames = None;
+                    return;
+                }
+            }
+        }
+        self.find_reveal_frames = (frames < FIND_REVEAL_MAX_FRAMES).then_some(frames);
+        cx.notify();
+    }
+
     fn rows_input(&self, snapshot: &ThreadTimelineSnapshot) -> MessagesTimelineRowsInput {
         MessagesTimelineRowsInput {
             timeline_entries: snapshot.timeline_entries.clone(),
@@ -433,6 +669,11 @@ impl MessagesTimeline {
             order: (ix as u64) << 20,
             citation_message,
             citation_opacity,
+            find: (!self.find.query.is_empty()).then(|| RowFind {
+                query: self.find.query.clone().into(),
+                active: self.find.active.clone(),
+                probe: self.find_probe.clone(),
+            }),
         };
         // `.messages-timeline-scroll` padding-inline (3rem at ≥640px) and the
         // `.chat-content-lane` max width.
@@ -529,8 +770,14 @@ fn timeline_row_content(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
 }
 
 impl Render for MessagesTimeline {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.app_theme().clone();
+        if self.find_reveal_frames.is_some() {
+            let timeline = cx.entity();
+            window.on_next_frame(move |_, cx| {
+                timeline.update(cx, |this, cx| this.settle_find_reveal(cx));
+            });
+        }
         let snapshot = self.store.read(cx).snapshot().clone();
         if self.rows.is_empty() && !snapshot.is_working {
             return empty_state(&theme).into_any_element();

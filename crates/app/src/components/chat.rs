@@ -154,15 +154,19 @@ pub mod timeline_scroll_anchoring;
 #[allow(dead_code)]
 pub mod selection_actions;
 pub mod timestamp_format;
-// Find-in-thread logic. The timeline does not drive find yet, so nothing calls these.
+// Find-in-thread: `thread_find_provider` drives the bar, the search and the timeline; the
+// pure rules are ported whole, so some helpers are not called yet.
 #[allow(dead_code)]
 pub mod thread_find;
+pub mod thread_find_action_bus;
+pub mod thread_find_bar;
 #[allow(dead_code)]
 pub mod thread_find_highlights;
 #[allow(dead_code)]
 pub mod thread_find_navigation;
 #[allow(dead_code)]
 pub mod thread_find_position;
+pub mod thread_find_provider;
 #[allow(dead_code)]
 pub mod thread_find_state;
 pub mod work_log;

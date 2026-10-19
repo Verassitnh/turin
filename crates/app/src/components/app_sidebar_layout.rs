@@ -126,6 +126,8 @@ actions!(
         QuitShortcut,
         /// `thread.undo` (mod+z).
         UndoLatestThread,
+        /// `chat.find` (mod+f).
+        FindInThread,
     ]
 );
 
@@ -143,6 +145,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-b", ToggleThreadDetails, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-u", OpenUsage, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-z", UndoLatestThread, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-f", FindInThread, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-q", QuitShortcut, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
@@ -624,7 +627,9 @@ impl AppSidebarLayout {
             CommandPaletteEvent::NewThreadWithoutProject => {
                 unavailable("New thread without a project", window, cx)
             }
-            CommandPaletteEvent::FindInCurrentThread => unavailable("Find in thread", window, cx),
+            CommandPaletteEvent::FindInCurrentThread => {
+                crate::components::chat::thread_find_action_bus::request_thread_find_open(cx)
+            }
             CommandPaletteEvent::LinkPullRequest => self.open_pull_requests(window, cx),
             CommandPaletteEvent::ShowLinkedPullRequests => {
                 self.open_pull_requests(window, cx);
@@ -864,6 +869,13 @@ impl AppSidebarLayout {
                 })
                 .collect(),
         })
+    }
+
+    /// `chat.find`: asks the open chat to show its find bar (`requestThreadFindOpen`). The
+    /// chat view mounts one only for a routed thread, so the shortcut does nothing on
+    /// the other pages.
+    fn find_in_thread(&mut self, _: &FindInThread, _: &mut Window, cx: &mut Context<Self>) {
+        crate::components::chat::thread_find_action_bus::request_thread_find_open(cx);
     }
 
     fn toggle_thread_details(
@@ -1527,6 +1539,7 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::toggle_thread_details))
             .on_action(cx.listener(Self::open_usage_action))
             .on_action(cx.listener(Self::undo_latest_thread_action))
+            .on_action(cx.listener(Self::find_in_thread))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_file_picker))
             .on_action(cx.listener(Self::toggle_project_search))

@@ -23,7 +23,10 @@ use gpui_kit::{
 };
 
 use super::code_highlight::{cached_highlight, highlight_code, plain_highlight};
-use super::inline_flow::{FlowSpan, FlowSpanStyle, FlowText, InlineFlow, SpanChrome, WhiteSpace};
+use super::inline_flow::{
+    FindMatchProbe, FlowHighlight, FlowSpan, FlowSpanStyle, FlowText, InlineFlow, SpanChrome,
+    WhiteSpace,
+};
 use super::markdown_links::{
     file_link_label, inline_code_file_path_candidate, is_markdown_file_link_label,
     parse_markdown_file_link,
@@ -38,6 +41,7 @@ use crate::components::chat::markdown_thread_link::{
 };
 use crate::components::chat::mermaid_diagram::{MERMAID_UNAVAILABLE, mermaid_diagram};
 use crate::components::chat::message_copy_button::{CODE_COPY_TIMEOUT_MS, MessageCopyButton};
+use crate::components::chat::thread_find_highlights::plan_flow_find_ranges;
 use crate::components::chat::timeline::assistant_citations::{
     assistant_citation_label, parse_assistant_citation_href,
 };
@@ -116,6 +120,16 @@ pub fn cached_document_with(
     doc
 }
 
+/// What the open find bar paints into one message: every occurrence of `query` gets the
+/// match background and the active one (`active`, its occurrence number within the message)
+/// the active background, and reports where it painted through `probe`.
+#[derive(Clone)]
+pub struct MarkdownFind {
+    pub query: SharedString,
+    pub active: Option<u64>,
+    pub probe: FindMatchProbe,
+}
+
 /// `<ChatMarkdown>`.
 #[derive(IntoElement)]
 pub struct ChatMarkdown {
@@ -131,6 +145,7 @@ pub struct ChatMarkdown {
     /// `$skill` tokens of these skills read as chips (`renderSkillInlineMarkdownChildren`).
     skills: Vec<InlineSkill>,
     assistant_message_id: Option<SharedString>,
+    find: Option<MarkdownFind>,
 }
 
 impl ChatMarkdown {
@@ -145,7 +160,14 @@ impl ChatMarkdown {
             extra_remark_plugin: None,
             skills: Vec::new(),
             assistant_message_id: None,
+            find: None,
         }
+    }
+
+    /// Paints the find bar's matches (`threadFindHighlights`).
+    pub fn find(mut self, find: Option<MarkdownFind>) -> Self {
+        self.find = find;
+        self
     }
 
     pub fn assistant_selection_source(mut self, message_id: impl Into<SharedString>) -> Self {
@@ -213,6 +235,9 @@ struct Md<'a> {
     skills: &'a [InlineSkill],
     /// Each `t3-thread://` link of the message, resolved against the shell index.
     thread_links: &'a HashMap<String, ResolvedThreadLink>,
+    /// The find matches to paint, with the occurrence the next flow starts counting at.
+    find: Option<&'a MarkdownFind>,
+    find_next: Cell<u64>,
     assistant_message_id: Option<&'a str>,
     assistant_message_text: Option<&'a str>,
 }
@@ -534,7 +559,10 @@ impl Md<'_> {
         white_space: WhiteSpace,
     ) -> InlineFlow {
         let (id, order) = self.next_leaf();
-        let mut flow = InlineFlow::new(id, self.flow_text(inlines, inherit), white_space)
+        let content = self.flow_text(inlines, inherit);
+        let highlights = self.find_highlights(&content.text);
+        let mut flow = InlineFlow::new(id, content, white_space)
+            .highlights(highlights)
             .strut(self.fonts.sans.clone(), inherit.size, inherit.line_height)
             .document_order(order)
             .selection_color(self.selection)
@@ -545,10 +573,9 @@ impl Md<'_> {
                     cx.open_url(url);
                 }
             }));
-        if let (Some(message_id), Some(message_text)) = (
-            self.assistant_message_id,
-            self.assistant_message_text,
-        ) {
+        if let (Some(message_id), Some(message_text)) =
+            (self.assistant_message_id, self.assistant_message_text)
+        {
             flow = flow.assistant_selection(message_id.to_owned(), message_text.to_owned());
         }
         flow
@@ -1090,6 +1117,7 @@ impl Md<'_> {
             spans: retarget_spans_for_tabs(code_text, spans),
             links: Vec::new(),
         };
+        let highlights = self.find_highlights(&content.text);
         let flow = InlineFlow::new(
             id,
             content,
@@ -1099,6 +1127,7 @@ impl Md<'_> {
                 WhiteSpace::Pre
             },
         )
+        .highlights(highlights)
         .strut(self.fonts.mono.clone(), code_size, 1.375)
         .document_order(order)
         .selection_color(self.selection);
@@ -1408,6 +1437,33 @@ impl Md<'_> {
 }
 
 impl Md<'_> {
+    /// The find highlights of one flow's rendered text; the count carries on to the next
+    /// flow, so occurrence numbers run in document order as the server's do.
+    fn find_highlights(&self, text: &str) -> Vec<FlowHighlight> {
+        let Some(find) = self.find else {
+            return Vec::new();
+        };
+        let first = self.find_next.get();
+        let ranges = plan_flow_find_ranges(text, &find.query, first);
+        self.find_next.set(first + ranges.len() as u64);
+        ranges
+            .into_iter()
+            .map(|found| {
+                let active = find.active == Some(found.occurrence);
+                FlowHighlight {
+                    range: found.range,
+                    color: if active {
+                        self.theme.search_match_active_background
+                    } else {
+                        self.theme.search_match_background
+                    },
+                    through_line_end: false,
+                    probe: active.then(|| find.probe.clone()),
+                }
+            })
+            .collect()
+    }
+
     /// The link's text led by a thread glyph (`ms-[0.25em] me-[0.2em] size-[14px]`, as the
     /// favicon of a web link). Upstream shows the thread's project icon when it has one;
     /// the leading icon of a flow span is a glyph only (see PORTING.md Deviations).
@@ -1709,6 +1765,8 @@ impl RenderOnce for ChatMarkdown {
             selection,
             skills: &self.skills,
             thread_links: &thread_links,
+            find: self.find.as_ref(),
+            find_next: Cell::new(0),
             assistant_message_id: self.assistant_message_id.as_deref(),
             assistant_message_text: self
                 .assistant_message_id

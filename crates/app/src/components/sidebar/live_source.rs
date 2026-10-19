@@ -23,10 +23,14 @@ use super::view_model::{
 use crate::app_runtime::write::bus::CommandBus;
 use crate::app_runtime::write::commands::{CommandError, Commands};
 use crate::components::thread_search_match::SearchMatchSource;
+use crate::hooks::use_local_storage::FileLocalStorage;
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
-use crate::state::project_grouping::{ProjectGroupingSettings, select_project_grouping_settings};
+use crate::state::project_grouping::{
+    ProjectGroupingSettings, get_project_order_key, select_project_grouping_settings,
+};
 use crate::state::store::ClientStore;
+use crate::state::ui_state_file::UiStateFile;
 use turin_contracts::settings::ClientSettings;
 use turin_contracts::thread_search::OrchestrationThreadSearchSource;
 
@@ -41,6 +45,17 @@ struct LocalUi {
     /// The saved client settings the sidebar reads (`useSettings()`).
     settings: SidebarSettings,
     grouping: ProjectGroupingSettings,
+    /// The manual project order, loaded from and saved to the data directory
+    /// (`useUiStateStore().projectOrder`).
+    ui_state: Option<UiStateFile>,
+}
+
+impl LocalUi {
+    fn project_order(&self) -> &[String] {
+        self.ui_state
+            .as_ref()
+            .map_or(&[], UiStateFile::project_order)
+    }
 }
 
 /// The Claude models the sidebar's hover cards name. The provider registry's
@@ -90,9 +105,46 @@ fn snapshot_from(state: &ClientState, ui: &LocalUi) -> SidebarSnapshot {
             .collect();
         // `useSidebarProjectGroups`: grouped per the saved grouping settings
         // and ordered per the saved project sort order.
-        snapshot.refresh_project_groups(&[], &ui.grouping);
+        snapshot.refresh_project_groups(ui.project_order(), &ui.grouping);
     }
     snapshot
+}
+
+/// `handleProjectDragEnd`: the groups' physical project keys, in the order
+/// shown, are the current order; the dragged group moves in front of the target.
+#[allow(dead_code)] // see `SidebarBackend::reorder_projects`
+fn reorder_project_groups(
+    file: &mut UiStateFile,
+    snapshot: &SidebarSnapshot,
+    dragged_group_key: &str,
+    target_group_key: &str,
+) -> Result<bool, crate::hooks::use_local_storage::LocalStorageError> {
+    let order_keys_of = |group_key: &str| -> Vec<String> {
+        snapshot
+            .project_groups
+            .iter()
+            .find(|group| group.project_key == group_key)
+            .map(|group| {
+                group
+                    .member_project_keys
+                    .iter()
+                    .filter_map(|member| snapshot.project(member))
+                    .map(get_project_order_key)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let dragged = order_keys_of(dragged_group_key);
+    let target = order_keys_of(target_group_key);
+    if dragged.is_empty() || target.is_empty() || dragged_group_key == target_group_key {
+        return Ok(false);
+    }
+    let current: Vec<String> = snapshot
+        .project_groups
+        .iter()
+        .flat_map(|group| order_keys_of(&group.project_key))
+        .collect();
+    file.reorder_projects(&current, &dragged, &target)
 }
 
 pub struct LiveSidebar;
@@ -105,7 +157,12 @@ impl LiveSidebar {
         bus: CommandBus,
         cx: &mut App,
     ) -> (Entity<SidebarStore>, Rc<LiveSidebarBackend>) {
-        let ui = Rc::new(RefCell::new(LocalUi::default()));
+        let ui = Rc::new(RefCell::new(LocalUi {
+            ui_state: Some(UiStateFile::load(FileLocalStorage::shared_in_data_dir(
+                "local-storage.json",
+            ))),
+            ..LocalUi::default()
+        }));
         let initial = snapshot_from(client.read(cx).state(), &ui.borrow());
         let store = cx.new(|_| SidebarStore::new(initial));
         let refresh = {
@@ -125,7 +182,12 @@ impl LiveSidebar {
         };
         let observed = refresh.clone();
         cx.observe(&client, move |_, cx| observed(cx)).detach();
-        let backend = Rc::new(LiveSidebarBackend { bus, ui, refresh });
+        let backend = Rc::new(LiveSidebarBackend {
+            bus,
+            ui,
+            refresh,
+            store: store.downgrade(),
+        });
         (store, backend)
     }
 }
@@ -134,6 +196,8 @@ pub struct LiveSidebarBackend {
     bus: CommandBus,
     ui: Rc<RefCell<LocalUi>>,
     refresh: Rc<dyn Fn(&mut App)>,
+    #[allow(dead_code)] // read by `reorder_projects`, which has no caller yet
+    store: gpui_kit::WeakEntity<SidebarStore>,
 }
 
 impl LiveSidebarBackend {
@@ -327,6 +391,28 @@ impl SidebarBackend for LiveSidebarBackend {
         });
     }
 
+    fn reorder_projects(&self, dragged_group_key: &str, target_group_key: &str, cx: &mut App) {
+        let Some(snapshot) = self
+            .store
+            .upgrade()
+            .map(|store| store.read(cx).snapshot().clone())
+        else {
+            return;
+        };
+        let outcome = {
+            let mut ui = self.ui.borrow_mut();
+            let Some(file) = ui.ui_state.as_mut() else {
+                return;
+            };
+            reorder_project_groups(file, &snapshot, dragged_group_key, target_group_key)
+        };
+        match outcome {
+            Ok(true) => (self.refresh)(cx),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "could not save the project order"),
+        }
+    }
+
     fn set_project_scope(&self, project_key: Option<String>, cx: &mut App) {
         self.local(cx, |ui| ui.project_scope_key = project_key);
     }
@@ -401,5 +487,89 @@ mod tests {
             snapshot.settings.project_sort_order,
             ProjectSortOrder::Manual
         );
+    }
+
+    fn project(id: &str, root: &str, title: &str) -> crate::state::models::EnvironmentProject {
+        crate::state::models::EnvironmentProject {
+            environment_id: local_environment_id(),
+            id: turin_contracts::ProjectId::new(id).unwrap(),
+            title: title.to_owned(),
+            workspace_root: root.to_owned(),
+            favicon_path: None,
+            project_icon: None,
+            created_at: None,
+            updated_at: None,
+            is_scratch: false,
+            source: None,
+        }
+    }
+
+    fn manual_snapshot(order: &[String]) -> SidebarSnapshot {
+        let mut snapshot = SidebarSnapshot {
+            projects: vec![
+                project("project-a", "/code/a", "A"),
+                project("project-b", "/code/b", "B"),
+                project("project-c", "/code/c", "C"),
+            ],
+            ..SidebarSnapshot::default()
+        };
+        snapshot.settings.project_sort_order = ProjectSortOrder::Manual;
+        snapshot.refresh_project_groups(order, &ProjectGroupingSettings::default());
+        snapshot
+    }
+
+    fn titles(snapshot: &SidebarSnapshot) -> Vec<&str> {
+        snapshot
+            .project_groups
+            .iter()
+            .map(|group| group.display_name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_saved_manual_order_reaches_the_snapshot_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("local-storage.json");
+        let open = || {
+            UiStateFile::load(std::sync::Arc::new(
+                crate::hooks::use_local_storage::FileLocalStorage::open(&path),
+            ))
+        };
+
+        // Drag C in front of A.
+        let mut first = open();
+        let before = manual_snapshot(first.project_order());
+        let key_of = |title: &str| {
+            before
+                .project_groups
+                .iter()
+                .find(|group| group.display_name == title)
+                .unwrap()
+                .project_key
+                .clone()
+        };
+        assert!(reorder_project_groups(&mut first, &before, &key_of("C"), &key_of("A")).unwrap());
+
+        // A new process reads the file and orders the sidebar by it.
+        let second = open();
+        let state = ClientStateCore::new(local_environment_id()).snapshot();
+        let ui = LocalUi {
+            ui_state: Some(second),
+            ..LocalUi::default()
+        };
+        assert!(snapshot_from(&state, &ui).project_groups.is_empty());
+        let reordered = manual_snapshot(ui.project_order());
+        assert_eq!(titles(&reordered), ["C", "A", "B"]);
+    }
+
+    #[test]
+    fn dropping_a_group_on_itself_or_an_unknown_group_changes_nothing() {
+        let mut file =
+            UiStateFile::load(crate::hooks::use_local_storage::MemoryLocalStorage::shared());
+        let snapshot = manual_snapshot(&[]);
+        let a = snapshot.project_groups[0].project_key.clone();
+        assert!(!reorder_project_groups(&mut file, &snapshot, &a, &a).unwrap());
+        assert!(!reorder_project_groups(&mut file, &snapshot, &a, "nope").unwrap());
+        assert!(file.project_order().is_empty());
     }
 }

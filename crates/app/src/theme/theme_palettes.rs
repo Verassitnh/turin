@@ -9,27 +9,28 @@
 
 use gpui_kit::SharedString;
 
-pub const BUILT_IN_THEME_IDS: [&str; 5] = ["t3-chat", "grove", "ocean", "ember", "iris"];
+pub const BUILT_IN_THEME_IDS: [&str; 6] = ["t3-chat", "grove", "ocean", "ember", "iris", "cursor"];
 
 /// The standard T3 Code palette, kept separate from the optional built-in theme library.
 pub const MOBILE_DEFAULT_THEME_ID: &str = "t3-code";
 
 /// Every palette the mobile app can render. Mobile is cut; kept because
 /// theme files and the publish path validate ids against it upstream.
-pub const MOBILE_THEME_IDS: [&str; 6] = [
+pub const MOBILE_THEME_IDS: [&str; 7] = [
     MOBILE_DEFAULT_THEME_ID,
     "t3-chat",
     "grove",
     "ocean",
     "ember",
     "iris",
+    "cursor",
 ];
 
 /// Ids a theme may not take: the appearance keywords a stored preference uses,
 /// every built-in, and the legacy aliases older saves still carry. Taking one
 /// would either be shadowed by the built-in or capture clients that never chose
 /// it, so the client library and the publish path both consult this set.
-pub const RESERVED_THEME_IDS: [&str; 13] = [
+pub const RESERVED_THEME_IDS: [&str; 14] = [
     "system",
     "light",
     "dark",
@@ -38,6 +39,7 @@ pub const RESERVED_THEME_IDS: [&str; 13] = [
     "ocean",
     "ember",
     "iris",
+    "cursor",
     "t3-chat-dark",
     "t3-grove",
     "t3-ocean",
@@ -49,7 +51,7 @@ pub const RESERVED_THEME_IDS: [&str; 13] = [
 /// not a web or desktop built-in, so a saved theme may legitimately carry that
 /// id, but no client that follows published themes can resolve it -- publishing
 /// it would report success and change nothing.
-pub const UNPUBLISHABLE_THEME_IDS: [&str; 14] = [
+pub const UNPUBLISHABLE_THEME_IDS: [&str; 15] = [
     "system",
     "light",
     "dark",
@@ -58,6 +60,7 @@ pub const UNPUBLISHABLE_THEME_IDS: [&str; 14] = [
     "ocean",
     "ember",
     "iris",
+    "cursor",
     "t3-chat-dark",
     "t3-grove",
     "t3-ocean",
@@ -1035,13 +1038,157 @@ pub const IRIS_THEME: ThemeDefinition = ThemeDefinition {
     sidebar_artwork: true,
 };
 
+/// Cursor's own light and dark editor themes, ported from the Cursor app's
+/// bundled `theme-cursor` color themes and then darkened by 0.03 OKLCH lightness on
+/// every surface, border and fill role (text, accent and status colors keep
+/// Cursor's values). Every color is an opaque `#rrggbb`. Not upstream: see the
+/// PORTING.md Deviations row for the extra Cursor built-in.
+pub const CURSOR_THEME: ThemeDefinition = ThemeDefinition {
+    id: SharedString::new_static("cursor"),
+    label: SharedString::new_static("Cursor"),
+    appearance: ThemeAppearance::Light,
+    colors: ThemeColors {
+        canvas: SharedString::new_static("#f2f2f2"),
+        chrome: SharedString::new_static("#e9e9e9"),
+        toolbar: SharedString::new_static("#e9e9e9"),
+        toolbar_foreground: SharedString::new_static("#141414"),
+        toolbar_border: SharedString::new_static("#d8d8d8"),
+        toolbar_control: SharedString::new_static("#dadada"),
+        toolbar_control_foreground: SharedString::new_static("#141414"),
+        toolbar_control_hover: SharedString::new_static("#cfcfcf"),
+        surface: SharedString::new_static("#f2f2f2"),
+        surface_raised: SharedString::new_static("#e9e9e9"),
+        surface_overlay: SharedString::new_static("#e0e0e0"),
+        text: SharedString::new_static("#141414"),
+        text_muted: SharedString::new_static("#505050"),
+        border: SharedString::new_static("#e1e1e1"),
+        input: SharedString::new_static("#cfcfcf"),
+        focus: SharedString::new_static("#2778C1"),
+        accent: SharedString::new_static("#2778C1"),
+        accent_foreground: SharedString::new_static("#FCFCFC"),
+        secondary: SharedString::new_static("#e2e2e2"),
+        secondary_foreground: SharedString::new_static("#141414"),
+        muted: SharedString::new_static("#e2e2e2"),
+        muted_foreground: SharedString::new_static("#505050"),
+        placeholder: SharedString::new_static("#717171"),
+        secondary_label: SharedString::new_static("#505050"),
+        icon_muted: SharedString::new_static("#505050"),
+        error: SharedString::new_static("#BE1744"),
+        error_foreground: SharedString::new_static("#BE1744"),
+        error_surface: SharedString::new_static("#e8cdd5"),
+        warning: SharedString::new_static("#CD4500"),
+        warning_foreground: SharedString::new_static("#A83800"),
+        warning_surface: SharedString::new_static("#ebd8cf"),
+        update: SharedString::new_static("#0064B0"),
+        update_foreground: SharedString::new_static("#005293"),
+        update_surface: SharedString::new_static("#ccdbe7"),
+        accent_surface: SharedString::new_static("#d7d7d7"),
+        accent_surface_foreground: SharedString::new_static("#141414"),
+        message_surface: SharedString::new_static("#d0d0d0"),
+        message_foreground: SharedString::new_static("#141414"),
+        message_action: SharedString::new_static("#2778C1"),
+        message_action_foreground: SharedString::new_static("#FCFCFC"),
+        message_action_hover: SharedString::new_static("#1F68A8"),
+        code_background: SharedString::new_static("#e9e9e9"),
+        code_foreground: SharedString::new_static("#141414"),
+        search_match_background: SharedString::new_static("#97bfde"),
+        search_match_foreground: SharedString::new_static("#141414"),
+        search_match_active_background: SharedString::new_static("#0064B0"),
+        search_match_active_foreground: SharedString::new_static("#FCFCFC"),
+        sidebar: SharedString::new_static("#e9e9e9"),
+        sidebar_foreground: SharedString::new_static("#141414"),
+        sidebar_muted_foreground: SharedString::new_static("#4e4e4e"),
+        sidebar_control_surface: SharedString::new_static("#dadada"),
+        sidebar_row_hover: SharedString::new_static("#dadada"),
+        sidebar_row_active: SharedString::new_static("#cfcfcf"),
+        sidebar_row_selected: SharedString::new_static("#bfbfbf"),
+        sidebar_border: SharedString::new_static("#d8d8d8"),
+        terminal_background: SharedString::new_static("#e9e9e9"),
+        terminal_foreground: SharedString::new_static("#141414"),
+        terminal_cursor: SharedString::new_static("#141414"),
+        terminal_selection: SharedString::new_static("#cfcfcf"),
+        terminal_scrollbar: SharedString::new_static("#c6c6c6"),
+        terminal_scrollbar_hover: SharedString::new_static("#acacac"),
+    },
+    variants: ThemeVariants {
+        light: None,
+        dark: Some(ThemeColors {
+            canvas: SharedString::new_static("#111111"),
+            chrome: SharedString::new_static("#0d0d0d"),
+            toolbar: SharedString::new_static("#0d0d0d"),
+            toolbar_foreground: SharedString::new_static("#F0F0F0"),
+            toolbar_border: SharedString::new_static("#1d1d1d"),
+            toolbar_control: SharedString::new_static("#1c1c1c"),
+            toolbar_control_foreground: SharedString::new_static("#F0F0F0"),
+            toolbar_control_hover: SharedString::new_static("#272727"),
+            surface: SharedString::new_static("#111111"),
+            surface_raised: SharedString::new_static("#1f1f1f"),
+            surface_overlay: SharedString::new_static("#2c2c2c"),
+            text: SharedString::new_static("#F0F0F0"),
+            text_muted: SharedString::new_static("#b8b8b8"),
+            border: SharedString::new_static("#212121"),
+            input: SharedString::new_static("#303030"),
+            focus: SharedString::new_static("#81A1C1"),
+            accent: SharedString::new_static("#81A1C1"),
+            accent_foreground: SharedString::new_static("#191c22"),
+            secondary: SharedString::new_static("#1f1f1f"),
+            secondary_foreground: SharedString::new_static("#F0F0F0"),
+            muted: SharedString::new_static("#1f1f1f"),
+            muted_foreground: SharedString::new_static("#b8b8b8"),
+            placeholder: SharedString::new_static("#9a9a9a"),
+            secondary_label: SharedString::new_static("#b8b8b8"),
+            icon_muted: SharedString::new_static("#b8b8b8"),
+            error: SharedString::new_static("#E34671"),
+            error_foreground: SharedString::new_static("#FC6B83"),
+            error_surface: SharedString::new_static("#30181f"),
+            warning: SharedString::new_static("#D2943E"),
+            warning_foreground: SharedString::new_static("#F1B467"),
+            warning_surface: SharedString::new_static("#2a2216"),
+            update: SharedString::new_static("#88C0D0"),
+            update_foreground: SharedString::new_static("#88C0D0"),
+            update_surface: SharedString::new_static("#222a2c"),
+            accent_surface: SharedString::new_static("#2a2a2a"),
+            accent_surface_foreground: SharedString::new_static("#F0F0F0"),
+            message_surface: SharedString::new_static("#383838"),
+            message_foreground: SharedString::new_static("#F0F0F0"),
+            message_action: SharedString::new_static("#81A1C1"),
+            message_action_foreground: SharedString::new_static("#191c22"),
+            message_action_hover: SharedString::new_static("#87A6C4"),
+            code_background: SharedString::new_static("#0d0d0d"),
+            code_foreground: SharedString::new_static("#F0F0F0"),
+            search_match_background: SharedString::new_static("#455b62"),
+            search_match_foreground: SharedString::new_static("#F0F0F0"),
+            search_match_active_background: SharedString::new_static("#88C0D0"),
+            search_match_active_foreground: SharedString::new_static("#141414"),
+            sidebar: SharedString::new_static("#0d0d0d"),
+            sidebar_foreground: SharedString::new_static("#F0F0F0"),
+            sidebar_muted_foreground: SharedString::new_static("#b7b7b7"),
+            sidebar_control_surface: SharedString::new_static("#1c1c1c"),
+            sidebar_row_hover: SharedString::new_static("#1c1c1c"),
+            sidebar_row_active: SharedString::new_static("#272727"),
+            sidebar_row_selected: SharedString::new_static("#363636"),
+            sidebar_border: SharedString::new_static("#1d1d1d"),
+            terminal_background: SharedString::new_static("#0d0d0d"),
+            terminal_foreground: SharedString::new_static("#F0F0F0"),
+            terminal_cursor: SharedString::new_static("#F0F0F0"),
+            terminal_selection: SharedString::new_static("#272727"),
+            terminal_scrollbar: SharedString::new_static("#404040"),
+            terminal_scrollbar_hover: SharedString::new_static("#5a5a5a"),
+        }),
+    },
+    collection: None,
+    managed: false,
+    sidebar_artwork: false,
+};
+
 #[allow(clippy::large_const_arrays)]
-pub const BUILT_IN_THEMES: [ThemeDefinition; 5] = [
+pub const BUILT_IN_THEMES: [ThemeDefinition; 6] = [
     T3_CHAT_THEME,
     GROVE_THEME,
     OCEAN_THEME,
     EMBER_THEME,
     IRIS_THEME,
+    CURSOR_THEME,
 ];
 
 pub fn get_theme_colors_for_appearance(

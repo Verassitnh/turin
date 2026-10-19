@@ -129,7 +129,7 @@ fn theme_cards() -> Vec<ThemeCard> {
             .collect(),
         custom: false,
     }];
-    // Maintainer themes in upstream's order: T3 Chat, Grove, Ocean, Ember, Iris.
+    // Maintainer themes in upstream's order: T3 Chat, Grove, Ocean, Ember, Iris, then Cursor (Turin-only).
     cards.extend(BUILT_IN_THEMES.iter().map(card_of));
     // Then the saved themes, as `customThemeCollections` follows the maintainer ones.
     cards.extend(get_custom_themes().iter().map(|theme| ThemeCard {

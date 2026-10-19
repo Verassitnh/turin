@@ -12,7 +12,7 @@ use crate::composer::composer_draft_uploads::DraftAttachmentReleaser;
 use crate::composer::discard_composer_draft::{
     DiscardableDraftStore, DiscardedDrafts, discard_composer_draft, restore_discarded_draft,
 };
-use crate::composer::draft_store::{ComposerDraftStore, ComposerThreadDraft};
+use crate::composer::draft_store::{ComposerThreadDraft, SharedDraftStore};
 use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoNotices, UndoNotice, UndoPlan};
 
 struct NoopReleaser;
@@ -37,7 +37,7 @@ fn target_key(target: &ComposerThreadTarget) -> Option<String> {
 
 /// Draft store + undo queue; one instance per app shell.
 pub struct ComposerDraftHost {
-    pub store: ComposerDraftStore,
+    pub store: SharedDraftStore,
     sessions: HashMap<String, ()>,
     logical: IndexMap<String, String>,
     pub undo: ThreadUndo,
@@ -49,7 +49,7 @@ pub struct ComposerDraftHost {
 impl ComposerDraftHost {
     pub fn new() -> Self {
         Self {
-            store: ComposerDraftStore::new(),
+            store: SharedDraftStore::new(),
             sessions: HashMap::new(),
             logical: IndexMap::new(),
             undo: ThreadUndo::default(),
@@ -106,7 +106,7 @@ impl DiscardableDraftStore for ComposerDraftHost {
     }
 
     fn draft_by_key(&self, key: &str) -> Option<ComposerThreadDraft> {
-        self.store.get_composer_draft(key).cloned()
+        self.store.get_composer_draft(key)
     }
 
     fn session(&self, key: &str) -> Option<()> {

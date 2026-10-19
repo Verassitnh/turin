@@ -31,7 +31,7 @@ use crate::composer::dispatch::{
     ComposerDispatchMode, ResolveComposerDispatchModeInput, resolve_composer_dispatch_mode,
 };
 use crate::composer::draft_store::{
-    ComposerDraftStore, ComposerFileAttachment, ComposerImageAttachment,
+    SharedDraftStore, ComposerFileAttachment, ComposerImageAttachment,
 };
 use crate::composer::editor_state::EditorSnapshot;
 use crate::composer::logic::{
@@ -76,7 +76,7 @@ pub enum Layer {
 pub struct ChatComposer {
     pub(super) store: Entity<ComposerStore>,
     pub(super) editor: Entity<PromptEditor>,
-    pub(super) drafts: ComposerDraftStore,
+    pub(super) drafts: SharedDraftStore,
     pub(super) thread_key: String,
     pub(super) validation: Option<String>,
     pub(super) history_position: Option<ComposerPromptHistoryPosition>,
@@ -88,7 +88,6 @@ pub struct ChatComposer {
     )>,
     pub(super) trigger_bounds: TriggerBounds,
     pub(super) focus: FocusHandle,
-    pub(super) attachment_counter: usize,
     pub(super) menu: super::menu::MenuState,
     pub(super) banner_stack_expanded: bool,
     pub(super) queue_expanded: bool,
@@ -130,6 +129,17 @@ pub struct TriggerBounds {
 
 impl ChatComposer {
     pub fn new(store: Entity<ComposerStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_drafts(store, SharedDraftStore::new(), window, cx)
+    }
+
+    /// A composer over `drafts`, which outlives it: the live thread view
+    /// rebuilds the composer per thread but keeps drafts and the stash.
+    pub fn with_drafts(
+        store: Entity<ComposerStore>,
+        drafts: SharedDraftStore,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let editor = cx.new(|cx| {
             PromptEditor::new(
                 "",
@@ -154,7 +164,7 @@ impl ChatComposer {
         let mut this = Self {
             store,
             editor,
-            drafts: ComposerDraftStore::new(),
+            drafts,
             thread_key: String::new(),
             validation: None,
             history_position: None,
@@ -163,7 +173,6 @@ impl ChatComposer {
             language_picker: None,
             trigger_bounds: TriggerBounds::default(),
             focus: cx.focus_handle(),
-            attachment_counter: 0,
             menu: Default::default(),
             banner_stack_expanded: false,
             queue_expanded: true,
@@ -191,8 +200,7 @@ impl ChatComposer {
     }
 
     fn next_demo_stash_id(&mut self) -> String {
-        self.attachment_counter += 1;
-        format!("stash-{}", self.attachment_counter)
+        format!("stash-{}", crate::composer::draft_store::next_composer_serial())
     }
 
     /// Debug aid for screenshots: `TURIN_COMPOSER_DEMO=<scenario>` preloads

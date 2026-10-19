@@ -192,11 +192,14 @@ impl ChatView {
                 );
                 let scroll_for_composer = page_scroll.clone();
                 let timeline_for_scroll = timeline.clone();
+                // Drafts and the stash outlive the per-thread composer.
+                let drafts = crate::composer::draft_store::SharedDraftStore::global(cx);
                 let composer = window.use_keyed_state(
                     SharedString::from(format!("chat-composer-{thread_id}")),
                     cx,
                     |window, cx| {
-                        let mut composer = ChatComposer::new(composer_store, window, cx);
+                        let mut composer =
+                            ChatComposer::with_drafts(composer_store, drafts, window, cx);
                         composer.bind_page_scroll(
                             scroll_for_composer,
                             timeline_for_scroll,

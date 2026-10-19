@@ -73,6 +73,60 @@ struct Overrides {
     pending_input: super::composer_pending_bridge::ComposerPendingInputSession,
 }
 
+/// The composer choices that outlive a thread view. `LiveChat` is rebuilt
+/// whenever the user comes back to a thread, so the model, effort and mode
+/// they picked there are kept here, keyed by thread, and restored on open.
+#[derive(Clone, Default)]
+struct ThreadChoices {
+    model: Option<(String, String)>,
+    model_options: Option<Vec<OptionSelection>>,
+    runtime_mode: Option<RuntimeMode>,
+    interaction_mode: Option<InteractionMode>,
+}
+
+#[derive(Default)]
+struct SavedThreadChoices(std::collections::HashMap<String, ThreadChoices>);
+
+impl gpui_kit::Global for SavedThreadChoices {}
+
+impl SavedThreadChoices {
+    fn load(thread_id: &ThreadId, cx: &App) -> ThreadChoices {
+        cx.try_global::<Self>()
+            .and_then(|saved| saved.0.get(thread_id.as_str()).cloned())
+            .unwrap_or_default()
+    }
+
+    fn save(thread_id: &ThreadId, choices: ThreadChoices, cx: &mut App) {
+        if !cx.has_global::<Self>() {
+            cx.set_global(Self::default());
+        }
+        cx.global_mut::<Self>()
+            .0
+            .insert(thread_id.to_string(), choices);
+    }
+}
+
+impl Overrides {
+    fn choices(&self) -> ThreadChoices {
+        ThreadChoices {
+            model: self.model.clone(),
+            model_options: self.model_options.clone(),
+            runtime_mode: self.runtime_mode,
+            interaction_mode: self.interaction_mode,
+        }
+    }
+
+    fn with_choices(choices: ThreadChoices) -> Self {
+        Self {
+            model: choices.model,
+            model_options: choices.model_options,
+            runtime_mode: choices.runtime_mode,
+            interaction_mode: choices.interaction_mode,
+            ..Self::default()
+        }
+    }
+}
+
 pub struct LiveChat {
     source: Arc<LiveSource>,
     pub timeline: Entity<ThreadTimelineStore>,
@@ -124,6 +178,7 @@ impl LiveChat {
         let composer = cx.new(|_| ComposerStore::new(ComposerViewModel::default()));
         // `ComposerSource` / `TimelineSource` are `Arc<dyn _>` seams used on the
         // UI thread only, so the `RefCell` inside never crosses threads.
+        let saved_choices = SavedThreadChoices::load(&thread_id, cx);
         #[allow(clippy::arc_with_non_send_sync)]
         let source = Arc::new_cyclic(|me| LiveSource {
             me: me.clone(),
@@ -133,7 +188,7 @@ impl LiveChat {
             handle,
             timeline: timeline.downgrade(),
             composer: composer.downgrade(),
-            overrides: RefCell::default(),
+            overrides: RefCell::new(Overrides::with_choices(saved_choices)),
         });
         timeline.update(cx, |store, _| store.set_source(source.clone()));
         composer.update(cx, |store, _| store.set_source(source.clone()));
@@ -247,6 +302,48 @@ fn option_json(selection: &OptionSelection) -> Value {
         OptionValue::Bool(flag) => json!(flag),
     };
     json!({"id": selection.id, "value": value})
+}
+
+/// Puts an unsent prompt and its attachments back into the thread's draft,
+/// keeping whatever the user typed since.
+fn restore_failed_send(
+    thread_key: &str,
+    restore: (
+        String,
+        Vec<crate::composer::draft_store::ComposerImageAttachment>,
+        Vec<crate::composer::draft_store::ComposerFileAttachment>,
+    ),
+    cx: &mut App,
+) {
+    restore_into_drafts(
+        &crate::composer::draft_store::SharedDraftStore::global(cx),
+        thread_key,
+        restore,
+    );
+}
+
+fn restore_into_drafts(
+    drafts: &crate::composer::draft_store::SharedDraftStore,
+    thread_key: &str,
+    (prompt, images, files): (
+        String,
+        Vec<crate::composer::draft_store::ComposerImageAttachment>,
+        Vec<crate::composer::draft_store::ComposerFileAttachment>,
+    ),
+) {
+    use crate::composer::draft_store::AddAttachmentsOptions;
+    let typed = drafts
+        .get_composer_draft(thread_key)
+        .map(|draft| draft.prompt)
+        .unwrap_or_default();
+    let next = match (prompt.trim().is_empty(), typed.trim().is_empty()) {
+        (true, _) => typed,
+        (false, true) => prompt,
+        (false, false) => format!("{}\n\n{typed}", prompt.trim_end()),
+    };
+    drafts.set_prompt(thread_key, &next);
+    drafts.add_images(thread_key, images, AddAttachmentsOptions::default());
+    drafts.add_files(thread_key, files, AddAttachmentsOptions::default());
 }
 
 impl LiveSource {
@@ -394,7 +491,12 @@ impl LiveSource {
     }
 
     fn update_overrides(&self, cx: &mut App, edit: impl FnOnce(&mut Overrides)) {
-        edit(&mut self.overrides.borrow_mut());
+        let choices = {
+            let mut overrides = self.overrides.borrow_mut();
+            edit(&mut overrides);
+            overrides.choices()
+        };
+        SavedThreadChoices::save(&self.thread_id, choices, cx);
         let state = self.handle.snapshot();
         self.refresh(&state, cx);
     }
@@ -1018,10 +1120,18 @@ impl LiveSource {
         });
         self.update_overrides(cx, |overrides| overrides.sending = true);
         let source = self.me.clone();
+        let thread_key = scoped_thread_key(&local_environment_id(), &self.thread_id);
         cx.spawn(async move |cx| {
             let outcome = task.await;
             cx.update(|cx| {
                 let Some(source) = source.upgrade() else {
+                    // The user left the thread mid-send: a failed send still
+                    // gets its toast, and the draft goes back to the shared
+                    // store so it is there when they return.
+                    if let Err(error) = outcome {
+                        restore_failed_send(&thread_key, restore, cx);
+                        push_error(cx, "Failed to send message", &error.message);
+                    }
                     return;
                 };
                 source.update_overrides(cx, |overrides| {
@@ -1173,6 +1283,41 @@ mod tests {
             }))
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn composer_choices_survive_the_thread_view_being_rebuilt() {
+        let overrides = Overrides {
+            model: Some(("claudeAgent".into(), "sonnet".into())),
+            runtime_mode: Some(RuntimeMode::ApprovalRequired),
+            interaction_mode: Some(InteractionMode::Plan),
+            sending: true,
+            ..Overrides::default()
+        };
+        let reopened = Overrides::with_choices(overrides.choices());
+        assert_eq!(reopened.model, overrides.model);
+        assert_eq!(reopened.runtime_mode, Some(RuntimeMode::ApprovalRequired));
+        assert_eq!(reopened.interaction_mode, Some(InteractionMode::Plan));
+        // In-flight state is not a choice.
+        assert!(!reopened.sending);
+    }
+
+    #[test]
+    fn a_send_that_failed_after_leaving_the_thread_restores_the_draft() {
+        use crate::composer::draft_store::{ComposerImageAttachment, SharedDraftStore};
+        let drafts = SharedDraftStore::new();
+        // Another composer instance for the same thread sees the same store.
+        let other = drafts.clone();
+        other.set_prompt("local:t1", "typed since");
+        let image = ComposerImageAttachment::new("img-1", "a.png", "image/png", vec![1]);
+        restore_into_drafts(
+            &drafts,
+            "local:t1",
+            ("unsent".into(), vec![image], Vec::new()),
+        );
+        let draft = other.get_composer_draft("local:t1").unwrap();
+        assert_eq!(draft.prompt, "unsent\n\ntyped since");
+        assert_eq!(draft.images.len(), 1);
     }
 
     #[test]

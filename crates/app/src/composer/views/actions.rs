@@ -199,8 +199,7 @@ impl ChatComposer {
     }
 
     fn next_attachment_id(&mut self) -> usize {
-        self.attachment_counter += 1;
-        self.attachment_counter
+        crate::composer::draft_store::next_composer_serial()
     }
 
     pub(super) fn render_attachments(
@@ -479,8 +478,7 @@ use crate::composer::draft_store::PromptStashEntry;
 
 impl ChatComposer {
     fn next_stash_id(&mut self) -> String {
-        self.attachment_counter += 1;
-        format!("stash-{}", self.attachment_counter)
+        format!("stash-{}", crate::composer::draft_store::next_composer_serial())
     }
 
     /// ⌘S: stash the draft; on an empty composer restore the lone entry or

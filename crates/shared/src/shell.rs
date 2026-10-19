@@ -316,6 +316,74 @@ pub fn merge_path_entries(
     }
 }
 
+/// What `hydratePosixPath` (upstream `apps/server/src/os-jank.ts`) learns: the PATH to run
+/// with and mise's record of the entries it added.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PosixShellEnvironment {
+    pub path: Option<String>,
+    pub mise_diff: Option<String>,
+}
+
+/// Upstream `hydratePosixPath`, with the environment writes returned instead of applied.
+///
+/// A bundle opened from Finder or the Dock inherits launchd's PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), which has none of the places provider CLIs live
+/// (`~/.local/bin`, `/opt/homebrew/bin`, nvm, bun). The login shell's PATH comes first, the
+/// first candidate shell that reports one wins, and `launchctl getenv PATH` stands in on macOS
+/// when no shell did. The process's own PATH entries follow, so nothing it had is lost.
+///
+/// mise's record of the PATH entries it added (`__MISE_DIFF`) must travel with the shell's PATH,
+/// or `mise x` can rebuild PATH behind a same-named wrapper (`exec mise x claude -- claude`) that
+/// then re-runs itself forever.
+pub fn hydrate_posix_environment(
+    platform: Platform,
+    shell: Option<&str>,
+    user_shell: Option<&str>,
+    current_path: Option<&str>,
+    exec_file: ExecFileSync<'_>,
+    warn: &dyn Fn(&str),
+) -> PosixShellEnvironment {
+    let mut shell_environment: IndexMap<String, String> = IndexMap::new();
+    for candidate in list_login_shell_candidates(platform, shell, user_shell) {
+        match read_environment_from_login_shell(&candidate, &["PATH", "__MISE_DIFF"], exec_file) {
+            Ok(read) => shell_environment = read,
+            Err(error) => {
+                shell_environment = IndexMap::new();
+                warn(&format!(
+                    "Failed to read PATH from login shell {candidate}. {error}"
+                ));
+            }
+        }
+        if shell_environment.contains_key("PATH") {
+            break;
+        }
+    }
+    let shell_path = shell_environment.get("PATH").cloned();
+    let launchctl_path = (platform == Platform::Darwin && shell_path.is_none())
+        .then(|| read_path_from_launchctl(exec_file))
+        .flatten();
+    let path = merge_path_entries(
+        shell_path.as_deref().or(launchctl_path.as_deref()),
+        current_path,
+        platform,
+    );
+    let mise_diff = shell_path
+        .as_ref()
+        .and_then(|_| shell_environment.get("__MISE_DIFF").cloned());
+    PosixShellEnvironment { path, mise_diff }
+}
+
+/// Upstream `hydratePosixHome`: a process with no `HOME` gets the account's home directory.
+pub fn hydrate_posix_home(
+    current_home: Option<&str>,
+    resolve_home_dir: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if !trim_non_empty(current_home).unwrap_or_default().is_empty() {
+        return None;
+    }
+    resolve_home_dir().filter(|home| !home.is_empty())
+}
+
 fn env_capture_start(name: &str) -> String {
     format!("__T3CODE_ENV_{name}_START__")
 }
@@ -2127,5 +2195,99 @@ mod tests {
         assert_eq!(cache.len(), COMMAND_RESOLUTION_CACHE_MAX_ENTRIES);
         assert!(cache.fresh("key-0", now).is_none());
         assert!(cache.fresh("key-1", now).is_some());
+    }
+
+    #[test]
+    fn posix_hydration_puts_the_login_shell_path_before_the_inherited_one() {
+        let exec = |file: &str, args: &[&str], _: Duration| -> io::Result<String> {
+            assert_eq!(file, "/bin/zsh");
+            assert_eq!(args[0], "-ilc");
+            Ok("__T3CODE_ENV_PATH_START__\n/opt/homebrew/bin:/Users/me/.local/bin:/usr/bin\n__T3CODE_ENV_PATH_END__\n\
+                __T3CODE_ENV___MISE_DIFF_START__\nabc\n__T3CODE_ENV___MISE_DIFF_END__\n"
+                .to_owned())
+        };
+        let hydrated = hydrate_posix_environment(
+            Platform::Darwin,
+            Some("/bin/zsh"),
+            None,
+            Some("/usr/bin:/bin:/usr/sbin:/sbin"),
+            &exec,
+            &|_| {},
+        );
+        assert_eq!(
+            hydrated.path.as_deref(),
+            Some("/opt/homebrew/bin:/Users/me/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+        );
+        assert_eq!(hydrated.mise_diff.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn posix_hydration_tries_the_next_shell_and_falls_back_to_launchctl_on_macos() {
+        let warnings = std::cell::RefCell::new(Vec::new());
+        let exec = |file: &str, _: &[&str], _: Duration| -> io::Result<String> {
+            match file {
+                "/bin/launchctl" => Ok("/usr/local/bin:/usr/bin\n".to_owned()),
+                _ => Err(io::Error::other("no shell")),
+            }
+        };
+        let hydrated = hydrate_posix_environment(
+            Platform::Darwin,
+            Some("/opt/fish"),
+            Some("/bin/zsh"),
+            Some("/usr/bin:/bin"),
+            &exec,
+            &|message| warnings.borrow_mut().push(message.to_owned()),
+        );
+        assert_eq!(
+            hydrated.path.as_deref(),
+            Some("/usr/local/bin:/usr/bin:/bin")
+        );
+        assert_eq!(hydrated.mise_diff, None);
+        // One warning per shell that failed: the configured, the user's (same fallback) once.
+        assert_eq!(warnings.borrow().len(), 2);
+
+        // Linux has no launchctl: the inherited PATH stands.
+        let hydrated = hydrate_posix_environment(
+            Platform::Linux,
+            None,
+            None,
+            Some("/usr/bin"),
+            &exec,
+            &|_| {},
+        );
+        assert_eq!(hydrated.path.as_deref(), Some("/usr/bin"));
+    }
+
+    #[test]
+    fn posix_hydration_never_leaves_the_process_without_the_path_it_had() {
+        let exec = |_: &str, _: &[&str], _: Duration| -> io::Result<String> {
+            Ok("__T3CODE_ENV_PATH_START__\n\n__T3CODE_ENV_PATH_END__\n".to_owned())
+        };
+        let hydrated = hydrate_posix_environment(
+            Platform::Linux,
+            Some("/bin/bash"),
+            None,
+            Some("/usr/bin:/bin"),
+            &exec,
+            &|_| {},
+        );
+        assert_eq!(hydrated.path.as_deref(), Some("/usr/bin:/bin"));
+    }
+
+    #[test]
+    fn home_is_filled_in_only_when_missing() {
+        assert_eq!(
+            hydrate_posix_home(Some("/Users/me"), || panic!("unused")),
+            None
+        );
+        assert_eq!(
+            hydrate_posix_home(Some("  "), || Some("/Users/me".to_owned())).as_deref(),
+            Some("/Users/me")
+        );
+        assert_eq!(
+            hydrate_posix_home(None, || Some("/Users/me".to_owned())).as_deref(),
+            Some("/Users/me")
+        );
+        assert_eq!(hydrate_posix_home(None, || None), None);
     }
 }

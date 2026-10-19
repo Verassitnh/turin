@@ -31,6 +31,7 @@ mod project_identity;
 mod pull_request;
 mod pull_request_reference;
 mod settle_and_advance;
+mod shell_environment;
 mod sidebar_pending_file_drop_store;
 mod source_control_presentation;
 // The view-model layer is a library until the orchestrator and views are wired
@@ -362,6 +363,8 @@ fn install_window_lifecycle(command_bus: app_runtime::write::bus::CommandBus, cx
 }
 
 fn main() {
+    // Before any thread exists: the provider CLIs are found through the login shell's PATH.
+    shell_environment::hydrate_process_environment();
     tracing_subscriber::fmt::init();
     // The view-model reducers and the read path run on tokio, off the UI thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -17,16 +17,17 @@ use serde_json::{Value, json};
 
 use super::sidebar_logic::CommandOutcome;
 use super::view_model::{
-    ProviderDriverKind, ProviderEntry, Shelf, SidebarBackend, SidebarEnvironment,
-    SidebarProjectGroup, SidebarSettings, SidebarSnapshot, SidebarStore, ThreadCapabilities,
-    ThreadRef, ThreadSearchMatch,
+    ProviderDriverKind, ProviderEntry, Shelf, SidebarBackend, SidebarEnvironment, SidebarSettings,
+    SidebarSnapshot, SidebarStore, ThreadCapabilities, ThreadRef, ThreadSearchMatch,
 };
 use crate::app_runtime::write::bus::CommandBus;
 use crate::app_runtime::write::commands::{CommandError, Commands};
 use crate::components::thread_search_match::SearchMatchSource;
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
+use crate::state::project_grouping::{ProjectGroupingSettings, select_project_grouping_settings};
 use crate::state::store::ClientStore;
+use turin_contracts::settings::ClientSettings;
 use turin_contracts::thread_search::OrchestrationThreadSearchSource;
 
 /// State the sidebar keeps for itself.
@@ -37,6 +38,9 @@ struct LocalUi {
     settled_shelf_expanded: bool,
     project_scope_key: Option<String>,
     local_last_visited_at: HashMap<String, String>,
+    /// The saved client settings the sidebar reads (`useSettings()`).
+    settings: SidebarSettings,
+    grouping: ProjectGroupingSettings,
 }
 
 /// The Claude models the sidebar's hover cards name. The provider registry's
@@ -65,7 +69,7 @@ fn snapshot_from(state: &ClientState, ui: &LocalUi) -> SidebarSnapshot {
         }],
         primary_environment_id: Some(environment_id),
         provider_entries: provider_entries(),
-        settings: SidebarSettings::default(),
+        settings: ui.settings.clone(),
         local_last_visited_at: ui.local_last_visited_at.clone(),
         project_scope_key: ui.project_scope_key.clone(),
         settled_shelf_expanded: ui.settled_shelf_expanded,
@@ -79,22 +83,14 @@ fn snapshot_from(state: &ClientState, ui: &LocalUi) -> SidebarSnapshot {
             .iter()
             .map(|project| (**project).clone())
             .collect();
-        snapshot.project_groups = snapshot
-            .projects
-            .iter()
-            .map(|project| SidebarProjectGroup {
-                project_key: project.key(),
-                display_name: project.title.clone(),
-                created_at: project.created_at.clone(),
-                updated_at: project.updated_at.clone(),
-                member_project_keys: vec![project.key()],
-            })
-            .collect();
         snapshot.threads = view
             .navigation_threads
             .iter()
             .map(|thread| (**thread).clone())
             .collect();
+        // `useSidebarProjectGroups`: grouped per the saved grouping settings
+        // and ordered per the saved project sort order.
+        snapshot.refresh_project_groups(&[], &ui.grouping);
     }
     snapshot
 }
@@ -178,6 +174,15 @@ impl LiveSidebarBackend {
 }
 
 impl SidebarBackend for LiveSidebarBackend {
+    fn apply_client_settings(&self, settings: &ClientSettings, cx: &mut App) {
+        let sidebar = SidebarSettings::from_client(settings);
+        let grouping = select_project_grouping_settings(settings);
+        self.local(cx, |ui| {
+            ui.settings = sidebar;
+            ui.grouping = grouping;
+        });
+    }
+
     fn settle(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome> {
         self.thread_command(&thread, "thread.settle", json!({}), cx)
     }
@@ -359,5 +364,41 @@ impl SidebarBackend for LiveSidebarBackend {
                 })
                 .collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::sidebar::sidebar_logic::ProjectSortOrder;
+    use crate::state::client_state::ClientStateCore;
+
+    #[test]
+    fn the_snapshot_carries_the_saved_client_settings() {
+        let state = ClientStateCore::new(local_environment_id()).snapshot();
+        let mut saved = ClientSettings::default();
+        saved.confirm_thread_delete = false;
+        saved.confirm_thread_archive = true;
+        saved.sidebar_working_shelf_enabled = true;
+        saved.timestamp_format = turin_contracts::settings::TimestampFormat::TwentyFourHour;
+        saved.sidebar_project_sort_order =
+            turin_contracts::settings::SidebarProjectSortOrder::Manual;
+        let ui = LocalUi {
+            settings: SidebarSettings::from_client(&saved),
+            grouping: select_project_grouping_settings(&saved),
+            ..LocalUi::default()
+        };
+        let snapshot = snapshot_from(&state, &ui);
+        assert!(!snapshot.settings.confirm_thread_delete);
+        assert!(snapshot.settings.confirm_thread_archive);
+        assert!(snapshot.settings.working_shelf_enabled);
+        assert_eq!(
+            snapshot.settings.timestamp_format,
+            crate::timestamp_format::TimestampFormat::TwentyFourHour
+        );
+        assert_eq!(
+            snapshot.settings.project_sort_order,
+            ProjectSortOrder::Manual
+        );
     }
 }

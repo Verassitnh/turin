@@ -228,6 +228,7 @@ pub struct AppSidebarLayout {
     quit_overlay: Entity<QuitHoldOverlay>,
     confirm_dialog: Entity<ConfirmDialogHost>,
     client_settings: ClientSettings,
+    sidebar_backend: SharedSidebarBackend,
     client_settings_path: std::path::PathBuf,
     _client_settings_watch: gpui_kit::Task<()>,
     bounds_persist: WindowBoundsPersist,
@@ -279,6 +280,7 @@ impl AppSidebarLayout {
                 (store, backend, palette)
             }
         };
+        let sidebar_backend = backend.clone();
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
         let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
@@ -376,6 +378,7 @@ impl AppSidebarLayout {
             quit_overlay,
             confirm_dialog,
             client_settings: ClientSettings::default(),
+            sidebar_backend,
             client_settings_path,
             _client_settings_watch: client_settings_watch,
             bounds_persist,
@@ -1270,6 +1273,7 @@ impl AppSidebarLayout {
     }
 
     fn apply_client_settings(&mut self, settings: ClientSettings, cx: &mut Context<Self>) {
+        self.sidebar_backend.apply_client_settings(&settings, cx);
         self.client_settings = settings;
         self.sync_notifications(cx);
         cx.notify();

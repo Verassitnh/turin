@@ -311,11 +311,13 @@ impl AppSidebarLayout {
                     ChatGitBackends {
                         branch: Rc::new(LiveBranchBackend::new(live.bus.clone(), git.clone())),
                         git: Rc::new(git),
+                        runtime: Some(live.bus.handle().clone()),
                     }
                 }
                 None => ChatGitBackends {
                     git: Rc::new(MockGitActionsBackend::new()),
                     branch: Rc::new(MockBranchBackend::new()),
+                    runtime: None,
                 },
             };
             ChatGitHost::new(backends)

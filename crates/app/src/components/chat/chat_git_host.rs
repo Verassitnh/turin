@@ -18,6 +18,7 @@ use gpui_kit::{
 };
 use turin_contracts::{EnvironmentId, ThreadId};
 
+use crate::components::chat::open_in_picker::OpenInPickerView;
 use crate::components::branch_toolbar::backend::{
     BranchThreadContext, ProjectThreadInfo, SharedBranchBackend,
 };
@@ -34,6 +35,18 @@ use crate::components::git_actions_control::{
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_3XL};
+
+/// Where "Open in" opens the thread: its worktree, else the project checkout
+/// (`openInCwd`: the git cwd).
+pub fn open_in_cwd(routed: &RoutedGitThread) -> Option<String> {
+    Some(
+        routed
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| routed.project_cwd.clone()),
+    )
+    .filter(|cwd| !cwd.is_empty())
+}
 
 /// The routed thread, as the git surfaces read it.
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +65,9 @@ pub struct RoutedGitThread {
 pub struct ChatGitBackends {
     pub git: SharedGitActionsBackend,
     pub branch: SharedBranchBackend,
+    /// The app's tokio runtime, for the editor launcher. `None` in the mock
+    /// shell, which has no checkout to open.
+    pub runtime: Option<tokio::runtime::Handle>,
 }
 
 pub struct ChatGitHost {
@@ -60,6 +76,8 @@ pub struct ChatGitHost {
     workspace_toolbar: Option<Entity<BranchToolbar>>,
     branch_toolbar: Option<Entity<BranchToolbar>>,
     git: Option<Entity<GitActionsControl>>,
+    /// The "Open in" control of the workspace section (`OpenInPicker`, panel mode).
+    open_in: Option<Entity<OpenInPickerView>>,
     routed: Option<RoutedGitThread>,
     // The draft/launch state ChatView owns upstream.
     env_mode: Option<EnvMode>,
@@ -78,6 +96,7 @@ impl ChatGitHost {
             workspace_toolbar: None,
             branch_toolbar: None,
             git: None,
+            open_in: None,
             routed: None,
             env_mode: None,
             start_from_origin: false,
@@ -265,6 +284,10 @@ impl ChatGitHost {
                     cx.notify();
                 },
             ));
+            if let Some(runtime) = self.backends.runtime.clone() {
+                let cwd = open_in_cwd(&routed);
+                self.open_in = Some(cx.new(|cx| OpenInPickerView::new(cwd, true, runtime, window, cx)));
+            }
             self.composer_toolbar = Some(composer);
             self.workspace_toolbar = Some(workspace);
             self.branch_toolbar = Some(branch);
@@ -289,6 +312,10 @@ impl ChatGitHost {
         }
         if let Some(git) = &self.git {
             git.update(cx, |git, cx| git.set_props(git_props, cx));
+        }
+        if let Some(open_in) = &self.open_in {
+            let cwd = open_in_cwd(&routed);
+            open_in.update(cx, |open_in, cx| open_in.set_cwd(cwd, cx));
         }
     }
 
@@ -352,7 +379,11 @@ impl ChatGitHost {
                         .flex()
                         .flex_col()
                         .children(lineage)
-                        .child(section(false).child(workspace.clone()))
+                        .child(
+                            section(false)
+                                .child(workspace.clone())
+                                .children(self.open_in.clone()),
+                        )
                         .child(section(true).child(branch.clone()).child(git.clone())),
                 )
                 .into_any_element(),
@@ -434,5 +465,33 @@ impl ChatGitHost {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn routed(worktree: Option<&str>, project: &str) -> RoutedGitThread {
+        RoutedGitThread {
+            environment_id: EnvironmentId::new("local").unwrap(),
+            thread_id: ThreadId::new("t1").unwrap(),
+            project_cwd: project.to_owned(),
+            branch: None,
+            worktree_path: worktree.map(str::to_owned),
+            has_session: false,
+            pull_requests: Vec::new(),
+            project_threads: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn open_in_targets_the_worktree_before_the_project_checkout() {
+        assert_eq!(
+            open_in_cwd(&routed(Some("/wt/feature"), "/repo")).as_deref(),
+            Some("/wt/feature")
+        );
+        assert_eq!(open_in_cwd(&routed(None, "/repo")).as_deref(), Some("/repo"));
+        assert_eq!(open_in_cwd(&routed(None, "")), None);
     }
 }

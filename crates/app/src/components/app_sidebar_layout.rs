@@ -57,7 +57,7 @@ use super::usage::mock_source::{MockUsageBackend, UsageScenario};
 use super::usage::usage_page::{UsagePage, UsagePageEvent};
 use super::workspace_titlebar::workspace_controls_left;
 use crate::desktop::desktop_app_settings::{read_desktop_app_settings, write_desktop_app_settings};
-use crate::desktop::desktop_application_menu::{CloseWindow, QuitApplication};
+use crate::desktop::desktop_application_menu::{CloseWindow, OpenSettings, QuitApplication};
 use crate::desktop::desktop_client_settings::{client_settings_path, read_client_settings};
 use crate::desktop::notification_badge::clear_notification_badge_on_focus;
 use crate::desktop::quit_hold::{
@@ -1189,6 +1189,10 @@ impl AppSidebarLayout {
         cx.quit();
     }
 
+    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_live_settings("general", window, cx);
+    }
+
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_bounds(window, cx);
         window.remove_window();
@@ -1294,6 +1298,8 @@ impl AppSidebarLayout {
     fn apply_client_settings(&mut self, settings: ClientSettings, cx: &mut Context<Self>) {
         self.sidebar_backend.apply_client_settings(&settings, cx);
         crate::composer::view_model::SavedComposerSettings::apply(cx, &settings);
+        // Saved contrast and fonts, at boot and when the file changes.
+        crate::settings::mock_source::apply_client_appearance(&settings, cx);
         self.client_settings = settings;
         self.sync_notifications(cx);
         cx.notify();
@@ -1561,6 +1567,7 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::cycle_appearance))
             .on_action(cx.listener(Self::on_quit_shortcut))
             .on_action(cx.listener(Self::on_quit_application))
+            .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_reopen_closed_view))

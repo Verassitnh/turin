@@ -32,7 +32,9 @@ use super::live_projects::{delete_project, set_project_icons};
 use super::live_snapshot::{
     LiveSnapshotInput, build_snapshot, cleanup_report, read_client_settings,
 };
-use super::mock_source::apply_appearance;
+use super::mock_source::{
+    apply_appearance, runtime_appearance, set_runtime_appearance_mode, set_runtime_theme,
+};
 use super::view_model::{
     ProviderInstanceMutation, RemoveKeybinding, SettingsSource, SettingsStore, SettingsViewModel,
     SetupResult, UpsertKeybinding,
@@ -213,6 +215,21 @@ impl LiveSettingsSource {
         })
         .detach();
 
+        // A theme picked elsewhere (the command palette) repaints Settings too.
+        // `publish` stores what it shows, so its own repaint does not loop.
+        cx.observe_global::<crate::theme::AppTheme>({
+            let ui = ui.clone();
+            move |cx| {
+                let changed = runtime_appearance(cx).is_some_and(|appearance| {
+                    ui.inner.lock().expect("live settings state").appearance != appearance
+                });
+                if changed {
+                    ui.publish(cx);
+                }
+            }
+        })
+        .detach();
+
         // One publish per burst of events.
         cx.spawn(async move |cx| {
             while events.recv().await.is_some() {
@@ -380,7 +397,11 @@ fn snapshot_from(
     cx: &mut App,
     keybindings_path: &str,
 ) -> SettingsViewModel {
-    let state = inner.lock().expect("live settings state");
+    let mut state = inner.lock().expect("live settings state");
+    // Theme and appearance mode are the theme runtime's (device-local).
+    if let Some(appearance) = runtime_appearance(cx) {
+        state.appearance = appearance;
+    }
     build_snapshot(LiveSnapshotInput {
         appearance: state.appearance.clone(),
         client: read_client_settings(),
@@ -563,26 +584,28 @@ impl SettingsSource for LiveSettingsSource {
             }))
             .ok()
         });
-        let inner = self.inner.clone();
-        let keybindings = inner
+        let keybindings = self
+            .inner
             .lock()
             .expect("live settings state")
             .services
             .keybindings
             .clone();
-        inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .bus
-            .handle()
-            .spawn(async move {
+        self.run_then(
+            async move {
                 keybindings
                     .upsert_keybinding_rule(UpsertKeybindingInput { rule, replace })
                     .await
+                    .map(|_| ())
                     .map_err(|error| error.to_string())
-            });
-        self.publish(cx);
+            },
+            |result, ui, cx| {
+                if let Err(message) = result {
+                    ui.report("Unable to save keybinding", &message, cx);
+                }
+            },
+            cx,
+        );
     }
 
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App) {
@@ -597,26 +620,28 @@ impl SettingsSource for LiveSettingsSource {
                 return;
             }
         };
-        let inner = self.inner.clone();
-        let keybindings = inner
+        let keybindings = self
+            .inner
             .lock()
             .expect("live settings state")
             .services
             .keybindings
             .clone();
-        inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .bus
-            .handle()
-            .spawn(async move {
+        self.run_then(
+            async move {
                 keybindings
                     .remove_keybinding_rule(&rule)
                     .await
+                    .map(|_| ())
                     .map_err(|error| error.to_string())
-            });
-        self.publish(cx);
+            },
+            |result, ui, cx| {
+                if let Err(message) = result {
+                    ui.report("Unable to save keybinding", &message, cx);
+                }
+            },
+            cx,
+        );
     }
 
     fn refresh_providers(&self, cx: &mut App) {
@@ -1034,17 +1059,24 @@ impl SettingsSource for LiveSettingsSource {
     }
 
     fn set_theme(&self, theme: String, cx: &mut App) {
-        let state = &mut self.inner.lock().expect("live settings state");
-        state.appearance.theme = theme;
+        self.inner
+            .lock()
+            .expect("live settings state")
+            .appearance
+            .theme = theme.clone();
+        set_runtime_theme(&theme, cx);
         self.publish(cx);
     }
 
     fn set_appearance_mode(&self, mode: String, cx: &mut App) {
-        let state = &mut self.inner.lock().expect("live settings state");
-        if matches!(state.appearance.theme.as_str(), "system" | "light" | "dark") {
-            state.appearance.theme = mode.clone();
+        {
+            let state = &mut self.inner.lock().expect("live settings state");
+            if matches!(state.appearance.theme.as_str(), "system" | "light" | "dark") {
+                state.appearance.theme = mode.clone();
+            }
+            state.appearance.mode = mode.clone();
         }
-        state.appearance.mode = mode;
+        set_runtime_appearance_mode(&mode, cx);
         self.publish(cx);
     }
 

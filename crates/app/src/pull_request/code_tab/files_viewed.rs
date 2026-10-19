@@ -3,6 +3,8 @@
 //! seen them comes back, so the checkbox never waits on a round trip and never outlasts the
 //! record behind it. The React hook's timers and atoms are the Code tab's job; this holds the
 //! pure transitions over `pull_request_files_viewed_logic`.
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/usePullRequestFilesViewed.ts (state half).
 
 use std::collections::{HashMap, HashSet};
 

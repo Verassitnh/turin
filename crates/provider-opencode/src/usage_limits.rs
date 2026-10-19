@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/usageLimits.ts`: the OpenCode Go
+//! Port of upstream/packages/provider-opencode/src/server/usageLimits.ts: the OpenCode Go
 //! subscription windows (session, weekly, monthly), read from Go's usage endpoint.
 //!
 //! An external server owns its own credentials, so it reports no Go usage. Without a Go

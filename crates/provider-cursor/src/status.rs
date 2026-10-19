@@ -1,6 +1,6 @@
 //! Cursor provider status and model catalog.
 //!
-//! Port of `upstream/packages/provider-cursor/src/server/status.ts`. Upstream
+//! Port of upstream/packages/provider-cursor/src/server/status.ts. Upstream
 //! reads the Cursor SDK catalog; Turin reads the ACP probe in [`crate::probe`]:
 //! `session/list` answers whether the agent is signed in, and
 //! `cursor/list_available_models` is the model catalog. Built-in models carry

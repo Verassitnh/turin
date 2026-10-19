@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-core/src/server/processGroup.ts`.
+//! Port of upstream/packages/provider-core/src/server/processGroup.ts.
 //!
 //! `kill(0)` signals this process's own group and `kill(-1)` every process the
 //! user owns. A pid of 0 or 1 fails with ESRCH, and callers ignore that.

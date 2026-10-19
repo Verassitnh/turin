@@ -2,6 +2,8 @@
 //! toastHelpers.ts, and the pure layout/body rules in toast.tsx
 //! (`deriveToastBodyDescriptor`, `errorDescriptionClampClass`, the collapsed
 //! and expanded stack transforms, and the visible-dismiss timer).
+//!
+//! Port of upstream/apps/web/src/components/ui/toastHelpers.ts.
 
 use turin_contracts::environment::ScopedThreadRef;
 use turin_contracts::{EnvironmentId, ThreadId};

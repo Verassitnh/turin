@@ -2,6 +2,9 @@
 //! (ComposerBannerStack.tsx), queued runs (QueuedRunsControl.tsx), the stash
 //! tab and menu (ComposerStashBadge/Menu.tsx), the plan follow-up banner and
 //! the context window meter (ContextWindowMeter.tsx).
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerPlanFollowUpBanner.tsx ("Plan ready" row).
+//! Port of upstream/apps/web/src/components/chat/QueuedRunsControl.tsx.
 
 use std::sync::Arc;
 

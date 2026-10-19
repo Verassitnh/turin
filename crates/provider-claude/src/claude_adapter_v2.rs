@@ -1,6 +1,8 @@
 //! Port of upstream/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts.
 //! The protocol session owns the CLI; this layer maps its controls and frames
 //! into the provider-facing lifecycle. Orchestration owns persistence and UI IDs.
+//!
+//! Port of upstream/apps/server/src/claudeHistoryWorker.ts (replaced by an async fn; no isolated process).
 use crate::claude_permission::{
     ApprovalDecision, auto_approved, cancelled_question, captured_plan,
     permission_result_from_decision,

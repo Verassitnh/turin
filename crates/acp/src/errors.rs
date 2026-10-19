@@ -1,5 +1,5 @@
 //! Port of upstream/packages/effect-acp/src/errors.ts
-//! Also ports upstream/packages/effect-acp/src/_internal/shared.ts.
+//! Also: Port of upstream/packages/effect-acp/src/_internal/shared.ts.
 
 use std::fmt;
 

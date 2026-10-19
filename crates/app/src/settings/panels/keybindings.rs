@@ -4,6 +4,8 @@
 //! The recorder captures a chord from a key press, as upstream does while
 //! recording; typing a chord as text (`onChange` on the field) is not
 //! supported, the field is read-only apart from recording.
+//!
+//! Port of upstream/apps/web/src/components/settings/KeybindingsSettings.tsx.
 
 use std::collections::HashMap;
 use std::rc::Rc;

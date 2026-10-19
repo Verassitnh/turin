@@ -6,6 +6,8 @@
 //! tree shape as `FindNode`s, one per outermost `[data-thread-find-text]` scope.
 //! Offsets are UTF-16 code units, as in `threadSearch.ts`. The CSS Highlight painter,
 //! the MutationObserver and the `beforematch` dispatch are DOM glue; see Deviations.
+//!
+//! Port of upstream/apps/web/src/components/chat/threadFindHighlights.ts (pure half).
 
 use turin_shared::js_string::utf16_len;
 use turin_shared::thread_search::find_thread_search_occurrences;

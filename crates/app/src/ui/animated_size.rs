@@ -7,6 +7,8 @@
 //! Width: `Math.ceil` of the content rect, ignored until it is positive.
 //! The CSS transition is [`css_ease_out`] (cubic-bezier(0, 0, 0.2, 1)) over
 //! 200ms (width: 150ms).
+//!
+//! Port of upstream/apps/web/src/components/AnimatedWidth.tsx.
 
 use std::time::{Duration, Instant};
 

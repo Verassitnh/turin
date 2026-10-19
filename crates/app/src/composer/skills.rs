@@ -1,7 +1,7 @@
 //! Provider skill helpers: `formatProviderSkillDisplayName` (shared/inlineSkills.ts),
 //! the skill filters of client-runtime/providerSkills.ts and the ranking of
 //! providerSkillSearch.ts.
-//! Also ports upstream/apps/web/src/providerSkillSearch.ts.
+//! Also: Port of upstream/apps/web/src/providerSkillSearch.ts.
 
 use std::sync::OnceLock;
 

@@ -4,6 +4,9 @@
 //! summary under an assistant reply.
 //!
 //! File rows use [`crate::ui::pierre_file_icon::file_tree_file_icon`].
+//!
+//! Port of upstream/apps/web/src/lib/turnDiffTree.ts (per-turn changed files).
+//! Port of upstream/apps/web/src/components/chat/DiffStatLabel.tsx.
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;

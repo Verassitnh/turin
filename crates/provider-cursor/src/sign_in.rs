@@ -6,6 +6,8 @@
 //! finishes, so the call runs as one background flow. Cancelling kills that
 //! process. Sign-out is not offered: the login lives in the user's Cursor
 //! store, and Turin does not delete it.
+//!
+//! Port of upstream/packages/provider-cursor/src/server/auth.ts (controller).
 
 use std::sync::{Arc, Mutex};
 

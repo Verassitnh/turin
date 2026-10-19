@@ -7,6 +7,8 @@
 //! (`Sheet`, `openMobile`, `ui/sidebarState.ts`), the cookie, the `icon` and
 //! `floating`/`inset` variants and `SidebarMenuSub*` are not ported (mobile
 //! is cut; no desktop caller uses the rest).
+//!
+//! Port of upstream/apps/web/src/components/ui/sidebarState.ts.
 
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder as _;

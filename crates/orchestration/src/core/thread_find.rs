@@ -10,6 +10,8 @@
 //! `markdown-rs` (GFM) instead of the remark/rehype plugin chain, so Codex
 //! inline directives and artifact-template cards are not rendered into
 //! segments; and no scan cache is kept (every search reads the projection).
+//!
+//! Port of upstream/apps/server/src/orchestration-v2/ThreadFind.ts (`findProjectedThreadItems`).
 
 use markdown::mdast::Node;
 use markdown::{ParseOptions, to_mdast};

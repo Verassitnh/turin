@@ -1,5 +1,7 @@
 //! Port of upstream/apps/web/src/components/chat/ContextWindowMeter.logic.ts
 //! and the pure helpers of ContextWindowMeter.tsx (`formatPercentage`).
+//!
+//! Port of upstream/apps/web/src/components/chat/ContextWindowMeter.tsx (pure helpers).
 
 use crate::composer::catalog::ProviderInstanceEntry;
 use crate::composer::view_model::ContextWindowCost;

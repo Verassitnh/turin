@@ -5,6 +5,8 @@
 //! Not ported: `threadHtmlRenderAttachmentIds` (html_render / MCP apps are
 //! cut) and the `Mime.getExtension` registry fallback of `inferImageExtension`
 //! (a small table of the extra image types covers the safe-extension list).
+//!
+//! Port of upstream/apps/server/src/attachmentStore.ts (parts the app needs).
 
 use regex::Regex;
 use sha2::{Digest, Sha256};

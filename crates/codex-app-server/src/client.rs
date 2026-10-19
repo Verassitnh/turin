@@ -1,6 +1,6 @@
 //! Port of upstream/packages/effect-codex-app-server/src/client.ts
-//! Also ports upstream/packages/effect-codex-app-server/src/_internal/shared.ts.
-//! Also ports upstream/packages/effect-codex-app-server/src/_internal/stdio.ts.
+//! Also: Port of upstream/packages/effect-codex-app-server/src/_internal/shared.ts.
+//! Also: Port of upstream/packages/effect-codex-app-server/src/_internal/stdio.ts.
 use crate::{
     errors::{AppServerError, ProtocolError, payload_kind},
     generated::meta::{self, MethodMeta},

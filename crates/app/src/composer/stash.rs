@@ -1,5 +1,7 @@
 //! Presentation rules of ComposerStashMenu.tsx (`stashEntrySnippet`) and
 //! `formatRelativeTimeLabel` (timestampFormat.ts).
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerStashMenu.tsx (presentation rules).
 
 use chrono::{DateTime, Local};
 

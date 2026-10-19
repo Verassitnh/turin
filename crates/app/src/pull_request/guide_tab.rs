@@ -13,6 +13,8 @@
 //!
 //! Not ported: the header menu's rewrite entry (the panel header, S1) — [`GuideTab::write`] is its
 //! seam.
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/guide/useReviewGuideWriter.ts.
 
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render,

@@ -2,6 +2,8 @@
 //! and pullRequestIcons.tsx: the glyphs, tags and avatars every pull request surface
 //! assembles. The pure half (labels, tones, rollups) is `pull_request_presentation`; its Tailwind
 //! tone strings are resolved to theme colors by [`tone_color`].
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/pullRequestIcons.tsx.
 
 use std::time::Duration;
 

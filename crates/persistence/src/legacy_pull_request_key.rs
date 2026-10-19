@@ -1,4 +1,4 @@
-//! Port of `upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts`
+//! Port of upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts
 //! and `legacyThreadPullRequestKey` from
 //! `upstream/packages/shared/src/threadPullRequests.ts`.
 

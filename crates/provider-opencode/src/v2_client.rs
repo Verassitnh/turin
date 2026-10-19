@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/v2/OpenCode2Client.ts`
+//! Port of upstream/packages/provider-opencode/src/server/v2/OpenCode2Client.ts
 //! and the `@opencode/client` 2.0.28 routes `v2/adapter.ts` calls.
 //!
 //! Wire envelopes (the effect client unwraps `.data` on some of them):

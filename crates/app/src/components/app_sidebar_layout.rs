@@ -14,6 +14,8 @@
 //! `chat_thread_sidebar_width`, `t3code:preview-panel-width`); the settings
 //! task owns persistence. The width animation (`--panel-animation-duration`)
 //! defaults to 0 upstream and is not ported.
+//!
+//! Port of upstream/apps/web/src/hooks/useResizeDrag.ts (drag bookkeeping).
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

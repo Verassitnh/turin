@@ -5,6 +5,8 @@
 //! stdout line `server listening on <url>`. The default check after that is
 //! v1 `GET /global/health`. Drop kills the group immediately; [`OpenCodeServerProcess::shutdown`]
 //! is SIGTERM, a grace period (1s, matching the upstream finalizer), then SIGKILL.
+//!
+//! Port of upstream/packages/provider-opencode/src/server/OpenCodeRuntime.ts (with command.rs, error.rs and v1_client.rs).
 
 use std::collections::BTreeMap;
 use std::future::Future;

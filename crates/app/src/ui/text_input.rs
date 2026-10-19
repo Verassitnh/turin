@@ -1,6 +1,8 @@
 //! The chrome of upstream/apps/web/src/components/ui/input.tsx around gpui-component's text
 //! input: `rounded-lg border border-input bg-background shadow-xs/5`, dark `bg-input/32`, height
 //! 32px (`h-7.5` input in a 1px border). Focus ring (`ring-[3px] ring-ring/24`) is the input's own.
+//!
+//! Port of upstream/apps/web/src/components/ui/input.tsx (chrome around the text field).
 
 use gpui_kit::{App, Div, Styled, div, px};
 

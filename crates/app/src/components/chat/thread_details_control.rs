@@ -6,6 +6,8 @@
 //! `foreground/80`, and a `black/3.5%` (white/8% dark) hover and pressed
 //! surface. The split group (primary action + chevron) shares one hover
 //! surface across both halves.
+//!
+//! Port of upstream/apps/web/src/components/chat/ThreadDetailsControl.tsx.
 
 // A faithful port keeps upstream's whole API (PORTING rule 3); the hosts wire
 // the rest as the composer, thread details and settings tasks land.

@@ -7,6 +7,8 @@
 //!
 //! Cut: `ServerProviderAuth.action` (an `AcpRegistryUrlAuthAction`; ACP
 //! registry is cut).
+//!
+//! Port of upstream/packages/contracts/src/server.ts (provider part).
 
 use std::ops::{Deref, DerefMut};
 

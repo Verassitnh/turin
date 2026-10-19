@@ -6,6 +6,8 @@
 //! glyph in the token's color, and an entry with no resolved icon is the neutral file or folder
 //! glyph, as upstream falls back. The resolution itself (`resolvePierreIconForEntry`) belongs to
 //! `pierre-icons.ts`, so the caller hands it in.
+//!
+//! Port of upstream/apps/web/src/components/chat/WorkspaceEntryIcon.tsx.
 
 use gpui_kit::{App, Hsla, IntoElement, RenderOnce, Window};
 

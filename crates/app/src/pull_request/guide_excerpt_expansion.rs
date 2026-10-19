@@ -8,6 +8,8 @@
 //! still hidden. The old side is [`excerpt_expansion_old_contents`](crate::state::helpers::review_guide_tour::excerpt_expansion_old_contents)'s:
 //! the new file with only the excerpt's own lines put back, so a slice across hunks has nothing
 //! consistent to expand into and [`plan_excerpt_expansion`] gives `None`.
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/guide/GuideExcerpt.tsx (excerpt expansion).
 
 use crate::state::helpers::review_guide_tour::{DiffRow, DiffRowKind};
 

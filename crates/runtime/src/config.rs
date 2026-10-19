@@ -8,6 +8,8 @@
 //! own base directory, `~/.turin`, so a copied `~/.t3` reads unchanged.
 //! `resolve_base_dir` and `expand_home_path` are ported from
 //! upstream/apps/server/src/os-jank.ts.
+//!
+//! Port of upstream/apps/server/src/os-jank.ts (`expandHomePath`, `resolveBaseDir`).
 
 use std::io;
 use std::path::{Path, PathBuf};

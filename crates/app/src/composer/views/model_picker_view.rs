@@ -1,6 +1,9 @@
 //! Port of ModelPickerContent.tsx / ModelPickerSidebar.tsx / ModelListRow.tsx:
 //! the provider/model popover. The list logic lives in
 //! `composer::model_picker`; this view paints it and routes keys.
+//!
+//! Port of upstream/apps/web/src/components/chat/ModelPickerSidebar.tsx.
+//! Port of upstream/apps/web/src/components/chat/ModelListRow.tsx.
 
 use std::collections::HashSet;
 use std::sync::Arc;

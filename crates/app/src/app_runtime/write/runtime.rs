@@ -11,6 +11,8 @@
 //!
 //! Commands commit through the orchestrator; the sink folds them into the
 //! projections the read path serves, so a write shows up in the open feeds.
+//!
+//! Port of upstream/apps/server/src/serverRuntimeStartup.ts (startup order only).
 
 use std::path::Path;
 use std::sync::Arc;

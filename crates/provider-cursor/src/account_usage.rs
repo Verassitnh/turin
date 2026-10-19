@@ -1,6 +1,6 @@
 //! Cursor account usage from the dashboard API.
 //!
-//! Port of `upstream/packages/provider-cursor/src/server/accountUsage.ts`.
+//! Port of upstream/packages/provider-cursor/src/server/accountUsage.ts.
 //! The reader takes a credential file or an injected token. The macOS
 //! Keychain reader is not ported; a keychain outcome is supplied by the
 //! caller. The session cookie never follows a redirect off cursor.com, and

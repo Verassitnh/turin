@@ -6,6 +6,10 @@
 //! theme editor and import dialog), the light/dark theme mix (`themeHalves`),
 //! the live composer / diff / terminal font previews (static samples here) and
 //! the terminal font row (terminal is cut).
+//!
+//! Port of upstream/apps/web/src/components/settings/ThemeSettings.tsx (built-in theme library).
+//! Port of upstream/apps/web/src/components/settings/PanelAnimationsPreview.tsx.
+//! Port of upstream/apps/web/src/components/settings/SettingsFontPreviews.tsx (prompt and code previews; terminal preview is cut).
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

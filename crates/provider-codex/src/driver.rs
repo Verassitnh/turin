@@ -6,6 +6,8 @@
 //! snapshot starts pending; `refresh` connects a `codex app-server`, reads the
 //! account and model list, and reports installed/auth/status. Usage limits,
 //! skills, slash commands, and text generation are not ported yet (PORTING.md).
+//!
+//! Port of upstream/apps/server/src/provider/Drivers/CodexDriver.ts.
 
 use std::{
     collections::{BTreeMap, HashMap},

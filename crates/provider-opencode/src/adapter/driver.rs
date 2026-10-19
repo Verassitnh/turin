@@ -1,9 +1,11 @@
-//! Port of `upstream/packages/provider-opencode/src/server/driver.ts`
+//! Port of upstream/packages/provider-opencode/src/server/driver.ts
 //! `selectOpenCodeRuntimeAdapter`.
 //!
 //! A hot capability read uses the last successful probe and does not wait.
 //! Opening a session waits for a probe. A failed probe stays on 1.x. Only an
 //! explicit 2.x probe selects the v2 adapter. Installed 1.19.0 is v1.
+//!
+//! Port of upstream/packages/provider-opencode/src/settings.ts (`OpenCodeSettings`).
 
 use std::sync::Arc;
 

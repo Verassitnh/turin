@@ -4,6 +4,8 @@
 //!
 //! One view owns the UI state of every page (open menus, text inputs,
 //! search) and renders the active page from the [`SettingsViewModel`].
+//!
+//! Port of upstream/apps/web/src/routes/settings.tsx.
 
 use std::collections::HashMap;
 use std::rc::Rc;

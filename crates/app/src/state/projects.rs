@@ -1,6 +1,6 @@
 //! Port of upstream/packages/client-runtime/src/state/projects.ts
 //! (path helpers for the add-project flow and project lookup).
-//! Also ports upstream/apps/web/src/lib/projectPaths.ts.
+//! Also: Port of upstream/apps/web/src/lib/projectPaths.ts.
 
 use std::sync::LazyLock;
 

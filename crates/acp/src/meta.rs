@@ -4,6 +4,8 @@
 //! `meta-v1.21.0.json` releases. The v1 compatibility names that are not in
 //! that meta file (`session/set_model`, `session/elicitation`, `_session/elicitation`,
 //! `session/elicitation/complete`) match `rpc.ts`.
+//!
+//! Port of upstream/packages/effect-acp/src/rpc.ts (v1 method table).
 
 pub const V2_SCHEMA_RELEASE: &str = "schema-v2.0.0-alpha.3";
 pub const V1_SCHEMA_RELEASE: &str = "schema-v1.21.0";

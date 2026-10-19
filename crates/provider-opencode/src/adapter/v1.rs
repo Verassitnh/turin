@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/adapter.ts`.
+//! Port of upstream/packages/provider-opencode/src/server/adapter.ts.
 //!
 //! One directory-scoped v1 client per session. Prompts carry per-turn
 //! instructions in `system`. `/name` that matches the command list is

@@ -1,5 +1,5 @@
 //! Port of upstream/packages/client-runtime/src/state/filesystem.ts
-//! Also ports upstream/apps/web/src/lib/projectPaths.ts.
+//! Also: Port of upstream/apps/web/src/lib/projectPaths.ts.
 //!
 //! The browse model behind the add-project path picker. Not ported:
 //! `resolveFilesystemReadAccess` (auth session scopes) and

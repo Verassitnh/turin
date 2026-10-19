@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/v2/OpenCode2Server.ts`.
+//! Port of upstream/packages/provider-opencode/src/server/v2/OpenCode2Server.ts.
 //!
 //! A spawned 2.x server gets a generated `OPENCODE_PASSWORD`. The inherited
 //! `OPENCODE_SERVER_PASSWORD` is removed so OpenCode 2 cannot prefer it.

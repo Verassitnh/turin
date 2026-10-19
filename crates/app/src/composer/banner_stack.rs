@@ -2,6 +2,8 @@
 //! (`bannerPriority` + the stable sort). The DOM-measured notice-details
 //! disclosure its test covers is not ported: the view clips the description
 //! with an ellipsis and offers its full text as a tooltip.
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerBannerStack.tsx (ordering rule).
 
 use crate::composer::view_model::{BannerItem, BannerPriority, BannerVariant};
 

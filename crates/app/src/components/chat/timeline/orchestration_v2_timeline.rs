@@ -4,6 +4,8 @@
 //! timeline mirror enums (`super::turn_item` / `super::types`), and the
 //! `{ item, runs, attempts, items }` input objects become positional
 //! arguments with the same names.
+//!
+//! Port of upstream/apps/web/src/lib/orchestrationV2Timeline.ts.
 
 use std::collections::{HashMap, HashSet};
 

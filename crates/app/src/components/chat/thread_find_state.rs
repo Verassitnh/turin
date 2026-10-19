@@ -7,6 +7,8 @@
 //! the 300 ms live-refresh timer and the atom subscription are the caller's; this
 //! module says when each applies. Upstream compares responses by identity; here
 //! they compare by value (see Deviations).
+//!
+//! Port of upstream/apps/web/src/components/chat/useThreadFind.ts (pure logic).
 
 use std::sync::Arc;
 

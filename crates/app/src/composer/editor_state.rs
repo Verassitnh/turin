@@ -11,6 +11,8 @@
 //! a history entry.
 //!
 //! Offsets are UTF-16 code units in block content (chips count 1).
+//!
+//! Port of upstream/apps/web/src/composer-undo-grouping.ts.
 
 use std::time::{Duration, Instant};
 

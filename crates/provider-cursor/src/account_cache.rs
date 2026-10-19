@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-cursor/src/server/accountCache.ts`.
+//! Port of upstream/packages/provider-cursor/src/server/accountCache.ts.
 //!
 //! Cursor's dashboard API is slow, so fetched records are cached for the
 //! retention period and refreshes fetch only the newest edge.

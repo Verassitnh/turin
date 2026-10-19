@@ -7,6 +7,10 @@
 //! `V2EventTimelineRow`, `V2SubagentGroup`, `ReasoningTraceContent`),
 //! V2LifecycleRow.tsx (`SubagentTimelineLink`), TimelineSystemDivider.tsx and
 //! a reduced V2ItemInspector.tsx.
+//!
+//! Port of upstream/apps/web/src/components/chat/V2LifecycleRow.tsx.
+//! Port of upstream/apps/web/src/components/chat/V2ItemInspector.tsx (reduced).
+//! Port of upstream/apps/web/src/components/chat/TimelineSystemDivider.tsx.
 
 use std::rc::Rc;
 

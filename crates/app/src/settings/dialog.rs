@@ -1,6 +1,9 @@
 //! A modal dialog frame (upstream components/ui/{dialog,alert-dialog}.tsx +
 //! dialog-styles.ts): `dialog-backdrop` fill, a `dialog-glass rounded-2xl
 //! border` popup with `p-6` header and an optional muted footer.
+//!
+//! Port of upstream/apps/web/src/components/settings/AddUsageLimitSourceDialog.tsx.
+//! Port of upstream/apps/web/src/components/settings/SecretInput.tsx (write-only secret fields).
 
 use std::rc::Rc;
 

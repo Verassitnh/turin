@@ -3,7 +3,7 @@
 //! Usage history for Claude Code: the transcript format of its
 //! `<home>/projects/**.jsonl` session files and where each instance keeps them.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use serde_json::Value;
 use turin_contracts::{
@@ -15,8 +15,7 @@ use turin_provider_core::{
     rt::boxed,
     usage::{
         ProviderUsageInstance, ProviderUsageReader, SelectedField, TranscriptDirectory,
-        TranscriptUsageFormat, UsageRecord, UsageSpeed, empty_totals, parse_timestamp_ms,
-        token_count,
+        TranscriptUsageFormat, UsageRecord, UsageSpeed, parse_timestamp_ms, token_count,
     },
 };
 
@@ -78,7 +77,6 @@ fn parse_claude_record(record: &Value) -> Option<UsageRecord> {
             output_tokens: count("output_tokens"),
             // Anthropic folds thinking tokens into output and does not break them out.
             reasoning_tokens: 0,
-            ..empty_totals()
         },
         reported_cost_usd: record
             .get("costUSD")
@@ -141,10 +139,7 @@ fn claude_usage_directories(instance: &ProviderUsageInstance) -> Vec<TranscriptD
         &home,
     );
     vec![TranscriptDirectory {
-        dir: PathBuf::from(claude_home)
-            .join("projects")
-            .to_string_lossy()
-            .into_owned(),
+        dir: claude_home.join("projects").to_string_lossy().into_owned(),
         file_name: None,
     }]
 }

@@ -17,11 +17,29 @@ pub fn open(
     options: WindowOptions,
     cx: &mut App,
 ) -> Entity<SettingsStore> {
+    open_targeting(services, client, route, None, options, cx)
+}
+
+/// [`open`], selecting the provider instance `provider_target` on the page
+/// (`/settings/providers?instanceId=<id>`).
+pub fn open_targeting(
+    services: LiveSettingsServices,
+    client: Entity<ClientStore>,
+    route: SettingsRoute,
+    provider_target: Option<String>,
+    options: WindowOptions,
+    cx: &mut App,
+) -> Entity<SettingsStore> {
     let store = LiveSettingsSource::start(services, client, cx);
     let store_for_view = store.clone();
     let (_handle, _view) = gpui_kit::open_window(options, cx, move |window, cx| {
         let view = cx.new(|cx| SettingsView::new(store_for_view, window, cx));
-        view.update(cx, |view, cx| view.set_route(route, cx));
+        view.update(cx, |view, cx| {
+            view.set_route(route, cx);
+            if let Some(instance_id) = provider_target {
+                view.set_provider_target(instance_id, cx);
+            }
+        });
         view
     })
     .expect("failed to open settings window");

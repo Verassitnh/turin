@@ -84,6 +84,7 @@ pub struct LiveChat {
 struct LiveSource {
     thread_id: ThreadId,
     bus: CommandBus,
+    client: Entity<ClientStore>,
     handle: ClientStateHandle,
     // Weak: the stores hold this source, so strong handles here would keep
     // the thread open for the life of the process.
@@ -128,6 +129,7 @@ impl LiveChat {
             me: me.clone(),
             thread_id,
             bus,
+            client: client.clone(),
             handle,
             timeline: timeline.downgrade(),
             composer: composer.downgrade(),
@@ -572,8 +574,15 @@ impl ComposerSource for LiveSource {
         });
     }
 
-    fn open_provider_setup(&self, _instance_id: &str, cx: &mut App) {
-        self.not_wired("Provider setup", cx);
+    /// `/settings/providers?instanceId=<id>`.
+    fn open_provider_setup(&self, instance_id: &str, cx: &mut App) {
+        let live = crate::shell::live_settings::LiveShellHandle::new(
+            self.client.clone(),
+            self.bus.clone(),
+        );
+        if !crate::shell::live_settings::open_provider_settings(&live, instance_id, cx) {
+            push_error(cx, "Provider settings", "Settings are not available yet.");
+        }
     }
 
     fn toggle_keep_full_history(&self, _cx: &mut App) {}

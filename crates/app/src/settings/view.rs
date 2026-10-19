@@ -197,6 +197,14 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Deep link `/settings/providers?instanceId=<id>`: selects that instance
+    /// and scrolls it into view.
+    pub fn set_provider_target(&mut self, instance_id: String, cx: &mut Context<Self>) {
+        self.panels.providers.selected = Some(instance_id.clone());
+        self.panels.providers.target = Some(instance_id);
+        cx.notify();
+    }
+
     /// Queues a toast; the next render shows it.
     pub(super) fn toast(
         &self,

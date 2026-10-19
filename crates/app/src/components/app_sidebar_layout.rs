@@ -408,21 +408,7 @@ impl AppSidebarLayout {
     }
 
     fn settings_window_options(&self, cx: &App) -> gpui_kit::WindowOptions {
-        crate::desktop::merge_window_options(
-            gpui_kit::WindowOptions {
-                titlebar: Some(gpui_kit::TitlebarOptions {
-                    title: Some("Settings".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(gpui_kit::point(
-                        gpui_kit::px(16.),
-                        gpui_kit::px(19.),
-                    )),
-                }),
-                app_owns_titlebar_drag: true,
-                ..Default::default()
-            },
-            cx,
-        )
+        crate::shell::live_settings::settings_window_options(cx)
     }
 
     fn open_live_settings(&mut self, page: &str, window: &mut Window, cx: &mut Context<Self>) {

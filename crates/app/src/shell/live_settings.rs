@@ -75,6 +75,44 @@ fn environment_info(rt: &WriteRuntime) -> EnvironmentInfo {
     }
 }
 
+/// Window options of the settings window.
+pub fn settings_window_options(cx: &App) -> WindowOptions {
+    crate::desktop::merge_window_options(
+        WindowOptions {
+            titlebar: Some(gpui_kit::TitlebarOptions {
+                title: Some("Settings".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(gpui_kit::point(
+                    gpui_kit::px(16.),
+                    gpui_kit::px(19.),
+                )),
+            }),
+            app_owns_titlebar_drag: true,
+            ..Default::default()
+        },
+        cx,
+    )
+}
+
+/// Opens Settings on the Providers page with `instance_id` selected
+/// (`/settings/providers?instanceId=<id>`). Returns false when the live
+/// services are not ready yet.
+pub fn open_provider_settings(live: &LiveShellHandle, instance_id: &str, cx: &mut App) -> bool {
+    let Some(services) = live.try_services(cx) else {
+        return false;
+    };
+    let route = SettingsRoute::from_name("providers").expect("providers route");
+    live_window::open_targeting(
+        services,
+        live.client.clone(),
+        route,
+        Some(instance_id.to_owned()),
+        settings_window_options(cx),
+        cx,
+    );
+    true
+}
+
 /// Opens the settings window when live services and the command bus are ready.
 pub fn open_settings_route(
     live: &LiveShellHandle,

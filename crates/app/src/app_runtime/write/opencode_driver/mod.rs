@@ -173,8 +173,8 @@ impl ProviderDriver for OpenCodeDriver {
         input: ProviderDriverCreateInput,
     ) -> Result<ProviderInstance, ProviderDriverError> {
         let failed = |detail: String| driver_error(&self.kind, &input.instance_id, detail);
-        let settings = settings_from(&input.config).map_err(&failed)?;
-        let custom_models = custom_models_from(&input.config).map_err(&failed)?;
+        let settings = settings_from(&input.config).map_err(failed)?;
+        let custom_models = custom_models_from(&input.config).map_err(failed)?;
         // Upstream: `effectiveConfig = { ...config, enabled }` (envelope flag wins).
         let settings = OpenCodeSettings {
             enabled: input.enabled,
@@ -270,7 +270,7 @@ impl ProviderDriver for OpenCodeDriver {
             Arc::new(move |cwd| {
                 let runtime = Arc::clone(&runtime);
                 let snapshot = Arc::clone(&snapshot);
-                Box::pin(async move { workspace_snapshot(&runtime, &*snapshot, cwd).await })
+                Box::pin(async move { workspace_snapshot(&runtime, &snapshot, cwd).await })
             })
         };
 
@@ -322,6 +322,8 @@ impl ProviderDriver for OpenCodeDriver {
 type OpenCodeManaged = ManagedServerProvider<ProviderSnapshotSettings<InstanceSettingsKey>>;
 
 impl OpenCodeDriver {
+    // ServerSettingsError is built only on settings-read failure paths; boxing it would thread `Box::new` through every `?`.
+    #[allow(clippy::result_large_err)]
     /// `makeManagedServerProvider`: the first probe runs in the background right away;
     /// `refresh` (the Settings button, the registry's refresh) runs it again.
     async fn managed_snapshot(
@@ -385,6 +387,8 @@ impl OpenCodeDriver {
 }
 
 /// `snapshotForCwd`: the machine snapshot with this directory's skills and slash commands.
+// The driver error type is provider-core's and cannot be boxed here.
+#[allow(clippy::result_large_err)]
 async fn workspace_snapshot(
     runtime: &OpenCodeRuntime,
     snapshot: &OpenCodeManaged,

@@ -37,7 +37,7 @@ Step 1 live wiring is integrated (work branch: `task/WIRE-integration`):
    and PR actions end to end. Compilation does not establish daily-use readiness.
 2. Known limits: historical usage is Cursor-only; some provider login paths use
    CLI/environment credentials. Managed-worktree cleanup is unavailable.
-   Onboarding has no folder picker; thread lifecycle undo remains unwired.
+   Onboarding has no folder picker.
    Favicon/license coverage and remaining UI parity/polish need follow-up.
 3. Reconcile upstream mapping inventory (earlier snapshot: 216 missing,
    129 partial); review Codex parity, citation-controller duplication and

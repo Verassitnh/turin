@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui_kit::{App, Task};
@@ -10,7 +11,7 @@ use indexmap::IndexMap;
 use turin_contracts::EnvironmentId;
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
 use turin_contracts::provider_usage_limits::ProviderConsumeResetCreditInput;
-use turin_contracts::settings::ServerSettingsPatch;
+use turin_contracts::settings::{ServerSettings, ServerSettingsPatch, UsageModelPriceOverride};
 use turin_contracts::usage::{UsageSourceAction, UsageSummary, UsageSummaryInput};
 use turin_shared::keybindings::ResolvedKeybindingRule;
 
@@ -88,6 +89,68 @@ fn limits_provider_from_snapshot(provider: &ServerProvider) -> LimitsProvider {
     }
 }
 
+/// The server settings' custom prices and model mappings: what the price
+/// editor lists and what a removal must find to delete.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ServerPrices {
+    prices: IndexMap<String, UsageModelPriceOverride>,
+    aliases: IndexMap<String, String>,
+}
+
+impl ServerPrices {
+    fn from_settings(settings: &ServerSettings) -> Self {
+        Self {
+            prices: settings
+                .usage_price_overrides
+                .iter()
+                .map(|(model, price)| (model.as_str().to_owned(), price.clone()))
+                .collect(),
+            aliases: settings
+                .usage_model_aliases
+                .iter()
+                .map(|(model, alias)| (model.as_str().to_owned(), alias.as_str().to_owned()))
+                .collect(),
+        }
+    }
+}
+
+/// The latest server prices, `None` until the settings have been read.
+type SharedPrices = Arc<Mutex<Option<ServerPrices>>>;
+
+fn store_prices(shared: &SharedPrices, settings: &ServerSettings) {
+    if let Ok(mut prices) = shared.lock() {
+        *prices = Some(ServerPrices::from_settings(settings));
+    }
+}
+
+/// Reads the server settings once, then follows their changes for as long as
+/// the backend (the only other owner of `shared`) is alive.
+fn follow_server_prices(bus: &CommandBus, shared: &SharedPrices) {
+    let weak = Arc::downgrade(shared);
+    let bus = bus.clone();
+    bus.handle().clone().spawn(async move {
+        let commands = loop {
+            if weak.strong_count() == 0 {
+                return;
+            }
+            match bus.commands() {
+                Ok(commands) => break commands,
+                Err(error) if error.message.starts_with("Turin could not start") => return,
+                Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        };
+        let mut changes = commands.runtime().server_settings.subscribe();
+        if let Ok(settings) = commands.server_settings().await {
+            let Some(shared) = weak.upgrade() else { return };
+            store_prices(&shared, &settings);
+        }
+        while let Some(settings) = changes.recv().await {
+            let Some(shared) = weak.upgrade() else { return };
+            store_prices(&shared, &settings);
+        }
+    });
+}
+
 fn provider_snapshots(bus: &CommandBus) -> Vec<ServerProvider> {
     let cached = bus.providers().borrow().iter().cloned().collect::<Vec<_>>();
     if !cached.is_empty() {
@@ -101,6 +164,7 @@ fn provider_snapshots(bus: &CommandBus) -> Vec<ServerProvider> {
 pub struct LiveUsageBackend {
     bus: CommandBus,
     state: Rc<RefCell<State>>,
+    prices: SharedPrices,
     limits_refresher: UsageLimitsRefresher<Vec<ServerProvider>, String>,
 }
 
@@ -109,8 +173,11 @@ impl LiveUsageBackend {
         let id = state::local_environment_id();
         // The refresh future is polled on the GPUI executor, which has no tokio reactor.
         let runtime = bus.handle().clone();
+        let prices = SharedPrices::default();
+        follow_server_prices(&bus, &prices);
         Self {
             bus,
+            prices,
             state: Rc::new(RefCell::new(State {
                 environments: vec![EnvironmentRow {
                     id: id.clone(),
@@ -310,6 +377,7 @@ impl UsageBackend for LiveUsageBackend {
     }
 
     fn price_targets(&self) -> Vec<UsagePriceTarget> {
+        let server = self.prices.lock().ok().and_then(|prices| prices.clone());
         self.state
             .borrow()
             .environments
@@ -317,8 +385,8 @@ impl UsageBackend for LiveUsageBackend {
             .map(|environment| UsagePriceTarget {
                 environment_id: environment.id.clone(),
                 label: environment.label.clone(),
-                prices: None,
-                aliases: Some(IndexMap::new()),
+                prices: server.as_ref().map(|server| server.prices.clone()),
+                aliases: server.as_ref().map(|server| server.aliases.clone()),
                 unavailable: None,
             })
             .collect()
@@ -331,6 +399,7 @@ impl UsageBackend for LiveUsageBackend {
         cx: &mut App,
     ) -> Task<Result<UsageWriteOutcome, UsageWriteError>> {
         let bus = self.bus.clone();
+        let shared = self.prices.clone();
         cx.spawn(async move |_cx| {
             let commands = bus.commands().map_err(|_| UsageWriteError)?;
             let mut settings_patch = ServerSettingsPatch::default();
@@ -365,11 +434,14 @@ impl UsageBackend for LiveUsageBackend {
             {
                 return Ok(UsageWriteOutcome::Success);
             }
-            commands
+            let settings = commands
                 .update_server_settings(settings_patch)
                 .await
-                .map(|_| UsageWriteOutcome::Success)
-                .map_err(|_| UsageWriteError)
+                .map_err(|_| UsageWriteError)?;
+            // The next read of the targets sees the saved prices without
+            // waiting for the settings change notification.
+            store_prices(&shared, &settings);
+            Ok(UsageWriteOutcome::Success)
         })
     }
 
@@ -383,5 +455,50 @@ impl UsageBackend for LiveUsageBackend {
 
     fn timestamp_format(&self) -> TimestampFormat {
         TimestampFormat::Locale
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_prices_list_the_settings_overrides_and_mappings() {
+        let settings: ServerSettings = serde_json::from_value(serde_json::json!({
+            "usagePriceOverrides": {
+                "gpt-x": {
+                    "inputCostPerMillionTokens": 1.5,
+                    "outputCostPerMillionTokens": 6
+                }
+            },
+            "usageModelAliases": {"gpt-x-preview": "gpt-x"}
+        }))
+        .expect("settings");
+        let server = ServerPrices::from_settings(&settings);
+        assert_eq!(server.prices.keys().collect::<Vec<_>>(), ["gpt-x"]);
+        assert_eq!(
+            server.aliases.get("gpt-x-preview").map(String::as_str),
+            Some("gpt-x")
+        );
+        assert_eq!(
+            ServerPrices::from_settings(&ServerSettings::default()),
+            ServerPrices::default()
+        );
+    }
+
+    #[test]
+    fn stored_prices_replace_the_previous_snapshot() {
+        let shared = SharedPrices::default();
+        assert!(shared.lock().expect("lock").is_none());
+        let settings: ServerSettings = serde_json::from_value(serde_json::json!({
+            "usageModelAliases": {"a": "b"}
+        }))
+        .expect("settings");
+        store_prices(&shared, &settings);
+        store_prices(&shared, &ServerSettings::default());
+        assert_eq!(
+            shared.lock().expect("lock").clone(),
+            Some(ServerPrices::default())
+        );
     }
 }

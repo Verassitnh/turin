@@ -41,6 +41,15 @@ impl LivePaletteBackend {
     }
 }
 
+/// The mock snapshot advertises every capability. Two palette commands have no live
+/// implementation (see PORTING.md, "Palette: New thread without a project / Find in thread"), so
+/// they are left out rather than listed as dead rows.
+pub(crate) fn hide_unported_commands(mut snapshot: PaletteSnapshot) -> PaletteSnapshot {
+    snapshot.scratch_thread_available = false;
+    snapshot.supports_thread_find = false;
+    snapshot
+}
+
 fn home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".into())
 }
@@ -89,7 +98,7 @@ fn list_directories(directory: &str, show_hidden: bool) -> Result<FilesystemBrow
 
 impl PaletteBackend for LivePaletteBackend {
     fn snapshot(&self, cx: &App) -> PaletteSnapshot {
-        self.inner.snapshot(cx)
+        hide_unported_commands(self.inner.snapshot(cx))
     }
 
     fn search_messages(&self, query: String, cx: &mut App) -> Task<Vec<ThreadSearchMatch>> {

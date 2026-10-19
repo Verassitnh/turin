@@ -70,6 +70,12 @@ impl Stores {
         tokio::fs::create_dir_all(data_dir)
             .await
             .with_context(|| format!("creating Turin data dir {}", data_dir.display()))?;
+        // An import staged by the welcome wizard replaces an empty database before it is opened.
+        match turin_persistence::T3Import::adopt_staged(data_dir) {
+            Ok(turin_persistence::AdoptStaged::NothingStaged) => {}
+            Ok(outcome) => tracing::info!(?outcome, "staged T3 import"),
+            Err(error) => tracing::error!(%error, "adopting the staged T3 import failed"),
+        }
         let db = Db::open_configured(data_dir::database_path(data_dir))
             .await
             .context("opening Turin database")?;

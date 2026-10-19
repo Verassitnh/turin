@@ -110,6 +110,8 @@ pub struct LiveUsageBackend {
 impl LiveUsageBackend {
     pub fn new(bus: CommandBus) -> Self {
         let id = state::local_environment_id();
+        // The refresh future is polled on the GPUI executor, which has no tokio reactor.
+        let runtime = bus.handle().clone();
         Self {
             bus,
             state: Rc::new(RefCell::new(State {
@@ -120,7 +122,8 @@ impl LiveUsageBackend {
                 windows: HashMap::new(),
                 keybindings: compile_resolved_keybindings_config(&default_keybinding_rules()),
             })),
-            limits_refresher: UsageLimitsRefresher::new(|| chrono::Utc::now().timestamp_millis()),
+            limits_refresher: UsageLimitsRefresher::new(|| chrono::Utc::now().timestamp_millis())
+                .with_runtime(runtime),
         }
     }
 

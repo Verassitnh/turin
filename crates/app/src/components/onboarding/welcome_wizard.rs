@@ -515,7 +515,7 @@ impl WelcomeWizard {
             this.update_in(cx, |this, _, cx| {
                 this.t3 = match result {
                     Ok(report) => T3State::Done(format!(
-                        "Imported {} and {}.",
+                        "Imported {} and {}. Restart Turin to load them.",
                         plural(report.active_projects.max(0) as u64, "project", "projects"),
                         plural(report.active_threads.max(0) as u64, "thread", "threads"),
                     )),

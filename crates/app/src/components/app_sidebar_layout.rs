@@ -1178,9 +1178,12 @@ impl AppSidebarLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = window;
-        crate::shell::chat_route_shortcuts::open_command_palette_if_closed();
-        cx.notify();
+        if !self.palette.read(cx).is_open() {
+            self.sync_palette_context(cx);
+            self.palette.update(cx, |palette, cx| {
+                palette.toggle_mode(SearchOverlayMode::Command, window, cx)
+            });
+        }
     }
 
     fn on_reopen_closed_view(

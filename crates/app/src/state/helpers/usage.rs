@@ -81,6 +81,9 @@ struct LimitsState<A, E> {
 pub struct UsageLimitsRefresher<A, E> {
     state: Arc<Mutex<LimitsState<A, E>>>,
     now_ms: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Runtime that owns the check task. `None` spawns on the ambient runtime, which only exists
+    /// on tokio threads; callers on the GPUI thread must pass the app runtime's handle.
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl<A, E> Clone for UsageLimitsRefresher<A, E> {
@@ -88,6 +91,7 @@ impl<A, E> Clone for UsageLimitsRefresher<A, E> {
         Self {
             state: self.state.clone(),
             now_ms: self.now_ms.clone(),
+            runtime: self.runtime.clone(),
         }
     }
 }
@@ -110,13 +114,21 @@ where
                 pending: HashMap::new(),
             })),
             now_ms: Arc::new(now_ms),
+            runtime: None,
         }
+    }
+
+    /// Run the check tasks on `runtime` so `refresh` can be polled from any executor.
+    pub fn with_runtime(mut self, runtime: tokio::runtime::Handle) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     /// `Ok(None)` is upstream's `undefined`: an automatic refresh that was skipped.
     ///
     /// The check runs on its own task, like a JS promise, so it finishes and starts the cooldown
-    /// even if every caller stops waiting. Must be called inside a tokio runtime.
+    /// even if every caller stops waiting. Needs a tokio runtime: either the caller's own or the one
+    /// given to [`Self::with_runtime`].
     pub async fn refresh<F, Fut>(
         &self,
         environment_id: &EnvironmentId,
@@ -180,7 +192,7 @@ where
         let state = self.state.clone();
         let now_ms = self.now_ms.clone();
         let id = environment_id.clone();
-        let handle = tokio::spawn(async move {
+        let task = async move {
             let result = refresh().await;
             let mut state = state.lock();
             state.pending.remove(&id);
@@ -188,7 +200,11 @@ where
                 .refresh_after
                 .insert(id, now_ms() + LIMITS_REFRESH_COOLDOWN_MS);
             result
-        });
+        };
+        let handle = match &self.runtime {
+            Some(runtime) => runtime.spawn(task),
+            None => tokio::spawn(task),
+        };
         async move {
             match handle.await {
                 Ok(result) => result,
@@ -369,6 +385,22 @@ mod tests {
             calls.fetch_add(1, Ordering::SeqCst);
             pending
         }
+    }
+
+    #[test]
+    fn refreshing_from_a_thread_without_a_tokio_runtime_uses_the_given_handle() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let refresher = UsageLimitsRefresher::<String, String>::new(|| 0)
+            .with_runtime(runtime.handle().clone());
+        let id = env("limits-no-reactor");
+        // `block_on` here is the futures executor: no tokio context, like the GPUI thread.
+        let result = futures::executor::block_on(refresher.refresh(
+            &id,
+            || async { Ok("done".to_owned()) },
+            false,
+            false,
+        ));
+        assert_eq!(result, Ok(Some("done".to_owned())));
     }
 
     #[tokio::test]

@@ -197,6 +197,7 @@ impl FirstRunGate {
     fn recovery(&self, settings: bool, retrying: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.app_theme().clone();
         let backend = self.backend.clone();
+        let gate = cx.entity().downgrade();
         div()
             .flex()
             .flex_1()
@@ -243,11 +244,25 @@ impl FirstRunGate {
                                 .child(Icon::new(IconName::RefreshCw).size(rems(0.875)))
                                 .child(if settings { "Retry" } else { "Reload" })
                                 .on_click(move |_, _, cx| {
-                                    if settings {
-                                        backend.retry_settings(cx);
+                                    let task = if settings {
+                                        backend.retry_settings(cx)
                                     } else {
-                                        backend.reload(cx);
-                                    }
+                                        // A reload re-enters the connecting state.
+                                        gate.update(cx, |gate, cx| {
+                                            gate.state.stalled = false;
+                                            gate.timer_started = false;
+                                            cx.notify();
+                                        })
+                                        .ok();
+                                        backend.reload(cx)
+                                    };
+                                    // The evidence changed outside the gate's entity: re-render.
+                                    let gate = gate.clone();
+                                    cx.spawn(async move |cx| {
+                                        task.await;
+                                        gate.update(cx, |_, cx| cx.notify()).ok();
+                                    })
+                                    .detach();
                                 }),
                         ),
                     ),

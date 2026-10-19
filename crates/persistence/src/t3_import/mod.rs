@@ -35,14 +35,14 @@ mod plan;
 mod snapshot;
 mod verify;
 
-pub use adopt::TURIN_DATABASE_FILE;
+pub use adopt::{AdoptStaged, STAGED_IMPORT_DIR, TURIN_DATABASE_FILE};
 pub use plan::ImportPlan;
 pub use snapshot::T3Snapshot;
 pub use verify::{EventReadReport, ImportReport};
 
 use std::path::Path;
 
-use adopt::import_into;
+use adopt::{adopt_staged, import_into, stage_into};
 use plan::plan;
 use snapshot::backup_to;
 use verify::migrate_and_verify;
@@ -90,6 +90,23 @@ impl T3Import {
         turin_data_dir: impl AsRef<Path>,
     ) -> Result<ImportReport, T3ImportError> {
         import_into(src.as_ref(), turin_data_dir.as_ref(), backup_to)
+    }
+
+    /// Like [`Self::import_into`], for an app that already has its database open: verify the
+    /// copy and park it under `{turin_data_dir}/t3-import-staged` for [`Self::adopt_staged`].
+    /// A newer stage replaces an earlier one.
+    pub fn stage_into(
+        src: impl AsRef<Path>,
+        turin_data_dir: impl AsRef<Path>,
+    ) -> Result<ImportReport, T3ImportError> {
+        stage_into(src.as_ref(), turin_data_dir.as_ref(), backup_to)
+    }
+
+    /// Swap a staged import in for Turin's database. Call before the database is opened. Only an
+    /// absent database or one with no projects and no threads is replaced; the old file is kept as
+    /// `statev2.sqlite.before-t3-import`.
+    pub fn adopt_staged(turin_data_dir: impl AsRef<Path>) -> Result<AdoptStaged, T3ImportError> {
+        adopt_staged(turin_data_dir.as_ref())
     }
 }
 

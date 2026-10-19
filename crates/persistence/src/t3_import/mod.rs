@@ -35,7 +35,7 @@ mod plan;
 mod snapshot;
 mod verify;
 
-pub use adopt::{AdoptStaged, STAGED_IMPORT_DIR, TURIN_DATABASE_FILE};
+pub use adopt::{AdoptStaged, NOT_LOADED_IMPORT_FILE, STAGED_IMPORT_DIR, TURIN_DATABASE_FILE};
 pub use plan::ImportPlan;
 pub use snapshot::T3Snapshot;
 pub use verify::{EventReadReport, ImportReport};

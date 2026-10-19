@@ -53,8 +53,8 @@ pub use pull_request_review_guides::{
 };
 pub use sql_value::SqlValue;
 pub use t3_import::{
-    AdoptStaged, EventReadReport, ImportPlan, ImportReport, STAGED_IMPORT_DIR, T3Import,
-    T3ImportError, T3Snapshot, TURIN_DATABASE_FILE,
+    AdoptStaged, EventReadReport, ImportPlan, ImportReport, NOT_LOADED_IMPORT_FILE,
+    STAGED_IMPORT_DIR, T3Import, T3ImportError, T3Snapshot, TURIN_DATABASE_FILE,
 };
 pub use time::{format_utc_millis, utc_millis_now};
 

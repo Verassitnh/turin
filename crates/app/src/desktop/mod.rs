@@ -8,6 +8,7 @@ pub mod desktop_client_settings;
 pub mod desktop_window;
 pub mod notification_badge;
 pub mod quit_hold;
+pub mod relaunch;
 pub mod window_actions;
 pub mod window_bounds_persist;
 

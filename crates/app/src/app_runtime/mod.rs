@@ -73,6 +73,10 @@ impl Stores {
         // An import staged by the welcome wizard replaces an empty database before it is opened.
         match turin_persistence::T3Import::adopt_staged(data_dir) {
             Ok(turin_persistence::AdoptStaged::NothingStaged) => {}
+            Ok(turin_persistence::AdoptStaged::KeptExisting) => tracing::warn!(
+                kept = %data_dir.join(turin_persistence::NOT_LOADED_IMPORT_FILE).display(),
+                "Turin already had projects or threads, so the staged T3 import was not loaded"
+            ),
             Ok(outcome) => tracing::info!(?outcome, "staged T3 import"),
             Err(error) => tracing::error!(%error, "adopting the staged T3 import failed"),
         }

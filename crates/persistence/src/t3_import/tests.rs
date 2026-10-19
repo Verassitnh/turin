@@ -633,6 +633,23 @@ fn a_staged_import_never_replaces_a_database_that_has_projects() {
         vec!["created-in-turin".to_owned()]
     );
     assert!(!turin.path().join(STAGED_IMPORT_DIR).exists());
+    // The import the user staged is set aside, not deleted.
+    let kept = turin.path().join(NOT_LOADED_IMPORT_FILE);
+    assert!(kept.is_file());
+
+    // A second one does not overwrite the first.
+    T3Import::stage_into(&src, turin.path()).unwrap();
+    assert_eq!(
+        T3Import::adopt_staged(turin.path()).unwrap(),
+        AdoptStaged::KeptExisting
+    );
+    assert!(kept.is_file());
+    assert!(
+        turin
+            .path()
+            .join(format!("{NOT_LOADED_IMPORT_FILE}-1"))
+            .is_file()
+    );
 }
 
 #[test]

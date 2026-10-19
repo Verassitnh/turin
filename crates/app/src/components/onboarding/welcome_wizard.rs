@@ -76,6 +76,11 @@ enum T3State {
     Failed(String),
 }
 
+/// A staged T3 import waits for the restart that loads it.
+fn t3_awaits_restart(state: &T3State) -> bool {
+    matches!(state, T3State::Done(_))
+}
+
 #[derive(Clone)]
 struct Candidate {
     key: String,
@@ -338,7 +343,7 @@ impl WelcomeWizard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_importing {
+        if self.is_importing || self.t3_awaits_restart() {
             return;
         }
         if selection.is_empty() {
@@ -503,6 +508,13 @@ impl WelcomeWizard {
             .ok();
         })
         .detach();
+    }
+
+    /// A T3 import is staged: it replaces Turin's empty database at the next start, and only if
+    /// that database is still empty then. Anything imported or created before the restart would
+    /// make Turin keep its own data and drop the import, so the rest of the wizard waits.
+    fn t3_awaits_restart(&self) -> bool {
+        t3_awaits_restart(&self.t3)
     }
 
     fn import_t3(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1525,6 +1537,7 @@ impl WelcomeWizard {
                         Button::new("wizard-skip-scan")
                             .variant(ButtonVariant::GhostMuted)
                             .label("Do not import projects")
+                            .disabled(self.t3_awaits_restart())
                             .on_click(skip),
                     ),
                 )
@@ -1539,7 +1552,10 @@ impl WelcomeWizard {
             .filter(|candidate| selected_keys.contains(&candidate.key))
             .cloned()
             .collect();
+        let awaits_restart = self.t3_awaits_restart();
         let importing = self.is_importing;
+        // Nothing else is imported while the T3 import waits for its restart.
+        let locked = importing || awaits_restart;
         let truncated = self
             .scan
             .data
@@ -1645,7 +1661,7 @@ impl WelcomeWizard {
                                     .variant(ButtonVariant::Ghost)
                                     .size(ButtonSize::Xs)
                                     .label("Select all")
-                                    .disabled(importing || selected.len() == all.len())
+                                    .disabled(locked || selected.len() == all.len())
                                     .on_click(select_all),
                             )
                             .child(
@@ -1653,7 +1669,7 @@ impl WelcomeWizard {
                                     .variant(ButtonVariant::Ghost)
                                     .size(ButtonSize::Xs)
                                     .label("Select none")
-                                    .disabled(importing || selected.is_empty())
+                                    .disabled(locked || selected.is_empty())
                                     .on_click(select_none),
                             ),
                     ),
@@ -1682,6 +1698,15 @@ impl WelcomeWizard {
                         }),
                 ),
         )
+        .when(awaits_restart, |this| {
+            this.child(
+                div()
+                    .mt_3()
+                    .text_size(TEXT_SM.size)
+                    .text_color(theme.muted_foreground)
+                    .child("Restart Turin to load your T3 Code data. Import other projects after the restart: anything added before it would keep the T3 Code data from loading."),
+            )
+        })
         .when(!self.import_error.is_empty(), |this| {
             this.child(
                 div()
@@ -1703,7 +1728,7 @@ impl WelcomeWizard {
                     Button::new("wizard-skip-import")
                         .variant(ButtonVariant::GhostMuted)
                         .label("Do not import projects")
-                        .disabled(importing)
+                        .disabled(locked)
                         .on_click({
                             let entity = entity.clone();
                             move |_, window, cx| {
@@ -1714,9 +1739,16 @@ impl WelcomeWizard {
                 .child(
                     Button::new("wizard-import")
                         .label(import_label)
-                        .disabled(importing || selected.is_empty())
+                        .disabled(locked || selected.is_empty())
                         .on_click(run),
-                ),
+                )
+                .when(awaits_restart, |this| {
+                    this.child(
+                        Button::new("wizard-restart")
+                            .label("Restart Turin")
+                            .on_click(|_, _, cx| crate::desktop::relaunch::relaunch_and_quit(cx)),
+                    )
+                }),
         )
         .into_any_element()
     }
@@ -1803,5 +1835,18 @@ impl Render for WelcomeWizard {
                     .py(rems(1.25))
                     .child(body),
             )
+    }
+}
+
+#[cfg(test)]
+mod t3_restart_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_staged_import_holds_the_rest_of_the_wizard() {
+        assert!(!t3_awaits_restart(&T3State::Idle));
+        assert!(!t3_awaits_restart(&T3State::Importing));
+        assert!(!t3_awaits_restart(&T3State::Failed("nope".into())));
+        assert!(t3_awaits_restart(&T3State::Done("Imported".into())));
     }
 }

@@ -21,6 +21,9 @@ pub const TURIN_DATABASE_FILE: &str = "statev2.sqlite";
 /// It must not begin with `.t3-import-`: the stale-work cleanup removes those after an hour.
 pub const STAGED_IMPORT_DIR: &str = "t3-import-staged";
 
+/// Where a staged import that could not be loaded is kept, in the Turin data directory.
+pub const NOT_LOADED_IMPORT_FILE: &str = "statev2.sqlite.t3-import-not-loaded";
+
 /// What [`adopt_staged`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdoptStaged {
@@ -28,7 +31,9 @@ pub enum AdoptStaged {
     NothingStaged,
     /// The staged database replaced Turin's empty one.
     Adopted,
-    /// Turin's database already had projects or threads, so the staged copy was dropped.
+    /// Turin's database already had projects or threads, so the staged copy was not loaded. It is
+    /// kept beside the database as [`NOT_LOADED_IMPORT_FILE`] (with a number when that name is
+    /// taken), so nothing the user imported is lost.
     KeptExisting,
 }
 
@@ -62,6 +67,9 @@ pub(crate) fn adopt_staged(turin_data_dir: &Path) -> Result<AdoptStaged, T3Impor
     }
     let live = turin_data_dir.join(TURIN_DATABASE_FILE);
     if live.exists() && database_has_content(&live) {
+        // The user added projects or threads after staging: Turin keeps its own data. The
+        // staged copy is set aside, not deleted, so the import can still be recovered.
+        keep_staged_aside(turin_data_dir, &staged)?;
         let _ = std::fs::remove_dir_all(&staging);
         return Ok(AdoptStaged::KeptExisting);
     }
@@ -77,6 +85,24 @@ pub(crate) fn adopt_staged(turin_data_dir: &Path) -> Result<AdoptStaged, T3Impor
         .map_err(|err| T3ImportError::io("move the staged import into place", err))?;
     let _ = std::fs::remove_dir_all(&staging);
     Ok(AdoptStaged::Adopted)
+}
+
+fn keep_staged_aside(turin_data_dir: &Path, staged: &Path) -> Result<(), T3ImportError> {
+    let mut attempt = 0_u32;
+    let target = loop {
+        let name = if attempt == 0 {
+            NOT_LOADED_IMPORT_FILE.to_owned()
+        } else {
+            format!("{NOT_LOADED_IMPORT_FILE}-{attempt}")
+        };
+        let candidate = turin_data_dir.join(name);
+        if !candidate.exists() {
+            break candidate;
+        }
+        attempt += 1;
+    };
+    std::fs::rename(staged, &target)
+        .map_err(|err| T3ImportError::io("keep the staged import that was not loaded", err))
 }
 
 /// A database that cannot be read counts as having content: it is never replaced.

@@ -10,7 +10,7 @@
 
 use std::rc::Rc;
 
-use gpui_kit::{App, Context};
+use gpui_kit::{App, Context, Task};
 use indexmap::IndexMap;
 use serde_json::Value;
 use turin_contracts::provider_setup::{
@@ -308,8 +308,9 @@ pub trait SettingsSource {
         cx: &mut App,
     ) -> Result<Vec<super::project_file_picker_logic::ProjectEntry>, String>;
     /// `desktopBridge.pickProjectFavicon`: the native image picker; `None` when
-    /// the user cancels.
-    fn pick_project_favicon(&self, cwd: &str, cx: &mut App) -> Result<Option<String>, String>;
+    /// the user cancels. Async: the dialog is a native sheet.
+    fn pick_project_favicon(&self, cwd: &str, cx: &mut App)
+    -> Task<Result<Option<String>, String>>;
     /// `runStorageCleanup`.
     fn run_storage_cleanup(&self, cx: &mut App);
     fn delete_thread(&self, thread_id: &str, cx: &mut App);

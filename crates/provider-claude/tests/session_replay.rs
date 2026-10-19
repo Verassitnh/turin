@@ -580,7 +580,37 @@ async fn blank_tool_use_id_is_skipped_and_the_turn_completes() {
 
 #[tokio::test]
 async fn steering_replaces_the_active_prompt_and_completes() {
-    let harness = Harness::fixture("message_steering");
+    let (seen, status) = steer_fixture_turn(Harness::fixture("message_steering")).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert!(
+        assistant_texts(&seen)
+            .iter()
+            .any(|t| t == "steering fixture observed")
+    );
+}
+
+/// The steering fixture with its abort result rewritten by `relabel`.
+fn steering_fixture_with_abort(relabel: impl Fn(&mut Value)) -> Vec<Value> {
+    let body = std::fs::read_to_string(fixture("message_steering")).unwrap();
+    let mut entries: Vec<Value> = body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let abort = entries
+        .iter_mut()
+        .find(|entry| entry["frame"]["terminal_reason"] == "aborted_streaming")
+        .expect("fixture has the steering abort result");
+    relabel(&mut abort["frame"]);
+    entries
+}
+
+/// Steers the steering fixture's turn and returns its events and terminal status.
+async fn steer_fixture_turn(
+    harness: Harness,
+) -> (
+    Vec<ProviderAdapterV2Event>,
+    ProviderAdapterV2TurnTerminalStatus,
+) {
     let runtime = harness.open().await;
     let mut events = runtime.events();
     let thread = harness.ensure(runtime.as_ref()).await;
@@ -592,7 +622,6 @@ async fn steering_replaces_the_active_prompt_and_completes() {
         .await
         .expect("start turn");
     let turn = started_turn(&mut events).await;
-
     runtime
         .steer_turn(ProviderAdapterV2SteerInput {
             thread_id: id("thread-1"),
@@ -606,13 +635,74 @@ async fn steering_replaces_the_active_prompt_and_completes() {
         })
         .await
         .expect("steer");
+    until_terminal(&mut events).await
+}
 
-    let (seen, status) = until_terminal(&mut events).await;
+#[tokio::test]
+async fn steering_abort_labelled_success_keeps_the_turn_for_the_steer() {
+    // The CLI can report the segment a steer aborts as success with
+    // is_error=false. The turn must stay open for the steer's answer.
+    let entries = steering_fixture_with_abort(|frame| {
+        frame["subtype"] = json!("success");
+        frame["is_error"] = json!(false);
+        frame["result"] = json!("");
+    });
+    let (seen, status) = steer_fixture_turn(Harness::lines(&entries)).await;
     assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
     assert!(
         assistant_texts(&seen)
             .iter()
-            .any(|t| t == "steering fixture observed")
+            .any(|t| t == "steering fixture observed"),
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn steering_abort_during_tools_keeps_the_turn_for_the_steer() {
+    let entries = steering_fixture_with_abort(|frame| {
+        frame["terminal_reason"] = json!("aborted_tools");
+    });
+    let (seen, status) = steer_fixture_turn(Harness::lines(&entries)).await;
+    assert_eq!(status, ProviderAdapterV2TurnTerminalStatus::Completed);
+    assert!(
+        assistant_texts(&seen)
+            .iter()
+            .any(|t| t == "steering fixture observed"),
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn unsteered_abort_labelled_success_ends_the_turn_interrupted() {
+    // Without a steer, an abort result ends the turn, and its terminal reason
+    // wins over the success envelope (upstream `terminalStatusFromResult`).
+    let mut entries = steering_fixture_with_abort(|frame| {
+        frame["subtype"] = json!("success");
+        frame["is_error"] = json!(false);
+        frame["result"] = json!("");
+    });
+    entries.retain(|entry| entry["label"] != "prompt.offer:2");
+    let abort = entries
+        .iter()
+        .position(|entry| entry["frame"]["terminal_reason"] == "aborted_streaming")
+        .unwrap();
+    entries.truncate(abort + 1);
+    let harness = Harness::lines(&entries);
+    let runtime = harness.open().await;
+    let mut events = runtime.events();
+    let thread = harness.ensure(runtime.as_ref()).await;
+    runtime
+        .start_turn(harness.turn_input(
+            thread,
+            "Respond with exactly: steering fixture initial response",
+        ))
+        .await
+        .expect("start turn");
+    let (seen, status) = until_terminal(&mut events).await;
+    assert_eq!(
+        status,
+        ProviderAdapterV2TurnTerminalStatus::Interrupted,
+        "{seen:?}"
     );
 }
 

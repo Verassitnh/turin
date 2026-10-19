@@ -688,7 +688,9 @@ struct ActiveTurn {
     turn: OrchestrationV2ProviderTurn,
     thread: OrchestrationV2ProviderThread,
     earlier_usage: Vec<Value>,
-    steer_pending: bool,
+    /// Upstream `steeredTurns`: set by a steer and cleared by the first result
+    /// that is not a steering abort, so every segment a steer ends is absorbed.
+    steered: bool,
     interrupted: bool,
     /// The uuid of the latest assistant message. It is the turn's native ref,
     /// so a later rollback or fork can resume at it.
@@ -1105,7 +1107,7 @@ impl ClaudeActor {
             turn,
             thread,
             earlier_usage: vec![],
-            steer_pending: false,
+            steered: false,
             interrupted: false,
             native_message_cursor: None,
             thinking_blocks: HashMap::new(),
@@ -1214,7 +1216,7 @@ impl ClaudeActor {
             .ok_or_else(|| protocol_error("Claude session is not running"))?
             .steer(text, Some(uuid::Uuid::new_v4().to_string()))
             .map_err(|e| protocol_error(e.to_string()))?;
-        active.steer_pending = true;
+        active.steered = true;
         Ok(())
     }
     async fn interrupt(
@@ -2411,25 +2413,20 @@ impl ClaudeActor {
             return;
         };
         let result = &frame.raw;
-        let failed = result
-            .get("is_error")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let aborted =
-            result.get("terminal_reason").and_then(Value::as_str) == Some("aborted_streaming");
-        if active.steer_pending && failed && aborted {
+        // A steer ends the running segment with an abort result, and the CLI
+        // then answers the steer in the same turn. The abort can arrive labelled
+        // success with is_error=false, so only its terminal reason is checked.
+        if !active.interrupted && active.steered && is_claude_active_steering_abort_result(result) {
             if let Some(usage) = result.get("usage") {
                 active.earlier_usage.push(usage.clone());
             }
-            active.steer_pending = false;
             return;
         }
+        active.steered = false;
         let status = if active.interrupted {
             ProviderAdapterV2TurnTerminalStatus::Interrupted
-        } else if failed {
-            ProviderAdapterV2TurnTerminalStatus::Failed
         } else {
-            ProviderAdapterV2TurnTerminalStatus::Completed
+            terminal_status_from_result(result)
         };
         self.finish_turn(status, &frame.raw);
     }
@@ -3185,6 +3182,57 @@ fn terminal_item_status(status: ProviderAdapterV2TurnTerminalStatus) -> &'static
         ProviderAdapterV2TurnTerminalStatus::Interrupted => "interrupted",
         ProviderAdapterV2TurnTerminalStatus::Cancelled => "cancelled",
         ProviderAdapterV2TurnTerminalStatus::Failed => "failed",
+    }
+}
+
+/// Upstream `isClaudeActiveSteeringAbortResult`.
+fn is_claude_active_steering_abort_result(result: &Value) -> bool {
+    matches!(
+        result.get("terminal_reason").and_then(Value::as_str),
+        Some("aborted_streaming" | "aborted_tools")
+    )
+}
+
+/// Upstream `terminalStatusFromResult`. A success result with is_error set
+/// fails; upstream decides that case from its failure hints instead.
+fn terminal_status_from_result(result: &Value) -> ProviderAdapterV2TurnTerminalStatus {
+    // The CLI can label an abort as success with is_error=false. Its explicit
+    // terminal reason takes precedence over that envelope.
+    if is_claude_active_steering_abort_result(result) {
+        return ProviderAdapterV2TurnTerminalStatus::Interrupted;
+    }
+    let failed = result
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if matches!(
+        result.get("subtype").and_then(Value::as_str),
+        None | Some("success")
+    ) {
+        return if failed {
+            ProviderAdapterV2TurnTerminalStatus::Failed
+        } else {
+            ProviderAdapterV2TurnTerminalStatus::Completed
+        };
+    }
+    let error_text = result
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_lowercase()
+        })
+        .unwrap_or_default();
+    if error_text.contains("interrupt") {
+        ProviderAdapterV2TurnTerminalStatus::Interrupted
+    } else if error_text.contains("cancel") {
+        ProviderAdapterV2TurnTerminalStatus::Cancelled
+    } else {
+        ProviderAdapterV2TurnTerminalStatus::Failed
     }
 }
 

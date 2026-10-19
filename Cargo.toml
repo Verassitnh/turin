@@ -79,6 +79,14 @@ gpui-kit = "0.7.3"
 [profile.dev.package."*"]
 opt-level = 2
 
+# Usage history parses every transcript line in these crates. At opt-level 0 a
+# cold scan of a few GB of Claude transcripts takes about three times longer.
+[profile.dev.package.turin-usage]
+opt-level = 2
+
+[profile.dev.package.turin-provider-claude]
+opt-level = 2
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

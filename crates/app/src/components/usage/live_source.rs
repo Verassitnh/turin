@@ -3,7 +3,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui_kit::{App, Task};
 use indexmap::IndexMap;
@@ -135,7 +134,8 @@ impl LiveUsageBackend {
         serde_json::to_string(window).unwrap_or_default()
     }
 
-    fn fetch(&self, window: UsageSummaryInput, cx: &mut App) {
+    /// Reads `window` and stores the answer. The task resolves once it is stored.
+    fn fetch(&self, window: UsageSummaryInput, cx: &mut App) -> Task<()> {
         let key = Self::window_key(&window);
         {
             let mut state = self.state.borrow_mut();
@@ -153,7 +153,7 @@ impl LiveUsageBackend {
         }
         let bus = self.bus.clone();
         let state = self.state.clone();
-        cx.spawn(async move |cx| {
+        cx.spawn(async move |_cx| {
             let summary = match bus.commands() {
                 Ok(commands) => usage_commands::usage_summary(&commands, &window)
                     .await
@@ -167,9 +167,7 @@ impl LiveUsageBackend {
                     summary: Some(summary),
                 },
             );
-            cx.update(|_| ());
         })
-        .detach();
     }
 }
 
@@ -185,11 +183,12 @@ impl UsageBackend for LiveUsageBackend {
             .map(|environment| {
                 let (summary, error, is_pending) = match cache {
                     None => (None, None, true),
-                    Some(entry) if entry.pending => (None, None, true),
+                    // A rescan keeps the previous answer on screen while it
+                    // waits, as `AsyncResult.value` does upstream.
                     Some(entry) => match &entry.summary {
                         None => (None, None, true),
-                        Some(Ok(summary)) => (Some(summary.clone()), None, false),
-                        Some(Err(message)) => (None, Some(message.clone()), false),
+                        Some(Ok(summary)) => (Some(summary.clone()), None, entry.pending),
+                        Some(Err(message)) => (None, Some(message.clone()), entry.pending),
                     },
                 };
                 EnvironmentUsageStatus {
@@ -213,18 +212,25 @@ impl UsageBackend for LiveUsageBackend {
             .collect()
     }
 
+    fn load_usage(&self, window: &UsageSummaryInput, cx: &mut App) -> Option<Task<()>> {
+        if self
+            .state
+            .borrow()
+            .windows
+            .contains_key(&Self::window_key(window))
+        {
+            return None;
+        }
+        Some(self.fetch(window.clone(), cx))
+    }
+
     fn refresh_usage(
         &self,
         _environment_ids: Vec<EnvironmentId>,
         input: UsageSummaryInput,
         cx: &mut App,
     ) -> Task<()> {
-        self.fetch(input, cx);
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1))
-                .await;
-        })
+        self.fetch(input, cx)
     }
 
     fn limits_environments(&self) -> Vec<LimitsEnvironment> {

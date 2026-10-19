@@ -1048,7 +1048,7 @@ fn opaque_ranges(source: &str, gfm: bool) -> OpaqueRanges {
     fn walk(node: &Node, flow_parent: bool, source: &str, ranges: &mut OpaqueRanges) {
         if let Some((start, end)) = node
             .position()
-            .and_then(|position| Some((position.start.offset, position.end.offset)))
+            .map(|position| (position.start.offset, position.end.offset))
         {
             match node {
                 Node::Code(_) => ranges.blocks.push((start, end)),

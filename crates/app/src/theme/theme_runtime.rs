@@ -6,6 +6,7 @@
 //! session and live preview. Device-local storage (upstream: `localStorage`)
 //! is a JSON file next to the app's data ([`FileLocalStorage`]); the default
 //! in-memory storage keeps demos and tests from touching it.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

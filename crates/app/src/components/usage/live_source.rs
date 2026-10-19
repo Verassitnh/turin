@@ -8,10 +8,8 @@ use std::time::Duration;
 use gpui_kit::{App, Task};
 use indexmap::IndexMap;
 use turin_contracts::EnvironmentId;
-use turin_contracts::provider_usage_limits::{
-    ProviderConsumeResetCreditInput, ProviderConsumeResetCreditResult,
-};
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
+use turin_contracts::provider_usage_limits::ProviderConsumeResetCreditInput;
 use turin_contracts::settings::ServerSettingsPatch;
 use turin_contracts::usage::{UsageSourceAction, UsageSummary, UsageSummaryInput};
 use turin_shared::keybindings::{
@@ -284,9 +282,9 @@ impl UsageBackend for LiveUsageBackend {
     ) -> Task<ResetCreditResult> {
         let bus = self.bus.clone();
         cx.spawn(async move |_cx| {
-            let commands = bus.commands().map_err(|error| {
-                ResetCreditError::Message(error.message)
-            })?;
+            let commands = bus
+                .commands()
+                .map_err(|error| ResetCreditError::Message(error.message))?;
             commands
                 .consume_reset_credit(input)
                 .await
@@ -300,7 +298,7 @@ impl UsageBackend for LiveUsageBackend {
 
     fn enable_cursor_keychain(&self, _environment_id: EnvironmentId, cx: &mut App) -> Task<bool> {
         let bus = self.bus.clone();
-        cx.spawn(async move |cx| {
+        cx.spawn(async move |_cx| {
             let Ok(commands) = bus.commands() else {
                 return false;
             };
@@ -308,10 +306,7 @@ impl UsageBackend for LiveUsageBackend {
                 cursor_keychain_usage_enabled: Some(true),
                 ..Default::default()
             };
-            commands
-                .update_server_settings(patch)
-                .await
-                .is_ok()
+            commands.update_server_settings(patch).await.is_ok()
         })
     }
 
@@ -358,10 +353,7 @@ impl UsageBackend for LiveUsageBackend {
                     .into_iter()
                     .filter_map(|(model, alias)| {
                         let model = TrimmedNonEmptyString::new(model).ok()?;
-                        let alias = alias
-                            .map(|value| TrimmedNonEmptyString::new(value))
-                            .transpose()
-                            .ok()?;
+                        let alias = alias.map(TrimmedNonEmptyString::new).transpose().ok()?;
                         Some((model, alias))
                     })
                     .collect();

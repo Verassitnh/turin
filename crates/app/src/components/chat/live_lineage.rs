@@ -8,12 +8,13 @@ use turin_contracts::ThreadId;
 use crate::state::client_state::ClientState;
 use crate::state::contracts::OrchestrationV2ThreadShell;
 use crate::state::subagent_runtime::{
-    ProjectedSubagent, RuntimeSubagentStatus, derive_workflow_groups, projected_subagents_to_runtime,
+    ProjectedSubagent, RuntimeSubagentStatus, derive_workflow_groups,
+    projected_subagents_to_runtime,
 };
 use crate::state::support::turn_item::is_subagent_status_active;
 use crate::state::thread_relationships::{
-    derive_thread_relationship_graph, immediate_thread_relationships, order_web_thread_lineage_rows,
-    resolve_merge_back_target_thread_id,
+    derive_thread_relationship_graph, immediate_thread_relationships,
+    order_web_thread_lineage_rows, resolve_merge_back_target_thread_id,
 };
 use crate::state::thread_workflows::{
     can_detach_thread_provider_session, resolve_latest_merge_back_run,
@@ -57,9 +58,7 @@ pub fn lineage_panel_snapshot(
         .collect();
     let running_without_thread = projected
         .iter()
-        .filter(|agent| {
-            agent.child_thread_id.is_none() && is_subagent_status_active(agent.status)
-        })
+        .filter(|agent| agent.child_thread_id.is_none() && is_subagent_status_active(agent.status))
         .count();
     let stoppable_agent_ids: HashSet<String> = projected
         .iter()

@@ -17,16 +17,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Window};
-use turin_contracts::{EnvironmentId, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString};
 use turin_contracts::pull_request::{
     PullRequestChecksFilter, PullRequestDraftFilter, PullRequestRef, PullRequestReviewFilter,
 };
+use turin_contracts::{EnvironmentId, PositiveInt, ProjectId, ThreadId, TrimmedNonEmptyString};
 
 use super::list_page::{PullRequestsPage, PullRequestsPageEvent};
 use super::panel_host::PullRequestPanelHost;
 use super::pull_request_list_logic::{find_scoped_project, resolve_project_scope};
 use super::pull_request_list_preferences::{
-    PullRequestListPreferences, PreferenceStorage, read_pull_request_list_preferences,
+    PreferenceStorage, PullRequestListPreferences, read_pull_request_list_preferences,
 };
 use super::pull_requests_route_search::PullRequestsSearch;
 use super::view_model::{PullRequestListSnapshot, PullRequestProject, PullRequestStore};
@@ -95,13 +95,7 @@ impl PullRequestsRouteHost {
                     reference,
                 } = event;
                 panel_for_select.update(cx, |host, cx| {
-                    host.open(
-                        environment_id.clone(),
-                        reference.clone(),
-                        None,
-                        window,
-                        cx,
-                    )
+                    host.open(environment_id.clone(), reference.clone(), None, window, cx)
                 });
                 cx.emit(PullRequestsRouteEvent::OpenPanel);
             },
@@ -194,15 +188,7 @@ pub fn mount_route(
     cx: &mut App,
 ) -> Entity<PullRequestsRouteHost> {
     cx.new(|cx| {
-        PullRequestsRouteHost::new(
-            bus,
-            client,
-            open_thread,
-            search,
-            preferences,
-            window,
-            cx,
-        )
+        PullRequestsRouteHost::new(bus, client, open_thread, search, preferences, window, cx)
     })
 }
 
@@ -217,9 +203,7 @@ fn try_open_deep_link(
     if opened.get() {
         return;
     }
-    let Some((environment_id, reference)) =
-        deep_link_target(search, store.read(cx).list())
-    else {
+    let Some((environment_id, reference)) = deep_link_target(search, store.read(cx).list()) else {
         return;
     };
     let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) else {
@@ -233,7 +217,7 @@ fn try_open_deep_link(
         })
         .ok();
     opened.set(true);
-    let _ = entity.update(cx, |_, cx| cx.emit(PullRequestsRouteEvent::OpenPanel));
+    entity.update(cx, |_, cx| cx.emit(PullRequestsRouteEvent::OpenPanel));
 }
 
 fn list_scope_from_search(
@@ -297,18 +281,12 @@ fn deep_link_target(
         return None;
     }
     let project_ids: Vec<&str> = list.projects.iter().map(|p| p.id.as_str()).collect();
-    let linked_id = resolve_project_scope(
-        search.selected_project_id.as_deref(),
-        &project_ids,
-        true,
-    );
+    let linked_id =
+        resolve_project_scope(search.selected_project_id.as_deref(), &project_ids, true);
     let scoped_id = resolve_project_scope(search.project_id.as_deref(), &project_ids, true);
     let repository_owner = project_id_for_repository(&list.projects, repository, search)?;
     let selected_id = linked_id.or(Some(repository_owner)).or(scoped_id);
-    let selected_host = search
-        .selected_host
-        .as_deref()
-        .or(search.host.as_deref());
+    let selected_host = search.selected_host.as_deref().or(search.host.as_deref());
     let environment_hint = search
         .selected_environment_id
         .as_deref()

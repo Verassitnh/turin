@@ -25,8 +25,6 @@ use super::chat::composer_pending_panels::{
 use super::chat::live_chat::LiveChat;
 use super::chat::live_lineage::lineage_panel_snapshot;
 use super::chat::live_wiring::{live_overlay_banners, subagent_bar_from_state};
-use super::chat::thread_navigation::request_open_thread;
-use super::chat::thread_relationships_panel::{LineageActions, ThreadRelationshipsPanel};
 use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::{
     get_provider_status_banner_key, should_show_provider_status_banner,
@@ -43,6 +41,8 @@ use super::chat::thread_error_banner::{
     dismiss_thread_error_banner_for_session, get_thread_error_banner_key,
     is_thread_error_banner_dismissed_for_session, should_show_thread_error_banner,
 };
+use super::chat::thread_navigation::request_open_thread;
+use super::chat::thread_relationships_panel::{LineageActions, ThreadRelationshipsPanel};
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
 use super::chat::timeline_page_scroll::TimelinePageScrollSession;
@@ -574,7 +574,7 @@ fn live_selection_toolbar(
     composer: gpui_kit::Entity<crate::composer::views::chat_composer::ChatComposer>,
     canvas_width: f64,
     canvas_height: f64,
-    window: &mut gpui_kit::Window,
+    _window: &mut gpui_kit::Window,
     cx: &mut gpui_kit::App,
 ) -> Option<gpui_kit::AnyElement> {
     use super::chat::assistant_selection_state::{

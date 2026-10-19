@@ -510,10 +510,9 @@ impl Md<'_> {
                     cx.open_url(url);
                 }
             }));
-        if let (Some(message_id), Some(message_text)) = (
-            self.assistant_message_id,
-            self.assistant_message_text,
-        ) {
+        if let (Some(message_id), Some(message_text)) =
+            (self.assistant_message_id, self.assistant_message_text)
+        {
             flow = flow.assistant_selection(message_id.to_owned(), message_text.to_owned());
         }
         flow

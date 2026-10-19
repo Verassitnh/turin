@@ -40,9 +40,9 @@ use super::confirm_dialog_host::ConfirmDialogHost;
 use super::git_actions_control::live_source::LiveGitActionsBackend;
 use super::git_actions_control::mock_source::MockGitActionsBackend;
 use super::no_active_thread_state::NoActiveThreadState;
+use super::preview_panel_shell::{PreviewPanelMode, PreviewPanelShell};
 use super::quit_hold_overlay::QuitHoldOverlay;
 use super::reopen_closed_view_shortcut::try_reopen_closed_view;
-use super::preview_panel_shell::{PreviewPanelMode, PreviewPanelShell};
 use super::right_panel_tabs::RightPanelTabs;
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
@@ -58,9 +58,7 @@ use super::usage::usage_page::{UsagePage, UsagePageEvent};
 use super::workspace_titlebar::workspace_controls_left;
 use crate::desktop::desktop_app_settings::{read_desktop_app_settings, write_desktop_app_settings};
 use crate::desktop::desktop_application_menu::{CloseWindow, QuitApplication};
-use crate::desktop::desktop_client_settings::{
-    client_settings_path, read_client_settings,
-};
+use crate::desktop::desktop_client_settings::{client_settings_path, read_client_settings};
 use crate::desktop::notification_badge::clear_notification_badge_on_focus;
 use crate::desktop::quit_hold::{
     QUIT_HOLD_CLOCK_MS, QuitHoldKey, QuitHoldKeyInput, QuitHoldKeyPhase, QuitShortcutCallbacks,
@@ -103,11 +101,10 @@ use turin_contracts::settings::{ClientSettings, QuitConfirmationMode};
 
 use super::sidebar::live_source::LiveSidebar;
 use super::sidebar::view_model::SharedSidebarBackend;
-use crate::app_runtime::write::bus::{CommandBus, CommandBusGlobal};
+use crate::app_runtime::write::bus::CommandBusGlobal;
 use crate::app_runtime::write::commands::CreateThread;
 use crate::state::local_environment_id;
 use crate::state::models::scoped_thread_key;
-use crate::state::store::ClientStore;
 
 actions!(
     turin,
@@ -430,10 +427,7 @@ impl AppSidebarLayout {
 
     fn open_live_settings(&mut self, page: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(live) = self.live.clone() else {
-            window.push_notification(
-                Notification::info("Settings is not available yet."),
-                cx,
-            );
+            window.push_notification(Notification::info("Settings is not available yet."), cx);
             return;
         };
         let options = self.settings_window_options(cx);
@@ -1332,13 +1326,12 @@ impl AppSidebarLayout {
                     .background_executor()
                     .spawn(async move { read_client_settings(&path).ok().flatten() })
                     .await;
-                if let Some(settings) = settings {
-                    if this
+                if let Some(settings) = settings
+                    && this
                         .update(cx, |this, cx| this.apply_client_settings(settings, cx))
                         .is_err()
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
             drop(watcher);
@@ -1358,14 +1351,13 @@ impl Render for AppSidebarLayout {
         }
         if let Some(thread_id) =
             crate::components::chat::thread_navigation::take_thread_open_request(cx)
+            && let Ok(thread_id) = ThreadId::new(&thread_id)
         {
-            if let Ok(thread_id) = ThreadId::new(&thread_id) {
-                self.clear_auxiliary_routes(cx);
-                let key = scoped_thread_key(&local_environment_id(), &thread_id);
-                self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
-                self.sync_palette_context(cx);
-            }
+            self.clear_auxiliary_routes(cx);
+            let key = scoped_thread_key(&local_environment_id(), &thread_id);
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+            self.sync_palette_context(cx);
         }
         let theme = cx.app_theme().clone();
         let viewport_width = f32::from(window.viewport_size().width);
@@ -1603,7 +1595,8 @@ impl Render for AppSidebarLayout {
                                         thread: routed_thread.clone(),
                                         git_host: self.git_host.clone(),
                                         thread_details_open: self.thread_details_open,
-                                        subagent_bar: crate::components::chat_view::subagent_bar_demo(),
+                                        subagent_bar:
+                                            crate::components::chat_view::subagent_bar_demo(),
                                     }),
                                 }
                             })
@@ -1613,35 +1606,34 @@ impl Render for AppSidebarLayout {
                                     None => RightPanelTabs.into_any_element(),
                                 };
                                 this.child(
-                                    PreviewPanelShell::new(PreviewPanelMode::Inline, right_panel_width)
-                                        .maximized(maximized)
-                                        .open(true)
-                                        .child(body),
+                                    PreviewPanelShell::new(
+                                        PreviewPanelMode::Inline,
+                                        right_panel_width,
+                                    )
+                                    .maximized(maximized)
+                                    .open(true)
+                                    .child(body),
                                 )
                             }),
                     ),
             )
             .when(sidebar_open, |this| this.child(sidebar_rail))
-            .when(right_panel_open && !maximized && !right_panel_sheet, |this| {
-                this.child(right_panel_handle)
-            })
+            .when(
+                right_panel_open && !maximized && !right_panel_sheet,
+                |this| this.child(right_panel_handle),
+            )
             .when(right_panel_open && right_panel_sheet, |this| {
                 let body = match right_panel_content {
                     Some(content) => content.into_any_element(),
                     None => RightPanelTabs.into_any_element(),
                 };
                 this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .justify_end()
-                        .child(
-                            PreviewPanelShell::new(PreviewPanelMode::Sheet, right_panel_width)
-                                .maximized(false)
-                                .open(true)
-                                .child(body),
-                        ),
+                    div().absolute().inset_0().flex().justify_end().child(
+                        PreviewPanelShell::new(PreviewPanelMode::Sheet, right_panel_width)
+                            .maximized(false)
+                            .open(true)
+                            .child(body),
+                    ),
                 )
             })
             .child(sidebar_toggle)

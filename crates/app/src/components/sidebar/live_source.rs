@@ -310,7 +310,8 @@ impl SidebarBackend for LiveSidebarBackend {
     }
 
     fn discard_draft(&self, draft_id: String, cx: &mut App) {
-        let Some(global) = cx.try_global::<crate::shell::composer_draft_host::ComposerDraftHostGlobal>()
+        let Some(global) =
+            cx.try_global::<crate::shell::composer_draft_host::ComposerDraftHostGlobal>()
         else {
             return;
         };

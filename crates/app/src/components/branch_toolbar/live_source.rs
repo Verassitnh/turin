@@ -63,9 +63,8 @@ impl LiveBranchBackend {
                 Ok(commands) => {
                     let input = VcsListRefsInput {
                         cwd: TrimmedNonEmptyString::new(cwd.clone()).expect("cwd"),
-                        query: (!query.is_empty()).then(|| {
-                            TrimmedNonEmptyString::new(query.clone()).expect("query")
-                        }),
+                        query: (!query.is_empty())
+                            .then(|| TrimmedNonEmptyString::new(query.clone()).expect("query")),
                         cursor: None,
                         include_matching_remote_refs: Some(true),
                         ref_kind: None,
@@ -133,12 +132,7 @@ impl BranchBackend for LiveBranchBackend {
             .find(|r| r.name.as_str() == name)
     }
 
-    fn switch_ref(
-        &self,
-        _: &str,
-        _: &str,
-        cx: &mut App,
-    ) -> Task<Result<SwitchRefResult, String>> {
+    fn switch_ref(&self, _: &str, _: &str, cx: &mut App) -> Task<Result<SwitchRefResult, String>> {
         cx.spawn(async move |_| Err("Switch branch is not wired yet.".into()))
     }
 

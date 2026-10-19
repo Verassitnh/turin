@@ -91,16 +91,10 @@ impl GitActionsBackend for LiveGitActionsBackend {
         _: RunStackedActionInput,
         cx: &mut App,
     ) -> Task<Result<GitRunStackedActionResult, String>> {
-        cx.spawn(async move |_| {
-            Err("Git actions are not wired to the orchestrator yet.".into())
-        })
+        cx.spawn(async move |_| Err("Git actions are not wired to the orchestrator yet.".into()))
     }
 
-    fn pull(
-        &self,
-        _: &GitActionTarget,
-        cx: &mut App,
-    ) -> Task<Result<VcsPullResult, String>> {
+    fn pull(&self, _: &GitActionTarget, cx: &mut App) -> Task<Result<VcsPullResult, String>> {
         cx.spawn(async move |_| Err("Pull is not wired yet.".into()))
     }
 
@@ -142,6 +136,6 @@ impl GitActionsBackend for LiveGitActionsBackend {
     }
 
     fn open_link(&self, url: String, cx: &mut App) {
-        let _ = cx.open_url(&url);
+        cx.open_url(&url);
     }
 }

@@ -92,13 +92,7 @@ pub fn open_settings_route(
         );
         return false;
     };
-    live_window::open(
-        services,
-        live.client.clone(),
-        route,
-        options,
-        cx,
-    );
+    live_window::open(services, live.client.clone(), route, options, cx);
     true
 }
 

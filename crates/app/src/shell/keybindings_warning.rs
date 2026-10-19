@@ -1,8 +1,8 @@
 //! Live keybindings config issues → stacked toast (body matches
 //! [`KeybindingsConfigWarning`]).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui_kit::{App, AsyncApp, Subscription};
 use turin_contracts::editor::EditorId;
@@ -10,8 +10,8 @@ use turin_runtime::keybindings::{KeybindingsConfigState, ServerConfigIssue};
 
 use crate::app_runtime::write::bus::{CommandBus, CommandBusGlobal};
 use crate::components::keybindings_config_warning::{
-    KeybindingsConfigWarningState, OpenInEditorFailure, OpenInPreferredEditor,
-    OPEN_KEYBINDINGS_BUTTON_LABEL, open_keybindings_file,
+    KeybindingsConfigWarningState, OPEN_KEYBINDINGS_BUTTON_LABEL, OpenInEditorFailure,
+    OpenInPreferredEditor, open_keybindings_file,
 };
 use crate::ui::toast::{ToastActionSpec, ToastOptions, toast_manager};
 use crate::ui::toast_logic::ToastType;

@@ -6,8 +6,8 @@
 
 pub mod backend;
 pub mod icons;
-pub mod mock_source;
 pub mod live_source;
+pub mod mock_source;
 pub mod redacted_text;
 pub mod usage_breakdown;
 pub mod usage_limits;

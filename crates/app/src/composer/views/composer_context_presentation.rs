@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 //! Port of upstream/apps/web/src/components/composerContextPresentation.tsx
 //! (+ composerContextPresentation.test.ts)
 //!

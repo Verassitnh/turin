@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use crate::composer::attachment_upload_queue::ComposerThreadTarget;
 use crate::composer::composer_draft_uploads::DraftAttachmentReleaser;
 use crate::composer::discard_composer_draft::{
-    DiscardedDrafts, DiscardableDraftStore, discard_composer_draft, restore_discarded_draft,
+    DiscardableDraftStore, DiscardedDrafts, discard_composer_draft, restore_discarded_draft,
 };
 use crate::composer::draft_store::{ComposerDraftStore, ComposerThreadDraft};
 use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoNotices, UndoNotice, UndoPlan};

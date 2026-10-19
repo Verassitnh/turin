@@ -583,9 +583,7 @@ impl ComposerSource for LiveSource {
     }
 
     fn dismiss_banner(&self, id: &str, _cx: &mut App) {
-        if id.starts_with("usage-limit-recovery:") {
-            return;
-        }
+        if id.starts_with("usage-limit-recovery:") {}
     }
 
     fn banner_action(&self, banner_id: &str, action_id: &str, cx: &mut App) {

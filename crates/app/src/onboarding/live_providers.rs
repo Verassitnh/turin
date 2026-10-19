@@ -23,10 +23,7 @@ fn onboarding_provider_from_server(provider: &ServerProvider) -> OnboardingProvi
     OnboardingProvider {
         instance_id: provider.instance_id.to_string(),
         driver: provider.driver.to_string(),
-        display_name: provider
-            .display_name
-            .as_ref()
-            .map(|name| name.to_string()),
+        display_name: provider.display_name.as_ref().map(|name| name.to_string()),
         enabled: provider.enabled,
         installed: provider.installed,
         status: map_state(provider.status),

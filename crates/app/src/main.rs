@@ -15,8 +15,8 @@ mod dock_icon;
 mod hooks;
 #[allow(dead_code)]
 mod lib_color;
-mod lru_cache;
 mod logical_project;
+mod lru_cache;
 mod onboarding;
 mod project_favicon_cache;
 mod project_favicon_images;
@@ -58,10 +58,10 @@ use components::onboarding::backend::{FirstRunBackend, OnboardingBackend};
 use components::onboarding::first_run_gate::FirstRunGate;
 use components::onboarding::live_source::LiveOnboarding;
 use components::onboarding::mock_source::{FirstRunScenario, MockOnboardingBackend};
-use std::rc::Rc;
 use desktop::desktop_client_settings::client_settings_path;
 use shell::client_settings_persistence::DesktopFileClientSettingsPersistence;
 use shell::live_settings::start_live_client_settings;
+use std::rc::Rc;
 
 /// Upstream's Electron window: 1100×780 default, 840×620 minimum,
 /// `titleBarStyle: "hiddenInset"` with the traffic lights centred in the
@@ -278,12 +278,8 @@ fn main() {
                             cx.try_global::<state::store::ClientStoreGlobal>()
                                 .map(|global| global.0.clone()),
                         ) {
-                            let backend = LiveOnboarding::start(
-                                store,
-                                command_bus.clone(),
-                                data_dir,
-                                cx,
-                            );
+                            let backend =
+                                LiveOnboarding::start(store, command_bus.clone(), data_dir, cx);
                             (backend.clone(), backend)
                         } else {
                             let backend =

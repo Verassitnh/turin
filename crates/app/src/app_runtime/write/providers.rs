@@ -93,13 +93,12 @@ impl Providers {
             if let Some(driver) = drivers
                 .iter()
                 .find(|driver| driver.driver_kind().as_str() == kind)
+                && let Some(reader) = driver.usage()
             {
-                if let Some(reader) = driver.usage() {
-                    usage_readers.push(turin_usage::usage_service::UsageReader {
-                        driver_kind: kind.to_owned(),
-                        reader: reader.clone(),
-                    });
-                }
+                usage_readers.push(turin_usage::usage_service::UsageReader {
+                    driver_kind: kind.to_owned(),
+                    reader: reader.clone(),
+                });
             }
         }
         // Cursor's account scanner is ported, but its driver does not yet expose

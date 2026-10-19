@@ -593,7 +593,7 @@ impl LivePullRequestSource {
         cx.spawn(async move |cx| {
             let result = task.await;
             if let Some(store) = store.upgrade() {
-                let _ = store.update(cx, |store, cx| match result {
+                store.update(cx, |store, cx| match result {
                     Ok(Some(thread)) => {
                         store.set_thread_links(
                             &thread_id,

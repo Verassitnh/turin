@@ -49,6 +49,65 @@ pub fn load_server_settings(data_dir: &Path, claude_binary: Option<&str>) -> Ser
     })
 }
 
+/// The persistent settings owner. Seed a new data directory using the supplied
+/// startup configuration; existing documents are loaded by the real service,
+/// including secret materialization and legacy migrations.
+pub async fn open_settings(
+    data_dir: &Path,
+    db: turin_persistence::Db,
+    initial: &ServerSettings,
+) -> anyhow::Result<(
+    std::sync::Arc<turin_runtime::server_settings::service::ServerSettingsService>,
+    Option<turin_runtime::server_settings::service::SettingsWatcher>,
+)> {
+    use anyhow::Context as _;
+    use std::sync::Arc;
+    use turin_provider_core::credential_store::{FileSecretStore, SecretStore};
+    use turin_runtime::server_settings::service::ServerSettingsService;
+    let path = data_dir.join(SETTINGS_FILE);
+    let exists = tokio::fs::try_exists(&path)
+        .await
+        .context("checking settings file")?;
+    let secrets_path = data_dir.join("userdata/secrets");
+    let secrets: Arc<dyn SecretStore> = Arc::new(
+        tokio::task::spawn_blocking(move || FileSecretStore::open(secrets_path))
+            .await
+            .context("opening settings secrets task")?
+            .context("opening settings secrets")?,
+    );
+    let service = ServerSettingsService::new(path, secrets, db);
+    let watcher = service.start().await.context("starting settings service")?;
+    if !exists {
+        let patch = turin_runtime::server_settings::server_settings_patch_from_seed(initial)
+            .context("building initial settings patch from startup configuration")?;
+        service
+            .update_settings(&patch)
+            .await
+            .context("saving initial settings")?;
+    }
+    Ok((service, watcher))
+}
+
+/// Development override is process-local and must survive settings reloads.
+pub fn effective_settings(mut settings: ServerSettings) -> ServerSettings {
+    if let Ok(binary) = std::env::var(CLAUDE_BINARY_ENV)
+        && !binary.trim().is_empty()
+    {
+        let id = turin_contracts::provider_instance::ProviderInstanceId::new("claudeAgent")
+            .expect("static instance");
+        let entry = settings.provider_instances.entry(id).or_insert_with(|| {
+            serde_json::from_value(json!({"driver":"claudeAgent", "enabled":true, "config":{}}))
+                .expect("static config")
+        });
+        entry.config = {
+            let mut config = entry.config.clone().unwrap_or_else(|| json!({}));
+            config["binaryPath"] = json!(binary);
+            Some(config)
+        };
+    }
+    settings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,63 +153,4 @@ mod tests {
         let settings = load_server_settings(dir.path(), None);
         assert_eq!(text_generation_instance(&settings), "codex");
     }
-}
-
-/// The persistent settings owner. Seed a new data directory using the supplied
-/// startup configuration; existing documents are loaded by the real service,
-/// including secret materialization and legacy migrations.
-pub async fn open_settings(
-    data_dir: &Path,
-    db: turin_persistence::Db,
-    initial: &ServerSettings,
-) -> anyhow::Result<(
-    std::sync::Arc<turin_runtime::server_settings::service::ServerSettingsService>,
-    Option<turin_runtime::server_settings::service::SettingsWatcher>,
-)> {
-    use anyhow::Context as _;
-    use std::sync::Arc;
-    use turin_provider_core::credential_store::{FileSecretStore, SecretStore};
-    use turin_runtime::server_settings::service::ServerSettingsService;
-    let path = data_dir.join(SETTINGS_FILE);
-    let exists = tokio::fs::try_exists(&path)
-        .await
-        .context("checking settings file")?;
-    let secrets_path = data_dir.join("userdata/secrets");
-    let secrets: Arc<dyn SecretStore> = Arc::new(
-        tokio::task::spawn_blocking(move || FileSecretStore::open(secrets_path))
-            .await
-            .context("opening settings secrets task")?
-            .context("opening settings secrets")?,
-    );
-    let service = ServerSettingsService::new(path, secrets, db);
-    let watcher = service.start().await.context("starting settings service")?;
-    if !exists {
-        let patch = turin_runtime::server_settings::server_settings_patch_from_seed(initial)
-            .context("building initial settings patch from startup configuration")?;
-        service
-            .update_settings(&patch)
-            .await
-            .context("saving initial settings")?;
-    }
-    Ok((service, watcher))
-}
-
-/// Development override is process-local and must survive settings reloads.
-pub fn effective_settings(mut settings: ServerSettings) -> ServerSettings {
-    if let Ok(binary) = std::env::var(CLAUDE_BINARY_ENV) {
-        if !binary.trim().is_empty() {
-            let id = turin_contracts::provider_instance::ProviderInstanceId::new("claudeAgent")
-                .expect("static instance");
-            let entry = settings.provider_instances.entry(id).or_insert_with(|| {
-                serde_json::from_value(json!({"driver":"claudeAgent", "enabled":true, "config":{}}))
-                    .expect("static config")
-            });
-            entry.config = {
-                let mut config = entry.config.clone().unwrap_or_else(|| json!({}));
-                config["binaryPath"] = json!(binary);
-                Some(config)
-            };
-        }
-    }
-    settings
 }

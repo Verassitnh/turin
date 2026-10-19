@@ -287,7 +287,11 @@ impl ChatGitHost {
 
     pub fn details_card_with_lineage(
         &self,
-        lineage: Option<gpui_kit::Entity<crate::components::chat::thread_relationships_panel::ThreadRelationshipsPanel>>,
+        lineage: Option<
+            gpui_kit::Entity<
+                crate::components::chat::thread_relationships_panel::ThreadRelationshipsPanel,
+            >,
+        >,
         cx: &gpui_kit::App,
     ) -> Option<AnyElement> {
         let (workspace, branch, git) = (
@@ -327,7 +331,7 @@ impl ChatGitHost {
                     div()
                         .flex()
                         .flex_col()
-                        .children(lineage.map(|panel| panel.clone()))
+                        .children(lineage)
                         .child(section(false).child(workspace.clone()))
                         .child(section(true).child(branch.clone()).child(git.clone())),
                 )

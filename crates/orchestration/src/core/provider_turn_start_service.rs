@@ -11,7 +11,6 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use turin_contracts::{
     CommandId, ProjectId, RunAttemptId, RunId, ThreadId, TurnItemId, UtcDateTime,
-    base_schemas::js_trim,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2AppThread, OrchestrationV2ContextHandoff,

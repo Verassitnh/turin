@@ -10,8 +10,6 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use turin_contracts::orchestration_v2::OrchestrationV2Command;
-use turin_contracts::provider_instance::ProviderInstanceMutation;
-use turin_contracts::settings::{ServerSettings, ServerSettingsPatch};
 use turin_contracts::{CommandId, EventId, MessageId, ProjectId, ThreadId, UtcDateTime};
 use turin_orchestration::pipeline::effect_worker::error_chain;
 use turin_orchestration::pipeline::event_sink::ProjectCommit;
@@ -359,10 +357,10 @@ impl Commands {
             "requestId": request_id,
             "answers": answers,
         });
-        if let Some(object) = command.as_object_mut() {
-            if let Some(attachments) = attachments_by_question_id {
-                object.insert("attachmentsByQuestionId".into(), attachments);
-            }
+        if let Some(object) = command.as_object_mut()
+            && let Some(attachments) = attachments_by_question_id
+        {
+            object.insert("attachmentsByQuestionId".into(), attachments);
         }
         self.dispatch(command).await.map(drop)
     }

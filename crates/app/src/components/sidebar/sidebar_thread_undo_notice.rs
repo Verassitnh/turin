@@ -9,9 +9,9 @@ use crate::hooks::thread_undo::UndoAction;
 use crate::shell::composer_draft_host::ComposerDraftHostGlobal;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{CONTROL_RADIUS, TEXT_SM};
-use crate::ui::{Button, ButtonSize, ButtonVariant};
 use crate::ui::toast::{ToastOptions, toast_manager};
 use crate::ui::toast_logic::ToastType;
+use crate::ui::{Button, ButtonSize, ButtonVariant};
 
 #[derive(IntoElement)]
 pub struct SidebarThreadUndoNotice;

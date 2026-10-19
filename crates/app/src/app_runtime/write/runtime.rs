@@ -64,13 +64,6 @@ use turin_orchestration::reactors::workspace_claims::ProjectionWorkspaceClaims;
 use turin_provider_core::id_allocator::IdAllocator;
 use turin_provider_core::provider_adapter_registry::ProviderAdapterRegistry;
 use turin_provider_core::provider_continuation_requests::ProviderContinuationRequests;
-use turin_providers::provider_auth_service::ProviderAuthService;
-use turin_providers::provider_installation::ProviderInstallation;
-use turin_providers::provider_maintenance_runner::ProviderMaintenanceRunner;
-use turin_runtime::keybindings::Keybindings;
-use turin_runtime::server_settings::ServerSettingsService;
-use turin_runtime::storage_cleanup::StorageCleanup;
-use turin_source_control::source_control::discovery::SourceControlDiscovery;
 
 use super::adapters::{
     HostSettings, IntakeThreads, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes,
@@ -448,6 +441,7 @@ impl WriteRuntime {
 
     /// Publish the latest persisted settings. Read under the same bridge gate as
     /// file reloads so an older notification cannot replace a newer patch.
+    #[allow(clippy::result_large_err)]
     pub async fn sync_provider_settings(
         &self,
     ) -> Result<ServerSettings, turin_contracts::settings::ServerSettingsError> {

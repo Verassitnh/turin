@@ -1,3 +1,4 @@
+#![allow(clippy::arc_with_non_send_sync)]
 //! Port of upstream/packages/client-runtime/src/state/pullRequests.ts.
 //! In-process adapter: the existing GitHub services feed the PR view-model seam.
 
@@ -93,8 +94,8 @@ fn create(
                 break;
             }
             tick += 1;
-            let _ = cx.update(|cx| {
-                if tick % 2 == 0 {
+            cx.update(|cx| {
+                if tick.is_multiple_of(2) {
                     source.read_list(false, false, cx);
                 }
                 source.poll_details(cx);
@@ -178,7 +179,7 @@ impl LivePullRequestSource {
         cx.spawn(async move |cx| {
             let result = task.await;
             if let Some(store) = store.upgrade() {
-                let _ = store.update(cx, |store, cx| done(store, cx, result));
+                store.update(cx, |store, cx| done(store, cx, result));
             }
         })
         .detach();

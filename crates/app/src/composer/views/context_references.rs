@@ -24,40 +24,30 @@ fn draft_context_wire_record(
     use crate::composer::composer_context_records::{
         preview_annotation_context_record, review_comment_context_record, terminal_context_record,
     };
-    use turin_contracts::composer_context::{
-        ComposerContextRecord, KnownComposerContextRecord,
-    };
+    use turin_contracts::composer_context::{ComposerContextRecord, KnownComposerContextRecord};
 
     if let Some(record) = uploaded_context_record_from_draft(entry) {
         return Some(record);
     }
     match entry {
         ComposerDraftContextRecord::Terminal(draft) => {
-            terminal_context_record(draft)
-                .ok()
-                .map(|record| {
-                    ComposerContextRecord::Known(KnownComposerContextRecord::Terminal(record))
-                })
+            terminal_context_record(draft).ok().map(|record| {
+                ComposerContextRecord::Known(KnownComposerContextRecord::Terminal(record))
+            })
         }
         ComposerDraftContextRecord::ReviewComment(draft) => {
-            review_comment_context_record(draft)
-                .ok()
-                .map(|record| {
-                    ComposerContextRecord::Known(KnownComposerContextRecord::ReviewComment(record))
-                })
+            review_comment_context_record(draft).ok().map(|record| {
+                ComposerContextRecord::Known(KnownComposerContextRecord::ReviewComment(record))
+            })
         }
         ComposerDraftContextRecord::Thread(record) => Some(ComposerContextRecord::Known(
             KnownComposerContextRecord::Thread(record.clone()),
         )),
-        ComposerDraftContextRecord::PreviewAnnotation {
-            record,
-            screenshot,
-        } => {
+        ComposerDraftContextRecord::PreviewAnnotation { record, screenshot } => {
             let screenshot = screenshot.as_ref().map(|image| image.id.as_str());
             Some(ComposerContextRecord::Known(
                 KnownComposerContextRecord::PreviewAnnotation(preview_annotation_context_record(
-                    record,
-                    screenshot,
+                    record, screenshot,
                 )),
             ))
         }
@@ -95,12 +85,14 @@ impl ChatComposer {
                 return None;
             }
             encode_composer_context_fragment(&ComposerContextClipboardFragment {
-                version: turin_contracts::composer_context_clipboard::ComposerContextClipboardVersion,
-                source: turin_contracts::composer_context_clipboard::ComposerContextClipboardSource {
-                    environment_id: environment_id.clone(),
-                    thread_id: None,
-                    message_id: None,
-                },
+                version:
+                    turin_contracts::composer_context_clipboard::ComposerContextClipboardVersion,
+                source:
+                    turin_contracts::composer_context_clipboard::ComposerContextClipboardSource {
+                        environment_id: environment_id.clone(),
+                        thread_id: None,
+                        message_id: None,
+                    },
                 records,
             })
         });

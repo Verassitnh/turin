@@ -24,9 +24,9 @@ pub struct ComposerPendingInputSession {
     pub responding: bool,
 }
 
-pub fn message_mode_pending_input<'a>(
-    requests: &'a PendingThreadRequests,
-) -> Option<&'a ThreadPendingUserInput> {
+pub fn message_mode_pending_input(
+    requests: &PendingThreadRequests,
+) -> Option<&ThreadPendingUserInput> {
     requests
         .user_inputs
         .iter()
@@ -129,8 +129,7 @@ pub fn pending_answer_for_message_input(
         answers.insert(qid, draft);
     }
     let answers = merge_attachment_counts(cx, environment_id, thread_id, input, answers);
-    let progress =
-        derive_pending_user_input_progress(&questions, &answers, question_index);
+    let progress = derive_pending_user_input_progress(&questions, &answers, question_index);
     let active = active.expect("message pending input always has a question");
     let choice_only = active.allow_custom_answer == Some(false) && !active.options.is_empty();
     PendingAnswer {
@@ -147,10 +146,7 @@ pub fn pending_answer_for_message_input(
     }
 }
 
-pub fn pending_action_state_for_prompt(
-    answer: &PendingAnswer,
-    prompt: &str,
-) -> PendingActionState {
+pub fn pending_action_state_for_prompt(answer: &PendingAnswer, prompt: &str) -> PendingActionState {
     let prompt_ready = !turin_contracts::base_schemas::js_trim(prompt).is_empty();
     PendingActionState {
         question_index: answer.question_index,

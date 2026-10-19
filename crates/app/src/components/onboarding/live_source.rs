@@ -7,10 +7,10 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui_kit::{App, AppContext as _, Entity, Task};
+use gpui_kit::{App, Entity, Task};
 use turin_contracts::agent_sessions::AgentSessionScanResult;
 use turin_contracts::environment::ExecutionEnvironmentPlatformOs;
 use turin_contracts::settings::{ClientSettingsPatch, ServerSettings};
@@ -65,11 +65,8 @@ impl LiveOnboarding {
             let bus = bus.clone();
             Rc::new(move |cx: &mut App| {
                 let state = client.read(cx).state();
-                *evidence.borrow_mut() = first_run_evidence(
-                    state,
-                    &get_client_settings(),
-                    bus.commands().is_ok(),
-                );
+                *evidence.borrow_mut() =
+                    first_run_evidence(state, &get_client_settings(), bus.commands().is_ok());
                 *known_projects.borrow_mut() = known_projects_from_shell(state);
             })
         };
@@ -130,10 +127,10 @@ impl LiveOnboardingBackend {
                     .map_err(|error| CommandError::new(error.to_string()))
             },
             move |result| {
-                if let Ok(settings) = result {
-                    if let Ok(mut guard) = server_settings.lock() {
-                        *guard = settings;
-                    }
+                if let Ok(settings) = result
+                    && let Ok(mut guard) = server_settings.lock()
+                {
+                    *guard = settings;
                 }
             },
         );
@@ -209,10 +206,10 @@ impl OnboardingBackend for LiveOnboardingBackend {
                 .map_err(|error| CommandError::new(error.to_string()))
         });
         cx.spawn(async move |_| {
-            if let Ok(settings) = task.await {
-                if let Ok(mut guard) = server_settings.lock() {
-                    *guard = settings;
-                }
+            if let Ok(settings) = task.await
+                && let Ok(mut guard) = server_settings.lock()
+            {
+                *guard = settings;
             }
             refresh_in_flight.store(false, Ordering::SeqCst);
         })
@@ -239,12 +236,9 @@ impl OnboardingBackend for LiveOnboardingBackend {
     }
 
     fn instance_config(&self, instance_id: &str) -> Option<serde_json::Value> {
-        self.server_settings
-            .lock()
-            .ok()
-            .and_then(|settings| {
-                instance_config_from_map(&settings.provider_instances, instance_id)
-            })
+        self.server_settings.lock().ok().and_then(|settings| {
+            instance_config_from_map(&settings.provider_instances, instance_id)
+        })
     }
 
     fn scan_projects(&self, cx: &mut App) -> Task<Result<AgentSessionScanResult, String>> {

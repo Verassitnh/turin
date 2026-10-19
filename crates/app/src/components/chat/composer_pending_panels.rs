@@ -501,6 +501,42 @@ pub struct ComposerPendingUserInputBanner {
     pub thread_id: Option<String>,
 }
 
+/// The question index and drafts: the source's, which the composer answers
+/// from too, else the drawer's own.
+fn read_session(
+    state: &Entity<UserInputState>,
+    source: Option<&Arc<dyn TimelineSource>>,
+    request_id: &str,
+    cx: &App,
+) -> (usize, HashMap<String, PendingUserInputDraftAnswer>) {
+    if let Some(session) = source.and_then(|source| source.pending_input_session(request_id)) {
+        return (session.question_index, session.answers);
+    }
+    let state = state.read(cx);
+    (state.question_index, state.answers.clone())
+}
+
+fn edit_session(
+    state: &Entity<UserInputState>,
+    source: Option<&Arc<dyn TimelineSource>>,
+    request_id: &str,
+    cx: &mut App,
+    mut edit: impl FnMut(&mut usize, &mut HashMap<String, PendingUserInputDraftAnswer>),
+) {
+    if let Some(source) = source {
+        let mut shared = |session: &mut super::timeline::source::PendingInputSession| {
+            edit(&mut session.question_index, &mut session.answers)
+        };
+        if source.edit_pending_input_session(request_id, &mut shared, cx) {
+            return;
+        }
+    }
+    state.update(cx, |state, cx| {
+        edit(&mut state.question_index, &mut state.answers);
+        cx.notify();
+    });
+}
+
 /// `onAdvanceActivePendingUserInput`: the next question, or the answers on the last one.
 fn advance(
     state: &Entity<UserInputState>,
@@ -515,23 +551,18 @@ fn advance(
     }
     let questions = contract_questions(&prompt.questions);
     let (progress, answers) = {
-        let state = state.read(cx);
-        let merged = merge_question_attachment_counts(
-            cx,
-            environment_id,
-            thread_id,
-            prompt,
-            state.answers.clone(),
-        );
+        let (question_index, drafts) = read_session(state, source.as_ref(), &prompt.request_id, cx);
+        let merged =
+            merge_question_attachment_counts(cx, environment_id, thread_id, prompt, drafts);
         (
-            derive_pending_user_input_progress(&questions, &merged, state.question_index),
+            derive_pending_user_input_progress(&questions, &merged, question_index),
             build_pending_user_input_answers(&questions, &merged),
         )
     };
     if !progress.is_last_question {
-        state.update(cx, |state, cx| {
-            state.question_index = progress.question_index + 1;
-            cx.notify();
+        let next = progress.question_index + 1;
+        edit_session(state, source.as_ref(), &prompt.request_id, cx, |index, _| {
+            *index = next
         });
         return;
     }
@@ -578,8 +609,9 @@ impl RenderOnce for ComposerPendingUserInputBanner {
         );
         let _ = &state.read(cx).request_id;
         let contract = contract_questions(&prompt.questions);
+        let (session_index, base) =
+            read_session(&state, self.source.as_ref(), &prompt.request_id, cx);
         let answers = {
-            let base = state.read(cx).answers.clone();
             merge_question_attachment_counts(
                 cx,
                 self.environment_id.as_deref(),
@@ -588,10 +620,7 @@ impl RenderOnce for ComposerPendingUserInputBanner {
                 base,
             )
         };
-        let progress = {
-            let state = state.read(cx);
-            derive_pending_user_input_progress(&contract, &answers, state.question_index)
-        };
+        let progress = derive_pending_user_input_progress(&contract, &answers, session_index);
         let index = progress.question_index;
         let Some(question) = prompt.questions.get(index).cloned() else {
             return div().into_any_element();
@@ -799,15 +828,20 @@ impl RenderOnce for ComposerPendingUserInputBanner {
                         else {
                             return;
                         };
-                        state.update(cx, |state, cx| {
-                            let draft = toggle_pending_user_input_option_selection(
-                                &contract_question,
-                                state.answers.get(&qid),
-                                &value,
-                            );
-                            state.answers.insert(qid.clone(), draft);
-                            cx.notify();
-                        });
+                        edit_session(
+                            &state,
+                            source.as_ref(),
+                            &prompt_for_click.request_id,
+                            cx,
+                            |_, answers| {
+                                let draft = toggle_pending_user_input_option_selection(
+                                    &contract_question,
+                                    answers.get(&qid),
+                                    &value,
+                                );
+                                answers.insert(qid.clone(), draft);
+                            },
+                        );
                         if !multi {
                             // Single-select advances after a short beat (200ms).
                             let state = state.clone();

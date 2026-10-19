@@ -28,7 +28,7 @@ use super::composer_pending_bridge::{
     pending_answer_for_message_input, sync_pending_input_session,
 };
 use super::timeline::live_projection::{active_run, decision_wire, snapshot_from_projection};
-use super::timeline::source::{ThreadTimelineStore, TimelineSource};
+use super::timeline::source::{PendingInputSession, ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
 use super::timeline::types::TimelineHistoryControls;
 use crate::app_runtime::write::bus::CommandBus;
@@ -1084,6 +1084,44 @@ impl TimelineSource for LiveSource {
     ) -> bool {
         let answers: IndexMap<_, _> = answers.into_iter().collect();
         self.deliver_pending_user_input(request_id, answers, cx)
+    }
+
+    fn pending_input_session(&self, request_id: &str) -> Option<PendingInputSession> {
+        let overrides = self.overrides.borrow();
+        let session = &overrides.pending_input;
+        Some(if session.request_id.as_deref() == Some(request_id) {
+            PendingInputSession {
+                question_index: session.question_index,
+                answers: session.answers.clone(),
+            }
+        } else {
+            PendingInputSession::default()
+        })
+    }
+
+    fn edit_pending_input_session(
+        &self,
+        request_id: &str,
+        edit: &mut dyn FnMut(&mut PendingInputSession),
+        cx: &mut App,
+    ) -> bool {
+        self.update_overrides(cx, |overrides| {
+            let session = &mut overrides.pending_input;
+            if session.request_id.as_deref() != Some(request_id) {
+                *session = super::composer_pending_bridge::ComposerPendingInputSession {
+                    request_id: Some(request_id.to_owned()),
+                    ..Default::default()
+                };
+            }
+            let mut shared = PendingInputSession {
+                question_index: session.question_index,
+                answers: std::mem::take(&mut session.answers),
+            };
+            edit(&mut shared);
+            session.question_index = shared.question_index;
+            session.answers = shared.answers;
+        });
+        true
     }
 
     fn dismiss_user_input(&self, request_id: &str, cx: &mut App) {

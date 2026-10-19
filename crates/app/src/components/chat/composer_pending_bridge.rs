@@ -24,13 +24,16 @@ pub struct ComposerPendingInputSession {
     pub responding: bool,
 }
 
+/// The question the composer answers: the first pending one that can be
+/// answered (upstream `activePendingUserInput` serves every input but a
+/// not-resumable one, so a live question takes typed and multi-select answers too).
 pub fn message_mode_pending_input(
     requests: &PendingThreadRequests,
 ) -> Option<&ThreadPendingUserInput> {
     requests
         .user_inputs
-        .iter()
-        .find(|input| input.response_capability == UserInputResponseCapability::Message)
+        .first()
+        .filter(|input| input.response_capability != UserInputResponseCapability::NotResumable)
 }
 
 pub fn sync_pending_input_session(
@@ -234,4 +237,50 @@ pub enum PendingSubmitPlan {
         request_id: String,
         answers: Vec<(String, String)>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use turin_contracts::{RuntimeRequestId, TrimmedNonEmptyString};
+
+    fn input(capability: UserInputResponseCapability) -> ThreadPendingUserInput {
+        ThreadPendingUserInput {
+            request_id: RuntimeRequestId::new("request-1").expect("id"),
+            created_at: String::new(),
+            questions: vec![ThreadUserInputQuestion {
+                id: TrimmedNonEmptyString::new("q").expect("id"),
+                header: TrimmedNonEmptyString::new("Q").expect("header"),
+                question: TrimmedNonEmptyString::new("Which?").expect("question"),
+                options: vec![],
+                multi_select: true,
+                allow_custom_answer: None,
+                initial_answer: None,
+                required: None,
+            }],
+            response_capability: capability,
+            response_mode: None,
+            dismissible: false,
+        }
+    }
+
+    /// Upstream answers every pending input in the composer, a live provider's
+    /// free-text and multi-select questions included.
+    #[test]
+    fn the_composer_answers_a_live_question() {
+        let requests = |capability| PendingThreadRequests {
+            approvals: vec![],
+            user_inputs: vec![input(capability)],
+        };
+        assert!(
+            message_mode_pending_input(&requests(UserInputResponseCapability::Live)).is_some()
+        );
+        assert!(
+            message_mode_pending_input(&requests(UserInputResponseCapability::Message)).is_some()
+        );
+        assert!(
+            message_mode_pending_input(&requests(UserInputResponseCapability::NotResumable))
+                .is_none()
+        );
+    }
 }

@@ -120,7 +120,26 @@ pub fn open_provider_settings(
         services,
         live.client.clone(),
         route,
-        instance_id.map(str::to_owned),
+        live_window::SettingsTarget::provider(instance_id),
+        settings_window_options(cx),
+        cx,
+    );
+    true
+}
+
+/// Opens Settings on the Projects page with `project_key` as the scope
+/// (upstream's `/projects/$projectKey`). Returns false when the live services
+/// are not ready yet.
+pub fn open_project_settings(live: &LiveShellHandle, project_key: &str, cx: &mut App) -> bool {
+    let Some(services) = live.try_services(cx) else {
+        return false;
+    };
+    let route = SettingsRoute::from_name("projects").expect("projects route");
+    live_window::open_targeting(
+        services,
+        live.client.clone(),
+        route,
+        live_window::SettingsTarget::project(project_key),
         settings_window_options(cx),
         cx,
     );

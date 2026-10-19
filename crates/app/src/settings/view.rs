@@ -212,6 +212,12 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Deep link to a project's settings: that project becomes the scope.
+    pub fn set_scope_target(&mut self, scope: SettingsScopeSearch, cx: &mut Context<Self>) {
+        self.scope_search = scope;
+        cx.notify();
+    }
+
     /// Queues a toast; the next render shows it.
     pub(super) fn toast(
         &self,

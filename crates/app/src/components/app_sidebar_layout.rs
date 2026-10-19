@@ -272,6 +272,25 @@ fn sidebar_new_thread_target(project_key: Option<&str>) -> NewThreadTarget {
     }
 }
 
+/// Where a sidebar pull request event leads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PullRequestsSurface {
+    /// A thread row's pull request badge: that thread's linked pull requests,
+    /// in the right panel (`useRightPanelStore.open(threadRef, "pull-requests")`;
+    /// the row has routed to the thread first).
+    ThreadTab,
+    /// The sidebar's "Pull requests" entry: the global list (`/pull-requests`).
+    List,
+}
+
+fn pull_requests_surface(event: &SidebarEvent) -> Option<PullRequestsSurface> {
+    match event {
+        SidebarEvent::OpenPullRequests(_) => Some(PullRequestsSurface::ThreadTab),
+        SidebarEvent::OpenPullRequestsPage => Some(PullRequestsSurface::List),
+        _ => None,
+    }
+}
+
 impl AppSidebarLayout {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
@@ -463,6 +482,21 @@ impl AppSidebarLayout {
         };
         let options = self.settings_window_options(cx);
         open_settings_named(&live, page, options, window, cx);
+    }
+
+    /// `navigate({ to: "/projects/$projectKey" })`: the Projects settings page,
+    /// scoped to that project.
+    fn open_live_project_settings(
+        &mut self,
+        project_key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(live) = self.live.clone() else {
+            window.push_notification(Notification::info("Settings is not available yet."), cx);
+            return;
+        };
+        crate::shell::live_settings::open_project_settings(&live, project_key, cx);
     }
 
     /// `navigate({ to: "/usage" })`.
@@ -686,8 +720,8 @@ impl AppSidebarLayout {
                 let options = self.settings_window_options(cx);
                 open_setting_by_id(&live, id, options, window, cx);
             }
-            CommandPaletteEvent::OpenProjectSettings { .. } => {
-                self.open_live_settings("projects", window, cx);
+            CommandPaletteEvent::OpenProjectSettings { project_key } => {
+                self.open_live_project_settings(project_key, window, cx);
             }
             CommandPaletteEvent::ToggleThemeEditor => {
                 // `toggleThemeEditorForTheme`: closes an open editor, else opens a draft
@@ -795,11 +829,16 @@ impl AppSidebarLayout {
                 }
             }
             SidebarEvent::OpenSettings => self.open_live_settings("general", window, cx),
-            SidebarEvent::OpenProjectSettings(_) => {
-                self.open_live_settings("projects", window, cx);
+            SidebarEvent::OpenProjectSettings(key) => {
+                self.open_live_project_settings(&key, window, cx);
             }
             SidebarEvent::OpenPullRequests(_) | SidebarEvent::OpenPullRequestsPage => {
-                self.open_pull_requests(window, cx);
+                match pull_requests_surface(&event) {
+                    Some(PullRequestsSurface::ThreadTab) => {
+                        self.show_thread_pull_requests(false, window, cx)
+                    }
+                    _ => self.open_pull_requests(window, cx),
+                }
             }
             SidebarEvent::AddProject if self.live.is_some() => self.open_command_palette(
                 CommandPaletteOpenDetail {
@@ -1996,6 +2035,19 @@ fn forward_sidebar_actions(
 #[cfg(test)]
 mod new_thread_target_tests {
     use super::*;
+
+    #[test]
+    fn a_thread_rows_pull_request_badge_opens_that_threads_pull_requests() {
+        assert_eq!(
+            pull_requests_surface(&SidebarEvent::OpenPullRequests("local:t1".into())),
+            Some(PullRequestsSurface::ThreadTab)
+        );
+        assert_eq!(
+            pull_requests_surface(&SidebarEvent::OpenPullRequestsPage),
+            Some(PullRequestsSurface::List)
+        );
+        assert_eq!(pull_requests_surface(&SidebarEvent::OpenSettings), None);
+    }
 
     #[test]
     fn an_unresolved_project_opens_the_picker_instead_of_the_routed_project() {

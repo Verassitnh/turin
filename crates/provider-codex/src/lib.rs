@@ -22,6 +22,7 @@ pub mod codex_provider;
 pub mod codex_skills;
 mod codex_snapshot;
 pub mod codex_turn_token_usage;
+pub mod codex_usage;
 pub mod codex_usage_limits;
 pub mod driver;
 #[cfg(test)]

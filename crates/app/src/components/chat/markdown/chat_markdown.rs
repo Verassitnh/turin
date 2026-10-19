@@ -33,6 +33,9 @@ use super::markdown_pipeline::{
     parse_chat_markdown,
 };
 use crate::components::chat::chat_media;
+use crate::components::chat::markdown_thread_link::{
+    ResolvedThreadLink, open_thread_link, resolve_thread_links,
+};
 use crate::components::chat::mermaid_diagram::{MERMAID_UNAVAILABLE, mermaid_diagram};
 use crate::components::chat::message_copy_button::{CODE_COPY_TIMEOUT_MS, MessageCopyButton};
 use crate::components::chat::timeline::assistant_citations::{
@@ -47,6 +50,7 @@ use crate::theme::tokens::{RADIUS_LG, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 use turin_shared::inline_skills::InlineSkill;
+use turin_shared::thread_links::parse_thread_link_href;
 
 const MAX_DOCUMENT_CACHE_ENTRIES: usize = 2000;
 
@@ -207,6 +211,8 @@ struct Md<'a> {
     streaming: bool,
     selection: Hsla,
     skills: &'a [InlineSkill],
+    /// Each `t3-thread://` link of the message, resolved against the shell index.
+    thread_links: &'a HashMap<String, ResolvedThreadLink>,
     assistant_message_id: Option<&'a str>,
     assistant_message_text: Option<&'a str>,
 }
@@ -293,6 +299,35 @@ impl Md<'_> {
                     link,
                     inherit,
                 );
+                ix = group_end;
+                continue;
+            }
+            if let Some(link) = marks.link
+                && (ix == 0 || runs[ix - 1].1.link != Some(link))
+                && let Some((url, written)) = inlines
+                    .links
+                    .get(link)
+                    .and_then(|url| Some((url, parse_thread_link_href(url)?)))
+            {
+                // `MarkdownThreadLink`: the thread's current title, else what the message wrote.
+                let group_end = runs[ix..]
+                    .iter()
+                    .position(|(_, m)| m.link != Some(link))
+                    .map_or(runs.len(), |offset| ix + offset);
+                let written_label: String = runs[ix..group_end]
+                    .iter()
+                    .map(|(r, _)| &inlines.text[r.clone()])
+                    .collect();
+                let label = if written_label.is_empty() {
+                    written.as_str().to_owned()
+                } else {
+                    written_label
+                };
+                let title = self
+                    .thread_links
+                    .get(url)
+                    .map_or(label, |resolved| resolved.title.clone());
+                self.push_thread_link(&mut text, &mut spans, &title, link, inherit);
                 ix = group_end;
                 continue;
             }
@@ -506,7 +541,7 @@ impl Md<'_> {
             .on_link(Rc::new(|url, _, cx| {
                 if let Some(citation) = parse_assistant_citation_href(url) {
                     chat_media::open_quote(citation, cx);
-                } else {
+                } else if !open_thread_link(url, cx) {
                     cx.open_url(url);
                 }
             }));
@@ -1373,6 +1408,48 @@ impl Md<'_> {
 }
 
 impl Md<'_> {
+    /// The link's text led by a thread glyph (`ms-[0.25em] me-[0.2em] size-[14px]`, as the
+    /// favicon of a web link). Upstream shows the thread's project icon when it has one;
+    /// the leading icon of a flow span is a glyph only (see PORTING.md Deviations).
+    fn push_thread_link(
+        &self,
+        text: &mut String,
+        spans: &mut Vec<FlowSpan>,
+        title: &str,
+        link: usize,
+        inherit: Inherit,
+    ) {
+        let mut style = self.span_style(
+            Marks {
+                link: Some(link),
+                ..Marks::default()
+            },
+            inherit,
+            self.theme,
+        );
+        style.chrome = Some(SpanChrome {
+            background: gpui_kit::transparent_black(),
+            border: None,
+            radius: px(0.),
+            pad_x: px(0.),
+            pad_y: px(0.),
+            leading: inherit.size * 0.45 + px(14.),
+            icon: Some((
+                IconName::MessageSquareText,
+                style.color,
+                px(14.),
+                inherit.size * 0.25,
+            )),
+        });
+        text.push_str(title);
+        spans.push(FlowSpan {
+            len: title.len(),
+            style,
+        });
+    }
+}
+
+impl Md<'_> {
     /// `ContextChip kind="skill"` + `SkillChipIcon` + `ContextChipLabel`.
     fn push_skill_chip(
         &self,
@@ -1620,6 +1697,7 @@ impl RenderOnce for ChatMarkdown {
             if theme.is_dark() { 0.35 } else { 0.25 },
         )
         .into();
+        let thread_links = resolve_thread_links(cx, &self.text);
         let md = Md {
             theme: &theme,
             fonts,
@@ -1630,6 +1708,7 @@ impl RenderOnce for ChatMarkdown {
             streaming: self.is_streaming,
             selection,
             skills: &self.skills,
+            thread_links: &thread_links,
             assistant_message_id: self.assistant_message_id.as_deref(),
             assistant_message_text: self
                 .assistant_message_id

@@ -28,6 +28,7 @@ use super::composer_pending_bridge::{
     PendingSubmitPlan, apply_composer_prompt_to_session, message_mode_pending_input,
     pending_answer_for_message_input, sync_pending_input_session,
 };
+use super::markdown_thread_link::{ThreadLinkLookup, install_thread_link_lookup};
 use super::timeline::live_projection::{decision_wire, snapshot_from_projection};
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
@@ -125,6 +126,10 @@ impl LiveChat {
     ) -> Self {
         let handle = client.read(cx).handle().clone();
         handle.open_thread(thread_id.clone());
+        // `MarkdownThreadLink` reads the shell index through this.
+        if !cx.has_global::<ThreadLinkLookup>() {
+            install_thread_link_lookup(client.clone(), cx);
+        }
         let timeline = cx.new(|_| ThreadTimelineStore::new(Default::default()));
         let composer = cx.new(|_| ComposerStore::new(ComposerViewModel::default()));
         // `ComposerSource` / `TimelineSource` are `Arc<dyn _>` seams used on the

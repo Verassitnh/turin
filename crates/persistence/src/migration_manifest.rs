@@ -12,6 +12,9 @@ pub enum MigrationKind {
     CatchStatementErrors,
     PullRequests,
     OrchestrationV2,
+    /// Migration 064: no SQL, only the paged JSON rewrite in
+    /// `legacy_pull_request_key::canonicalize_thread_pull_request_links`.
+    CanonicalizeThreadPullRequestLinks,
 }
 
 pub struct MigrationSpec {
@@ -397,5 +400,17 @@ pub static MIGRATIONS: &[MigrationSpec] = &[
         name: "ThreadFailureLookupIndex",
         sql: include_str!("../sql/062_ThreadFailureLookupIndex.sql"),
         kind: MigrationKind::Sql,
+    },
+    MigrationSpec {
+        id: 63,
+        name: "DropUnusedV1Projections",
+        sql: include_str!("../sql/063_DropUnusedV1Projections.sql"),
+        kind: MigrationKind::Sql,
+    },
+    MigrationSpec {
+        id: 64,
+        name: "CanonicalizeThreadPullRequestLinks",
+        sql: include_str!("../sql/064_CanonicalizeThreadPullRequestLinks.sql"),
+        kind: MigrationKind::CanonicalizeThreadPullRequestLinks,
     },
 ];

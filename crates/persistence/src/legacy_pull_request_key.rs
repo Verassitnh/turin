@@ -1,4 +1,5 @@
-//! Port of upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts
+//! Port of upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts,
+//! upstream/apps/server/src/persistence/Migrations/064_CanonicalizeThreadPullRequestLinks.ts,
 //! and `legacyThreadPullRequestKey` from
 //! `upstream/packages/shared/src/threadPullRequests.ts`.
 
@@ -9,7 +10,7 @@ use rusqlite::{Connection, params};
 use turin_contracts::js_trim;
 use url::Url;
 
-use crate::errors::PersistenceError;
+use crate::errors::{MigrationErrorKind, PersistenceError};
 
 struct Linked {
     repository: String,
@@ -76,6 +77,156 @@ pub fn backfill_projection_thread_pull_requests(conn: &Connection) -> Result<(),
         .map_err(|err| PersistenceError::sql("ProjectionThreadPullRequests.insert", &err))?;
     }
     Ok(())
+}
+
+/// Migration 064. A thread payload that still carries only the legacy
+/// `linkedPullRequest` object gets a one-element `pullRequests` array with the
+/// legacy key, in the projection rows and in the v2 `thread.*` source events,
+/// so a projection rebuild cannot restore the old shape. Pages of 500 by
+/// `thread_id` / `sequence`, as upstream. A legacy object that does not decode
+/// fails the migration, as upstream's `Schema.decodeEffect` does.
+pub fn canonicalize_thread_pull_request_links(conn: &Connection) -> Result<(), PersistenceError> {
+    const PAGE: i64 = 500;
+    let context = "CanonicalizeThreadPullRequestLinks";
+    let mut after_thread_id = String::new();
+    loop {
+        let rows = {
+            let mut stmt = conn
+                .prepare(
+                    "
+                    SELECT thread_id,
+                      json_extract(payload_json, '$.linkedPullRequest') AS linked_pull_request_json,
+                      updated_at
+                    FROM orchestration_v2_projection_threads
+                    WHERE thread_id > ?1
+                      AND json_type(payload_json, '$.pullRequests') IS NULL
+                      AND json_type(payload_json, '$.linkedPullRequest') = 'object'
+                    ORDER BY thread_id
+                    LIMIT ?2
+                    ",
+                )
+                .map_err(|err| PersistenceError::sql(context, &err))?;
+            let rows = stmt
+                .query_map(params![after_thread_id, PAGE], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|err| PersistenceError::sql(context, &err))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|err| PersistenceError::sql(context, &err))?
+        };
+        for (thread_id, linked_json, updated_at) in &rows {
+            let pull_requests = legacy_links_json(linked_json, updated_at)?;
+            conn.execute(
+                "
+                UPDATE orchestration_v2_projection_threads
+                SET payload_json = json_set(payload_json, '$.pullRequests', json(?1))
+                WHERE thread_id = ?2
+                ",
+                params![pull_requests, thread_id],
+            )
+            .map_err(|err| PersistenceError::sql(context, &err))?;
+        }
+        if (rows.len() as i64) < PAGE {
+            break;
+        }
+        after_thread_id = rows.last().map(|row| row.0.clone()).unwrap_or_default();
+    }
+
+    // Normalize the source events too, so rebuilding projections cannot restore the old shape.
+    let mut after_sequence = 0i64;
+    loop {
+        let rows = {
+            let mut stmt = conn
+                .prepare(
+                    "
+                    SELECT sequence,
+                      json_extract(payload_json, '$.linkedPullRequest') AS linked_pull_request_json,
+                      json_extract(payload_json, '$.updatedAt') AS updated_at
+                    FROM orchestration_events
+                    WHERE sequence > ?1
+                      AND application_event_version = 2 AND aggregate_kind = 'thread'
+                      AND event_type LIKE 'thread.%'
+                      AND json_type(payload_json, '$.pullRequests') IS NULL
+                      AND json_type(payload_json, '$.linkedPullRequest') = 'object'
+                    ORDER BY sequence
+                    LIMIT ?2
+                    ",
+                )
+                .map_err(|err| PersistenceError::sql(context, &err))?;
+            let rows = stmt
+                .query_map(params![after_sequence, PAGE], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(|err| PersistenceError::sql(context, &err))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|err| PersistenceError::sql(context, &err))?
+        };
+        for (sequence, linked_json, updated_at) in &rows {
+            let updated_at = updated_at.as_deref().ok_or_else(|| {
+                PersistenceError::migration(
+                    MigrationErrorKind::Failed,
+                    format!("event {sequence}: thread payload has no updatedAt"),
+                )
+            })?;
+            let pull_requests = legacy_links_json(linked_json, updated_at)?;
+            conn.execute(
+                "
+                UPDATE orchestration_events
+                SET payload_json = json_set(payload_json, '$.pullRequests', json(?1))
+                WHERE sequence = ?2
+                ",
+                params![pull_requests, sequence],
+            )
+            .map_err(|err| PersistenceError::sql(context, &err))?;
+        }
+        if (rows.len() as i64) < PAGE {
+            break;
+        }
+        after_sequence = rows.last().map(|row| row.0).unwrap_or(0);
+    }
+    Ok(())
+}
+
+/// `linksJson` in 064: the legacy link as a one-element `ThreadPullRequestLink` array.
+fn legacy_links_json(linked_json: &str, linked_at: &str) -> Result<String, PersistenceError> {
+    let linked = parse_legacy_linked_pull_request(linked_json).ok_or_else(|| {
+        PersistenceError::migration(
+            MigrationErrorKind::Failed,
+            "linkedPullRequest does not decode as ThreadLinkedPullRequest",
+        )
+    })?;
+    let key = legacy_thread_pull_request_key(&linked);
+    let link = serde_json::json!([{
+        "host": key.host,
+        "repository": key.repository,
+        "number": linked.number,
+        "url": linked.url,
+        "source": "manual",
+        "linkedAt": iso_millis(linked_at),
+        "snapshot": null,
+        "stack": null,
+    }]);
+    Ok(link.to_string())
+}
+
+/// Effect encodes `DateTime.Utc` with `formatIso`: millisecond precision, `Z` suffix.
+fn iso_millis(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|parsed| {
+            parsed
+                .with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.to_owned())
 }
 
 fn parse_legacy_linked_pull_request(json: &str) -> Option<Linked> {

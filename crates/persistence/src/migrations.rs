@@ -1,5 +1,6 @@
 //! Port of upstream/apps/server/src/persistence/Migrations.ts
-//! Also: Port of upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts.
+//! Also: Port of upstream/apps/server/src/persistence/Migrations/050_ProjectionThreadPullRequests.ts
+//! and 064_CanonicalizeThreadPullRequestLinks.ts (bodies in `legacy_pull_request_key`).
 //!
 //! Bookkeeping table and id rules match Effect's `Migrator.make` for SQLite:
 //! pending ids are inserted, then executed, in one transaction. An id at or
@@ -9,7 +10,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::application_event_source::copy_application_event_source;
 use crate::errors::{MigrationErrorKind, PersistenceError};
-use crate::legacy_pull_request_key::backfill_projection_thread_pull_requests;
+use crate::legacy_pull_request_key::{
+    backfill_projection_thread_pull_requests, canonicalize_thread_pull_request_links,
+};
 use crate::migration_manifest::{APPLICATION_EVENT_SOURCE_MARKER, MIGRATIONS, MigrationKind};
 
 const MIGRATIONS_TABLE: &str = "effect_sql_migrations";
@@ -233,6 +236,9 @@ fn run_one(conn: &Connection, kind: MigrationKind, sql: &str) -> Result<(), Pers
             execute_script(conn, before)?;
             copy_application_event_source(conn)?;
             execute_script(conn, after)
+        }
+        MigrationKind::CanonicalizeThreadPullRequestLinks => {
+            canonicalize_thread_pull_request_links(conn)
         }
     }
 }

@@ -122,7 +122,7 @@ fn plan_lists_pending_migrations() {
     assert_eq!(plan.latest_id, 60);
     assert_eq!(
         plan.pending.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        vec![61, 62]
+        vec![61, 62, 63, 64]
     );
 }
 
@@ -132,14 +132,18 @@ fn plan_refuses_an_unknown_migration_id() {
     let path = file_db(dir.path(), "statev2.sqlite", None);
     let conn = Connection::open(&path).unwrap();
     conn.execute(
-        "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (63, 'FromTheFuture')",
+        "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (999, 'Future')",
         [],
     )
     .unwrap();
     drop(conn);
     let err = T3Import::plan(&path).unwrap_err();
     let message = err.to_string();
-    assert!(message.contains("63_FromTheFuture"), "{message}");
+    assert!(
+        matches!(err, T3ImportError::NewerThanTurin { .. }),
+        "{message}"
+    );
+    assert!(message.contains("999_Future"), "{message}");
     assert!(message.contains("does not understand"), "{message}");
 }
 
@@ -171,7 +175,7 @@ fn plan_accepts_a_renamed_id_below_the_v2_range_like_upstream() {
     .unwrap();
     drop(conn);
     let plan = T3Import::plan(&path).unwrap();
-    assert_eq!(plan.latest_id, 62);
+    assert_eq!(plan.latest_id, 64);
     assert!(plan.pending.is_empty());
 }
 
@@ -208,7 +212,7 @@ fn plan_refuses_a_gap_the_migrator_would_skip() {
         message.contains("55_OrchestrationV2 (recorded: nothing)"),
         "{message}"
     );
-    assert!(message.contains("highest recorded id (62)"), "{message}");
+    assert!(message.contains("highest recorded id (64)"), "{message}");
 }
 
 #[test]
@@ -239,7 +243,11 @@ fn migrate_preserves_rows_and_matches_a_fresh_schema() {
     let report = T3Import::migrate_and_verify(&snapshot).unwrap();
     assert_eq!(
         report.applied,
-        vec![(62, "ThreadFailureLookupIndex".to_owned())]
+        vec![
+            (62, "ThreadFailureLookupIndex".to_owned()),
+            (63, "DropUnusedV1Projections".to_owned()),
+            (64, "CanonicalizeThreadPullRequestLinks".to_owned()),
+        ]
     );
     assert_eq!(report.row_counts["pull_request_review_guides"], 1);
     assert_eq!(report.events.decoded, 0);
@@ -654,4 +662,122 @@ fn staging_twice_keeps_the_latest_copy() {
         ),
         vec!["second".to_owned()]
     );
+}
+
+/// A T3 database that already ran upstream 063 and 064 (the user's nightly).
+fn t3_database_at_upstream_head(dir: &Path) -> PathBuf {
+    let path = file_db(dir, "statev2.sqlite", None);
+    let conn = Connection::open(&path).unwrap();
+    let ledger = column(
+        &path,
+        "SELECT migration_id || '_' || name FROM effect_sql_migrations WHERE migration_id >= 63 ORDER BY migration_id",
+    );
+    assert_eq!(
+        ledger,
+        vec![
+            "63_DropUnusedV1Projections".to_owned(),
+            "64_CanonicalizeThreadPullRequestLinks".to_owned()
+        ]
+    );
+    add_project(&path, "project-1");
+    conn.execute_batch(
+        r#"
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          branch, worktree_path, latest_turn_id, created_at, updated_at, archived_at, deleted_at
+        ) VALUES (
+          'thread-v1', 'project-1', 'Legacy thread', '{"provider":"codex","model":"gpt-5-codex"}',
+          'approval-required', 'default', NULL, NULL, NULL,
+          '2026-02-24T00:00:00.000Z', '2026-02-24T00:00:00.000Z', NULL, NULL
+        );
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        ) VALUES (
+          'message-1', 'thread-v1', NULL, 'user', 'hello from v1', 0,
+          '2026-02-24T00:01:00.000Z', '2026-02-24T00:01:00.000Z'
+        );
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+          created_at, updated_at, payload_json
+        ) VALUES (
+          'thread-v2', 'project-1', 'V2 thread', 'codex', 'full-access', 'default',
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z',
+          '{"id":"thread-v2","projectId":"project-1","title":"V2 thread","pullRequests":[]}'
+        );
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+    path
+}
+
+#[test]
+fn import_accepts_a_database_migrated_past_062_and_keeps_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = t3_database_at_upstream_head(dir.path());
+    let before = checksum(&src);
+    let turin = tempfile::tempdir().unwrap();
+
+    let report = T3Import::import_into(&src, turin.path()).unwrap();
+    assert!(report.applied.is_empty(), "{:?}", report.applied);
+    assert_eq!(report.plan.latest_id, 64);
+    assert_eq!(report.projects, 1);
+    assert_eq!(report.threads, 1);
+    assert_eq!(report.v2_threads, 1);
+    assert_eq!(report.row_counts["projection_thread_messages"], 1);
+    assert_eq!(checksum(&src), before);
+
+    let dest = turin.path().join(TURIN_DATABASE_FILE);
+    assert_eq!(
+        column(&dest, "SELECT project_id FROM projection_projects"),
+        vec!["project-1".to_owned()]
+    );
+    assert_eq!(
+        column(&dest, "SELECT text FROM projection_thread_messages"),
+        vec!["hello from v1".to_owned()]
+    );
+    assert_eq!(
+        column(
+            &dest,
+            "SELECT thread_id FROM orchestration_v2_projection_threads"
+        ),
+        vec!["thread-v2".to_owned()]
+    );
+    assert!(
+        column(
+            &dest,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'projection_turns'"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_fresh_turin_database_records_every_manifest_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file_db(dir.path(), "statev2.sqlite", None);
+    let recorded = column(
+        &path,
+        "SELECT migration_id || '_' || name FROM effect_sql_migrations ORDER BY migration_id",
+    );
+    let expected: Vec<String> = migration_manifest()
+        .into_iter()
+        .map(|(id, name)| format!("{id}_{name}"))
+        .collect();
+    assert_eq!(recorded, expected);
+    assert_eq!(
+        recorded.last().map(String::as_str),
+        Some("64_CanonicalizeThreadPullRequestLinks")
+    );
+    let tables = column(&path, "SELECT name FROM sqlite_master WHERE type = 'table'");
+    for dropped in [
+        "projection_thread_activities",
+        "projection_turns",
+        "projection_thread_proposed_plans",
+        "projection_pending_approvals",
+        "projection_state",
+        "checkpoint_diff_blobs",
+    ] {
+        assert!(!tables.iter().any(|t| t == dropped), "{dropped}");
+    }
 }

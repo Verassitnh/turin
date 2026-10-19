@@ -357,7 +357,13 @@ impl AppSidebarLayout {
         let client_settings_watch = Self::watch_client_settings(client_settings_path.clone(), cx);
         let toast_viewport = crate::ui::toast::toasts(cx);
         let anchored_toast_viewport = crate::ui::toast::anchored_toasts(cx);
-        let draft_host = cx.new(|_| crate::shell::composer_draft_host::ComposerDraftHost::new());
+        let draft_host = cx.new(|_| {
+            if live.is_some() {
+                crate::shell::composer_draft_host::ComposerDraftHost::persistent()
+            } else {
+                crate::shell::composer_draft_host::ComposerDraftHost::new()
+            }
+        });
         crate::shell::composer_draft_host::ComposerDraftHost::register(draft_host.clone(), cx);
         if let Some(live) = live.as_ref() {
             crate::shell::startup_failure::start(live.bus.clone(), cx);

@@ -62,6 +62,7 @@ pub mod search_ranking;
 pub mod selection;
 pub mod skills;
 pub mod stash;
+pub mod stash_persistence;
 pub mod submission;
 pub mod typing_guard;
 pub mod view_model;

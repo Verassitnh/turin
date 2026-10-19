@@ -2,11 +2,11 @@
 //! that the composer uses: the prompt, image and file attachments, the model
 //! selection per provider instance, runtime/interaction modes, and the stash.
 //!
-//! In memory only. Not ported: terminal contexts, preview annotations, review
+//! Drafts are in memory only; the stash can be made durable
+//! ([`ComposerDraftStore::with_stash_persistence`]). Not ported: terminal contexts, preview annotations, review
 //! comments and thread-context records (cut features or no producers yet),
-//! draft-thread sessions (thread launch is replaced by hooks), localStorage
-//! persistence (the persisted shape will be added with the settings task) and
-//! sticky model selection.
+//! draft-thread sessions (thread launch is replaced by hooks), draft
+//! persistence and sticky model selection.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use indexmap::IndexMap;
 use turin_contracts::chat_attachment::PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
 
 use crate::composer::provider_options::OptionSelection;
+use crate::composer::stash_persistence::StashPersistence;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComposerImageAttachment {
@@ -138,11 +139,23 @@ pub const MAX_STASH_ENTRIES: usize = 20;
 pub struct ComposerDraftStore {
     drafts: HashMap<String, ComposerThreadDraft>,
     stash: Vec<PromptStashEntry>,
+    /// Writes every stash change to disk (see `composer::stash_persistence`).
+    stash_persistence: Option<Box<dyn StashPersistence>>,
 }
 
 impl ComposerDraftStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A store whose stash is loaded from `persistence` and written back on
+    /// every change, so stashed prompts survive a restart.
+    pub fn with_stash_persistence(persistence: Box<dyn StashPersistence>) -> Self {
+        Self {
+            stash: persistence.load(),
+            stash_persistence: Some(persistence),
+            ..Self::default()
+        }
     }
 
     pub fn get_composer_draft(&self, thread_key: &str) -> Option<&ComposerThreadDraft> {
@@ -420,12 +433,18 @@ impl ComposerDraftStore {
 
     /// Newest first, capped at [`MAX_STASH_ENTRIES`].
     pub fn push_stash_entry(&mut self, entry: PromptStashEntry) {
+        if let Some(persistence) = self.stash_persistence.as_mut() {
+            persistence.stash(&entry);
+        }
         self.stash.insert(0, entry);
         self.stash.truncate(MAX_STASH_ENTRIES);
     }
 
     pub fn remove_stash_entry(&mut self, id: &str) -> Option<PromptStashEntry> {
         let index = self.stash.iter().position(|entry| entry.id == id)?;
+        if let Some(persistence) = self.stash_persistence.as_mut() {
+            persistence.take(id);
+        }
         Some(self.stash.remove(index))
     }
 }
@@ -446,6 +465,14 @@ pub struct SharedDraftStore(std::rc::Rc<std::cell::RefCell<ComposerDraftStore>>)
 impl SharedDraftStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A shared store with a durable stash (see
+    /// [`ComposerDraftStore::with_stash_persistence`]).
+    pub fn with_stash_persistence(persistence: Box<dyn StashPersistence>) -> Self {
+        Self(std::rc::Rc::new(std::cell::RefCell::new(
+            ComposerDraftStore::with_stash_persistence(persistence),
+        )))
     }
 
     /// The store every live composer shares: the shell's draft host when it
@@ -794,5 +821,38 @@ mod tests {
         assert_eq!(draft.images.len(), 1);
         assert_eq!(second.stash_entries().len(), 1);
         assert_ne!(next_composer_serial(), next_composer_serial());
+    }
+
+    #[test]
+    fn the_stash_is_written_through_and_reloaded_by_a_new_store() {
+        use crate::composer::stash_persistence::PromptStashPersistence;
+        let storage = crate::hooks::use_local_storage::MemoryLocalStorage::shared();
+        let open = || {
+            ComposerDraftStore::with_stash_persistence(Box::new(PromptStashPersistence::over(
+                storage.clone(),
+            )))
+        };
+        let entry = |id: &str| PromptStashEntry {
+            id: id.into(),
+            created_at: "2026-10-19T10:00:00.000Z".into(),
+            prompt: format!("prompt {id}"),
+            images: Vec::new(),
+            files: Vec::new(),
+            dropped_image_names: Vec::new(),
+            unreadable_image_names: Vec::new(),
+            pending_image_count: 0,
+        };
+        let mut first = open();
+        first.push_stash_entry(entry("a"));
+        first.push_stash_entry(entry("b"));
+        first.remove_stash_entry("a");
+
+        let second = open();
+        let ids: Vec<&str> = second
+            .stash_entries()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(ids, ["b"]);
     }
 }

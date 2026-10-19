@@ -243,9 +243,13 @@ fn reopen_main_window(command_bus: &app_runtime::write::bus::CommandBus, cx: &mu
 /// settings window, or none at all after the main window was closed).
 fn install_window_lifecycle(command_bus: app_runtime::write::bus::CommandBus, cx: &mut App) {
     use desktop::desktop_application_menu::{
-        CloseWindow, OpenSettings, QuitApplication, ToggleFullScreen,
+        CloseWindow, HideApplication, HideOtherApplications, OpenSettings, QuitApplication,
+        ShowAllApplications, ToggleFullScreen,
     };
     cx.on_action(|_: &QuitApplication, cx| cx.quit());
+    cx.on_action(|_: &HideApplication, cx| cx.hide());
+    cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
     cx.on_action(|_: &CloseWindow, cx| {
         if let Some(handle) = cx.active_window() {
             handle

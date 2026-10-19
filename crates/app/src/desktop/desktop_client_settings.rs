@@ -104,9 +104,12 @@ pub fn write_client_settings(
             source,
         }
     })?;
-    fs::write(path, encoded).map_err(|source| DesktopClientSettingsError::Write {
-        path: path.to_path_buf(),
-        source,
+    // Temp file + rename (through symlinks), so a crash mid-write cannot leave truncated JSON.
+    turin_shared::atomic_write::write_file_string_atomically(path, &encoded).map_err(|source| {
+        DesktopClientSettingsError::Write {
+            path: path.to_path_buf(),
+            source,
+        }
     })
 }
 

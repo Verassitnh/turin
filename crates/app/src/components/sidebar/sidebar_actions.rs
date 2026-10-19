@@ -324,9 +324,20 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Fresh pins take the top of the arranged run (the backend computes
-        // a key before the smallest key across all pins, hidden ones too).
-        let task = self.backend.pin(thread, None, cx);
+        // Fresh pins take the top of the arranged run: a key before the smallest
+        // existing pin key (`topOfPinnedRunOrderKey`). With no pins yet, no key is
+        // sent and the backend's default applies.
+        let top_key = {
+            let first = self
+                .snapshot(cx)
+                .threads
+                .iter()
+                .filter(|shell| shell.pinned_at.is_some())
+                .filter_map(|shell| shell.pin_order_key.as_deref())
+                .min();
+            super::runtime::thread_sort::pin_order_key_between(None, first)
+        };
+        let task = self.backend.pin(thread, top_key, cx);
         self.run_command(task, "Failed to pin thread", window, cx, |_, _, _, _| {});
     }
 

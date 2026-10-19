@@ -518,7 +518,18 @@ impl LiveSource {
             providers,
             selected_instance_id: instance_id,
             selected_model: model,
-            selected_model_options: overrides.model_options.clone().unwrap_or_default(),
+            selected_model_options: match &overrides.model_options {
+                Some(options) => options.clone(),
+                // Untouched model: the thread's stored traits (effort etc.) still apply.
+                None if overrides.model.is_none() => thread
+                    .model_selection
+                    .options
+                    .iter()
+                    .flatten()
+                    .map(OptionSelection::from)
+                    .collect(),
+                None => Vec::new(),
+            },
             favorite_models: SavedModelFavorites::current(cx),
             queue: detail.and_then(|detail| {
                 let workflow = &detail.queue_workflow;

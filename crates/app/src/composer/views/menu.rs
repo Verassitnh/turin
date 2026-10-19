@@ -486,7 +486,9 @@ impl ChatComposer {
                         "No skills found. Try / to browse provider commands."
                     }
                     ComposerTriggerKind::Path => "No matching files or folders.",
-                    ComposerTriggerKind::PullRequest => "Finding pull request...",
+                    // The live composer does not supply pull requests yet, so an empty
+                    // list is final rather than a search in progress.
+                    ComposerTriggerKind::PullRequest => "No matching pull requests.",
                     ComposerTriggerKind::SlashCommand => "No matching command.",
                 }
             };

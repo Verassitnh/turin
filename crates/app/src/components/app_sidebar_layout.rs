@@ -605,7 +605,8 @@ impl AppSidebarLayout {
                 cx.notify();
             }
             CommandPaletteEvent::OpenProject { project_key } => {
-                // The project's most recent thread, else a new one.
+                // The project's most recent thread, unless it is settled (finished):
+                // then, as upstream does, open a new thread instead.
                 let snapshot = self.store.read(cx).snapshot().clone();
                 let latest = snapshot
                     .threads
@@ -614,6 +615,10 @@ impl AppSidebarLayout {
                         thread.archived_at.is_none() && thread.project_key() == *project_key
                     })
                     .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+                    .filter(|thread| {
+                        thread.settled_override
+                            != Some(crate::state::models::SettledOverride::Settled)
+                    })
                     .map(|thread| thread.key());
                 match latest {
                     Some(key) => {

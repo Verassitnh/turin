@@ -278,7 +278,7 @@ impl ChatComposer {
                     .child(name.clone())
                     .into_any_element();
                 div()
-                    .id(("composer-image", image.id.len()))
+                    .id(("composer-image", attachment_key(&image.id)))
                     .group("attachment")
                     .relative()
                     .size(rems(4.))
@@ -308,7 +308,7 @@ impl ChatComposer {
                         fallback,
                     })
                     .child(self.remove_button(
-                        ("remove-image", image.id.len()),
+                        ("remove-image", attachment_key(&image.id)),
                         format!("Remove {name}"),
                         {
                             let id = id.clone();
@@ -328,7 +328,7 @@ impl ChatComposer {
                 let id = file.id.clone();
                 let name = file.name.clone();
                 div()
-                    .id(("composer-file", file.id.len()))
+                    .id(("composer-file", attachment_key(&file.id)))
                     .flex()
                     .h(rems(2.))
                     .max_w(rems(16.))
@@ -361,7 +361,7 @@ impl ChatComposer {
                     )
                     .child(
                         div()
-                            .id(("remove-file", file.id.len()))
+                            .id(("remove-file", attachment_key(&file.id)))
                             .flex()
                             .size(rems(1.25))
                             .items_center()
@@ -724,4 +724,13 @@ impl ChatComposer {
             }
         }
     }
+}
+
+/// A per-attachment element id. Hashing the whole id keeps two attachments with
+/// same-length names (e.g. two `pasted-image.png`) from sharing one GPUI element id.
+fn attachment_key(id: &str) -> usize {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish() as usize
 }

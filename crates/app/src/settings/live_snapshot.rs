@@ -68,7 +68,7 @@ fn keybindings_vm(state: &KeybindingsConfigState, config_path: String) -> Keybin
         rules: state
             .keybindings
             .iter()
-            .map(resolved_keybinding_rule)
+            .filter_map(resolved_keybinding_rule)
             .collect(),
         issues: state
             .issues
@@ -95,15 +95,16 @@ fn keybindings_vm(state: &KeybindingsConfigState, config_path: String) -> Keybin
     }
 }
 
-fn resolved_keybinding_rule(rule: &ResolvedKeybinding) -> ResolvedKeybindingRule {
-    let shortcut = runtime_shortcut_expression(&rule.shortcut);
-    let shortcut = turin_shared::keybindings::parse_keybinding_shortcut(&shortcut)
-        .unwrap_or_else(|| panic!("runtime keybinding should round-trip: {shortcut}"));
-    ResolvedKeybindingRule {
+/// Converts a runtime rule to the shared shape. A rule that does not re-parse is
+/// skipped rather than crashing the Settings window.
+fn resolved_keybinding_rule(rule: &ResolvedKeybinding) -> Option<ResolvedKeybindingRule> {
+    let expression = runtime_shortcut_expression(&rule.shortcut);
+    let shortcut = turin_shared::keybindings::parse_keybinding_shortcut(&expression)?;
+    Some(ResolvedKeybindingRule {
         command: rule.command.clone(),
         shortcut,
         when_ast: rule.when_ast.clone(),
-    }
+    })
 }
 
 fn runtime_shortcut_expression(
@@ -125,7 +126,12 @@ fn runtime_shortcut_expression(
     if shortcut.mod_key {
         parts.push("mod");
     }
-    parts.push(shortcut.key.as_str());
+    // The space key is `" "` in memory but must be spelled `space` to survive the
+    // `+`-joined round trip (a bare space leaves an empty token).
+    parts.push(match shortcut.key.as_str() {
+        " " => "space",
+        other => other,
+    });
     parts.join("+")
 }
 

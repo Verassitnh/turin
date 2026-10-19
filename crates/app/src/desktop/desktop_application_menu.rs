@@ -6,7 +6,15 @@ use gpui_kit::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, action
 use crate::branding::APP_BASE_NAME;
 actions!(
     desktop_menu,
-    [OpenSettings, ToggleFullScreen, QuitApplication, CloseWindow,]
+    [
+        OpenSettings,
+        ToggleFullScreen,
+        QuitApplication,
+        CloseWindow,
+        HideApplication,
+        HideOtherApplications,
+        ShowAllApplications,
+    ]
 );
 
 /// Registers upstream menu accelerators app-wide (no key context), so they
@@ -17,6 +25,8 @@ pub fn bind_menu_keys(cx: &mut App) {
         KeyBinding::new("cmd-comma", OpenSettings, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-h", HideApplication, None),
+        KeyBinding::new("alt-cmd-h", HideOtherApplications, None),
         // The shell binds Cmd-Q to the hold-to-quit flow; this is the fallback
         // with no shell focused (settings window, or no window at all).
         KeyBinding::new("cmd-q", QuitApplication, None),
@@ -37,9 +47,9 @@ pub fn install_native_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action(format!("Hide {APP_BASE_NAME}"), gpui_kit::NoAction).disabled(true),
-            MenuItem::action("Hide Others", gpui_kit::NoAction).disabled(true),
-            MenuItem::action("Show All", gpui_kit::NoAction).disabled(true),
+            MenuItem::action(format!("Hide {APP_BASE_NAME}"), HideApplication),
+            MenuItem::action("Hide Others", HideOtherApplications),
+            MenuItem::action("Show All", ShowAllApplications),
             MenuItem::separator(),
             MenuItem::action(format!("Quit {APP_BASE_NAME}"), QuitApplication),
         ]));

@@ -21,7 +21,8 @@ use super::turn_item::{
     PlanStepStatus, ProjectedTurnItem, ProjectedVisibility, ProviderApprovalDecision,
     ProviderApprovalOption, ProviderFailure, ProviderFailureClass, ProviderRequestKind,
     ProviderRetry, ToolActivityIcon, ToolActivitySource, ToolActivitySurface, TurnItem,
-    TurnItemPayload, TurnItemStatus, UserInputQuestion, UserInputQuestionOption,
+    TurnItemPayload, TurnItemStatus, UserInputAnswerPayload, UserInputQuestion,
+    UserInputQuestionOption,
 };
 use super::types::{
     Actor, AttemptStatus, ChatAttachment, CreationSource, InputIntent, PendingApproval,
@@ -118,6 +119,41 @@ fn approval_option(value: &Value) -> Option<ProviderApprovalOption> {
         decision,
         label: text(value, "label")?,
         warning: text(value, "warning"),
+    })
+}
+
+/// The `questionAnswer` the server stores on a resolved user-input item (absent while unanswered).
+fn question_answer(value: &Value) -> Option<UserInputAnswerPayload> {
+    let answer = value.get("questionAnswer")?;
+    let entries = |key: &str| -> Vec<(String, Value)> {
+        answer
+            .get(key)
+            .and_then(Value::as_object)
+            .map(|map| map.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    };
+    Some(UserInputAnswerPayload {
+        request_id: text(answer, "requestId")?,
+        question_text_by_id: entries("questionTextById")
+            .into_iter()
+            .filter_map(|(id, label)| Some((id, label.as_str()?.to_owned())))
+            .collect(),
+        answers: entries("answers"),
+        attachments_by_question_id: entries("attachmentsByQuestionId")
+            .into_iter()
+            .map(|(id, files)| {
+                let names = files
+                    .as_array()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("name")?.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (id, names)
+            })
+            .collect(),
     })
 }
 
@@ -235,7 +271,7 @@ fn payload(value: &Value) -> Option<TurnItemPayload> {
                 .and_then(Value::as_array)
                 .map(|questions| questions.iter().filter_map(question).collect())
                 .unwrap_or_default(),
-            question_answer: None,
+            question_answer: question_answer(value),
         },
         "system_notice" => TurnItemPayload::SystemNotice {
             message: text(value, "message")?,

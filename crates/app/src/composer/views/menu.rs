@@ -105,11 +105,11 @@ fn build_menu_items(vm: &ComposerViewModel, trigger: &ComposerTrigger) -> Vec<Co
                     })
                     .collect()
             };
+            // The source ranks and limits the matches (a subsequence match is a
+            // match), so they are shown as they come (`composerMenuItems`).
             let paths = vm
                 .path_entries
                 .iter()
-                .filter(|entry| query.is_empty() || entry.path.to_lowercase().contains(&query))
-                .take(40)
                 .map(|entry| ComposerCommandItem::Path {
                     id: format!(
                         "path:{}:{}",
@@ -486,7 +486,9 @@ impl ChatComposer {
                         "No skills found. Try / to browse provider commands."
                     }
                     ComposerTriggerKind::Path => "No matching files or folders.",
-                    ComposerTriggerKind::PullRequest => "Finding pull request...",
+                    // The live composer does not supply pull requests yet, so an empty
+                    // list is final rather than a search in progress.
+                    ComposerTriggerKind::PullRequest => "No matching pull requests.",
                     ComposerTriggerKind::SlashCommand => "No matching command.",
                 }
             };
@@ -677,5 +679,57 @@ fn source_icon(kind: ProviderSkillSourceKind) -> IconName {
         ProviderSkillSourceKind::Personal => IconName::UserRound,
         ProviderSkillSourceKind::System => IconName::Settings,
         ProviderSkillSourceKind::Other => IconName::Package,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::composer::view_model::PathEntry;
+
+    #[test]
+    fn the_sources_ranked_paths_are_shown_even_when_they_are_not_substrings() {
+        let vm = ComposerViewModel {
+            path_entries: vec![
+                PathEntry {
+                    path: "composer/".into(),
+                    kind: PathKind::Directory,
+                },
+                PathEntry {
+                    path: "src/composer/menu.rs".into(),
+                    kind: PathKind::File,
+                },
+            ],
+            ..ComposerViewModel::default()
+        };
+        // "cmpsr" is a subsequence of both, a substring of neither.
+        let trigger = ComposerTrigger {
+            kind: ComposerTriggerKind::Path,
+            query: "cmpsr".into(),
+            range_start: 0,
+            range_end: 6,
+        };
+        let items = build_menu_items(&vm, &trigger);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn more_than_forty_matches_are_not_cut_off() {
+        let vm = ComposerViewModel {
+            path_entries: (0..80)
+                .map(|n| PathEntry {
+                    path: format!("src/file{n}.rs"),
+                    kind: PathKind::File,
+                })
+                .collect(),
+            ..ComposerViewModel::default()
+        };
+        let trigger = ComposerTrigger {
+            kind: ComposerTriggerKind::Path,
+            query: "file".into(),
+            range_start: 0,
+            range_end: 5,
+        };
+        assert_eq!(build_menu_items(&vm, &trigger).len(), 80);
     }
 }

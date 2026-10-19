@@ -143,6 +143,33 @@ impl Default for SidebarSettings {
     }
 }
 
+impl SidebarSettings {
+    /// The slice of the saved client settings the sidebar reads
+    /// (`useSettings()` in Sidebar.tsx).
+    pub fn from_client(settings: &turin_contracts::settings::ClientSettings) -> Self {
+        use turin_contracts::settings::SidebarProjectSortOrder;
+        Self {
+            working_shelf_enabled: settings.sidebar_working_shelf_enabled,
+            timestamp_format: match settings.timestamp_format {
+                turin_contracts::settings::TimestampFormat::Locale => TimestampFormat::Locale,
+                turin_contracts::settings::TimestampFormat::TwelveHour => {
+                    TimestampFormat::TwelveHour
+                }
+                turin_contracts::settings::TimestampFormat::TwentyFourHour => {
+                    TimestampFormat::TwentyFourHour
+                }
+            },
+            confirm_thread_delete: settings.confirm_thread_delete,
+            confirm_thread_archive: settings.confirm_thread_archive,
+            project_sort_order: match settings.sidebar_project_sort_order {
+                SidebarProjectSortOrder::UpdatedAt => ProjectSortOrder::UpdatedAt,
+                SidebarProjectSortOrder::CreatedAt => ProjectSortOrder::CreatedAt,
+                SidebarProjectSortOrder::Manual => ProjectSortOrder::Manual,
+            },
+        }
+    }
+}
+
 /// Everything the sidebar renders from.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SidebarSnapshot {
@@ -314,6 +341,14 @@ pub trait SidebarBackend {
     fn archive(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome>;
     fn delete(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome>;
     fn discard_draft(&self, draft_id: String, cx: &mut App);
+    /// The saved client settings changed (`useSettings()`); backends that
+    /// build their own snapshots fold them in. The mock ignores them.
+    fn apply_client_settings(
+        &self,
+        _settings: &turin_contracts::settings::ClientSettings,
+        _cx: &mut App,
+    ) {
+    }
     fn set_project_scope(&self, project_key: Option<String>, cx: &mut App);
     fn set_shelf_expanded(&self, shelf: Shelf, expanded: bool, cx: &mut App);
     /// `useThreadSearch`: server message hits (two-character floor, debounced

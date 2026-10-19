@@ -13,11 +13,12 @@ pub fn poll_environment_notifications(
     environment_ids: &[EnvironmentId],
     snapshot: Option<&ClientState>,
     settings: &ClientSettings,
+    window_focused: bool,
 ) {
     coordinator.sync_mode(settings);
     let _ = environment_ids;
     let pending = snapshot.map(pending_notification_count).unwrap_or(0);
-    coordinator.set_pending_count(pending, settings.notification_mode);
+    coordinator.set_pending_count(pending, settings.notification_mode, window_focused);
 }
 
 /// Threads that need attention for the dock badge (approvals and user input).

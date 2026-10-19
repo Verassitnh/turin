@@ -432,6 +432,112 @@ impl ComposerDraftStore {
     }
 }
 
+/// Ids for attachments and stash entries, unique for the process because the
+/// draft store outlives any one composer.
+pub fn next_composer_serial() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A [`ComposerDraftStore`] shared by every composer in the window, so a
+/// thread's prompt, attachments and the stash survive the composer being
+/// rebuilt when the user switches threads (upstream's store is a global).
+#[derive(Debug, Clone, Default)]
+pub struct SharedDraftStore(std::rc::Rc<std::cell::RefCell<ComposerDraftStore>>);
+
+impl SharedDraftStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The store every live composer shares: the shell's draft host when it
+    /// exists, else one kept for the process.
+    pub fn global(cx: &mut gpui_kit::App) -> Self {
+        struct Fallback(SharedDraftStore);
+        impl gpui_kit::Global for Fallback {}
+        if let Some(host) =
+            cx.try_global::<crate::shell::composer_draft_host::ComposerDraftHostGlobal>()
+        {
+            let host = host.0.clone();
+            return host.read(cx).store.clone();
+        }
+        if let Some(fallback) = cx.try_global::<Fallback>() {
+            return fallback.0.clone();
+        }
+        let store = Self::new();
+        cx.set_global(Fallback(store.clone()));
+        store
+    }
+
+    pub fn get_composer_draft(&self, thread_key: &str) -> Option<ComposerThreadDraft> {
+        self.0.borrow().get_composer_draft(thread_key).cloned()
+    }
+
+    pub fn set_prompt(&self, thread_key: &str, prompt: &str) {
+        self.0.borrow_mut().set_prompt(thread_key, prompt);
+    }
+
+    pub fn replace_composer_draft(&self, thread_key: &str, draft: ComposerThreadDraft) {
+        self.0
+            .borrow_mut()
+            .replace_composer_draft(thread_key, draft);
+    }
+
+    pub fn set_model_selection(
+        &self,
+        thread_key: &str,
+        selection: DraftModelSelection,
+        explicit: bool,
+        replace_options: bool,
+    ) {
+        self.0
+            .borrow_mut()
+            .set_model_selection(thread_key, selection, explicit, replace_options);
+    }
+
+    pub fn add_images(
+        &self,
+        thread_key: &str,
+        images: Vec<ComposerImageAttachment>,
+        options: AddAttachmentsOptions,
+    ) -> Vec<String> {
+        self.0.borrow_mut().add_images(thread_key, images, options)
+    }
+
+    pub fn remove_image(&self, thread_key: &str, image_id: &str) {
+        self.0.borrow_mut().remove_image(thread_key, image_id);
+    }
+
+    pub fn add_files(
+        &self,
+        thread_key: &str,
+        files: Vec<ComposerFileAttachment>,
+        options: AddAttachmentsOptions,
+    ) -> Vec<String> {
+        self.0.borrow_mut().add_files(thread_key, files, options)
+    }
+
+    pub fn remove_file(&self, thread_key: &str, file_id: &str) {
+        self.0.borrow_mut().remove_file(thread_key, file_id);
+    }
+
+    pub fn clear_composer_content(&self, thread_key: &str) {
+        self.0.borrow_mut().clear_composer_content(thread_key);
+    }
+
+    pub fn stash_entries(&self) -> Vec<PromptStashEntry> {
+        self.0.borrow().stash_entries().to_vec()
+    }
+
+    pub fn push_stash_entry(&self, entry: PromptStashEntry) {
+        self.0.borrow_mut().push_stash_entry(entry);
+    }
+
+    pub fn remove_stash_entry(&self, id: &str) -> Option<PromptStashEntry> {
+        self.0.borrow_mut().remove_stash_entry(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,5 +766,35 @@ mod tests {
         let removed = store.remove_stash_entry("s22").unwrap();
         assert_eq!(removed.prompt, "p22");
         assert!(store.remove_stash_entry("s22").is_none());
+    }
+
+    #[test]
+    fn a_shared_store_keeps_drafts_and_the_stash_across_composers() {
+        let drafts = SharedDraftStore::new();
+        let first = drafts.clone();
+        first.set_prompt("local:a", "draft a");
+        first.add_images(
+            "local:a",
+            vec![image("i1", "a.png")],
+            AddAttachmentsOptions::default(),
+        );
+        first.push_stash_entry(PromptStashEntry {
+            id: format!("stash-{}", next_composer_serial()),
+            created_at: String::new(),
+            prompt: "stashed".into(),
+            images: Vec::new(),
+            files: Vec::new(),
+            dropped_image_names: Vec::new(),
+            unreadable_image_names: Vec::new(),
+            pending_image_count: 0,
+        });
+        drop(first);
+        // Thread B's composer, built later, reads thread A's draft and the stash.
+        let second = drafts.clone();
+        let draft = second.get_composer_draft("local:a").unwrap();
+        assert_eq!(draft.prompt, "draft a");
+        assert_eq!(draft.images.len(), 1);
+        assert_eq!(second.stash_entries().len(), 1);
+        assert_ne!(next_composer_serial(), next_composer_serial());
     }
 }

@@ -62,11 +62,13 @@ pub trait FirstRunBackend {
     /// `onboardingCompletedAt`. `Err` is a failed save.
     fn complete_onboarding(&self, cx: &mut App) -> Task<Result<(), ()>>;
 
-    /// `ensureClientSettingsHydrated` (the recovery screen's Retry).
-    fn retry_settings(&self, cx: &mut App);
+    /// `ensureClientSettingsHydrated` (the recovery screen's Retry). Resolves once the read
+    /// settled and `evidence()` reflects it, so the gate can re-render.
+    fn retry_settings(&self, cx: &mut App) -> Task<()>;
 
-    /// The recovery screen's Reload for a stalled connection.
-    fn reload(&self, cx: &mut App);
+    /// The recovery screen's Reload for a stalled connection: upstream reloads the window, which
+    /// re-reads the settings and re-evaluates the evidence. Resolves once `evidence()` is fresh.
+    fn reload(&self, cx: &mut App) -> Task<()>;
 }
 
 #[derive(Clone, Debug)]

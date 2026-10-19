@@ -1,7 +1,7 @@
 //! Port of upstream/apps/web/src/components/settings/SettingsSidebarNav.tsx.
 
-use gpui_kit::component::input::Input;
 use gpui_kit::Focusable;
+use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, CursorStyle, ElementId, FontWeight, InteractiveElement as _, IntoElement,

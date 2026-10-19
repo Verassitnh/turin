@@ -19,10 +19,7 @@ pub mod assistant_citation_source;
 pub mod assistant_citation_target;
 pub mod assistant_selection_state;
 pub mod assistant_selection_toolbar;
-pub mod question_attachment_drafts;
-pub mod question_attachment_submit;
 pub mod markdown_thread_link;
-pub mod thread_navigation;
 pub mod changed_files_tree;
 pub mod chat_canvas;
 #[allow(dead_code)]
@@ -32,6 +29,9 @@ pub mod chat_header;
 pub mod chat_overlay_banners;
 #[allow(dead_code)]
 pub mod context_window;
+pub mod question_attachment_drafts;
+pub mod question_attachment_submit;
+pub mod thread_navigation;
 // Chat-lane geometry for the canvas.
 pub mod chat_canvas_layout;
 pub mod provider_status_banner;
@@ -92,9 +92,9 @@ pub mod draft_hero_transition;
 #[allow(dead_code)]
 pub mod folder_drop;
 pub mod live_chat;
+pub mod live_composer_derive;
 pub mod live_lineage;
 pub mod live_wiring;
-pub mod timeline_page_scroll;
 pub mod markdown;
 #[allow(dead_code)]
 pub mod markdown_clipboard;
@@ -106,6 +106,7 @@ pub mod open_in_picker;
 pub mod panel_layout_controls;
 #[allow(dead_code)]
 pub mod pending_draft_work;
+pub mod timeline_page_scroll;
 // Pure scroll state machine; the timeline view does not drive page keys yet.
 #[allow(dead_code)]
 pub mod page_scroll_controller;

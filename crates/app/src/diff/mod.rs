@@ -23,6 +23,7 @@ pub mod diff_rendering;
 pub mod diff_worker_pool;
 pub mod file_tree;
 pub mod highlight;
+pub mod live_source;
 pub mod menu;
 pub mod mock_fixtures;
 pub mod mock_source;

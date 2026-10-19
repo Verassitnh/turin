@@ -312,3 +312,26 @@ fn project_search_items_describe_grouped_projects_by_their_environments() {
     );
     assert!(items[0].search_terms.contains(&"Local".to_owned()));
 }
+
+#[test]
+fn the_live_palette_lists_no_command_it_cannot_run() {
+    let (mut snapshot, _, _) = snapshot();
+    // What the mock backend (and so the live one, before the filter) advertises.
+    snapshot.scratch_thread_available = true;
+    snapshot.supports_thread_find = true;
+    let snapshot =
+        crate::components::command_palette::live_source::hide_unported_commands(snapshot);
+    let context = PaletteContext {
+        active_thread_key: Some("local:t1".to_owned()),
+        active_draft_project_key: None,
+    };
+    let model = PaletteModel::new(&snapshot, &context, true);
+    let items = build_action_items(&model);
+    let ids = values(&items);
+    assert!(
+        !ids.contains(&"action:new-thread-without-project"),
+        "{ids:?}"
+    );
+    // The find bar is live, so the palette keeps its row.
+    assert!(ids.contains(&"find-current-thread"), "{ids:?}");
+}

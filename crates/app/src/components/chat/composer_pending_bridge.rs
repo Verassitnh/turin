@@ -24,13 +24,16 @@ pub struct ComposerPendingInputSession {
     pub responding: bool,
 }
 
-pub fn message_mode_pending_input<'a>(
-    requests: &'a PendingThreadRequests,
-) -> Option<&'a ThreadPendingUserInput> {
+/// The question the composer answers: the first pending one that can be
+/// answered (upstream `activePendingUserInput` serves every input but a
+/// not-resumable one, so a live question takes typed and multi-select answers too).
+pub fn message_mode_pending_input(
+    requests: &PendingThreadRequests,
+) -> Option<&ThreadPendingUserInput> {
     requests
         .user_inputs
-        .iter()
-        .find(|input| input.response_capability == UserInputResponseCapability::Message)
+        .first()
+        .filter(|input| input.response_capability != UserInputResponseCapability::NotResumable)
 }
 
 pub fn sync_pending_input_session(
@@ -129,8 +132,7 @@ pub fn pending_answer_for_message_input(
         answers.insert(qid, draft);
     }
     let answers = merge_attachment_counts(cx, environment_id, thread_id, input, answers);
-    let progress =
-        derive_pending_user_input_progress(&questions, &answers, question_index);
+    let progress = derive_pending_user_input_progress(&questions, &answers, question_index);
     let active = active.expect("message pending input always has a question");
     let choice_only = active.allow_custom_answer == Some(false) && !active.options.is_empty();
     PendingAnswer {
@@ -147,10 +149,7 @@ pub fn pending_answer_for_message_input(
     }
 }
 
-pub fn pending_action_state_for_prompt(
-    answer: &PendingAnswer,
-    prompt: &str,
-) -> PendingActionState {
+pub fn pending_action_state_for_prompt(answer: &PendingAnswer, prompt: &str) -> PendingActionState {
     let prompt_ready = !turin_contracts::base_schemas::js_trim(prompt).is_empty();
     PendingActionState {
         question_index: answer.question_index,
@@ -238,4 +237,48 @@ pub enum PendingSubmitPlan {
         request_id: String,
         answers: Vec<(String, String)>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use turin_contracts::{RuntimeRequestId, TrimmedNonEmptyString};
+
+    fn input(capability: UserInputResponseCapability) -> ThreadPendingUserInput {
+        ThreadPendingUserInput {
+            request_id: RuntimeRequestId::new("request-1").expect("id"),
+            created_at: String::new(),
+            questions: vec![ThreadUserInputQuestion {
+                id: TrimmedNonEmptyString::new("q").expect("id"),
+                header: TrimmedNonEmptyString::new("Q").expect("header"),
+                question: TrimmedNonEmptyString::new("Which?").expect("question"),
+                options: vec![],
+                multi_select: true,
+                allow_custom_answer: None,
+                initial_answer: None,
+                required: None,
+            }],
+            response_capability: capability,
+            response_mode: None,
+            dismissible: false,
+        }
+    }
+
+    /// Upstream answers every pending input in the composer, a live provider's
+    /// free-text and multi-select questions included.
+    #[test]
+    fn the_composer_answers_a_live_question() {
+        let requests = |capability| PendingThreadRequests {
+            approvals: vec![],
+            user_inputs: vec![input(capability)],
+        };
+        assert!(message_mode_pending_input(&requests(UserInputResponseCapability::Live)).is_some());
+        assert!(
+            message_mode_pending_input(&requests(UserInputResponseCapability::Message)).is_some()
+        );
+        assert!(
+            message_mode_pending_input(&requests(UserInputResponseCapability::NotResumable))
+                .is_none()
+        );
+    }
 }

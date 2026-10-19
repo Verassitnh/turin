@@ -21,6 +21,7 @@ use gpui_kit::{
 };
 
 use super::runtime::thread_settled::can_snooze;
+use super::sidebar_logic::should_navigate_after_archive;
 use super::sidebar_logic::{
     CommandOutcome, ContextMenuItem, ParkAction, build_bulk_title_regeneration_context_menu_item,
     build_bulk_unpin_context_menu_item, delete_selected_thread_entries,
@@ -323,9 +324,20 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Fresh pins take the top of the arranged run (the backend computes
-        // a key before the smallest key across all pins, hidden ones too).
-        let task = self.backend.pin(thread, None, cx);
+        // Fresh pins take the top of the arranged run: a key before the smallest
+        // existing pin key (`topOfPinnedRunOrderKey`). With no pins yet, no key is
+        // sent and the backend's default applies.
+        let top_key = {
+            let first = self
+                .snapshot(cx)
+                .threads
+                .iter()
+                .filter(|shell| shell.pinned_at.is_some())
+                .filter_map(|shell| shell.pin_order_key.as_deref())
+                .min();
+            super::runtime::thread_sort::pin_order_key_between(None, first)
+        };
+        let task = self.backend.pin(thread, top_key, cx);
         self.run_command(task, "Failed to pin thread", window, cx, |_, _, _, _| {});
     }
 
@@ -803,14 +815,28 @@ impl Sidebar {
                 self.toast_success("Thread ID copied", &thread_id, window, cx);
             }
             ThreadMenuPlan::Archive { confirm } => {
+                let archived_key = key.to_string();
+                let project_key = thread.project_key();
                 let run = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
                     let task = this.backend.archive(thread_ref.clone(), cx);
+                    let key = archived_key.clone();
+                    let project_key = project_key.clone();
                     this.run_command(
                         task,
                         "Failed to archive thread",
                         window,
                         cx,
-                        |_, _, _, _| {},
+                        move |this, ok, _, cx| {
+                            // `archiveThread`: archiving the open thread moves the
+                            // reader to a new thread in its project.
+                            if ok && should_navigate_after_archive(this.route_thread_key(), &key) {
+                                cx.emit(SidebarEvent::NewThread {
+                                    project_key: Some(project_key),
+                                    branch: None,
+                                    worktree_path: None,
+                                });
+                            }
+                        },
                     );
                 };
                 match confirm {

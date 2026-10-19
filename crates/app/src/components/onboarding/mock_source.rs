@@ -231,9 +231,13 @@ impl FirstRunBackend for MockOnboardingBackend {
         })
     }
 
-    fn retry_settings(&self, _: &mut App) {}
+    fn retry_settings(&self, _: &mut App) -> Task<()> {
+        Task::ready(())
+    }
 
-    fn reload(&self, _: &mut App) {}
+    fn reload(&self, _: &mut App) -> Task<()> {
+        Task::ready(())
+    }
 }
 
 impl OnboardingBackend for MockOnboardingBackend {

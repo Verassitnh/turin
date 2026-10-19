@@ -22,17 +22,28 @@ use super::fixtures::{FixtureThread, startup_thread, with_pending_question};
 use super::session_logic::{TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items};
 use super::turn_item::{ProviderApprovalDecision, TurnItemPayload};
 use super::types::{RunStatus, ThreadTimelineSnapshot};
+use crate::components::chat::pending_user_input::PendingUserInputDraftAnswer;
 
 /// User responses the view sends back to whatever owns the thread.
 /// Delivered with the saved relative path, or the failure message.
 pub type WriteDone = Box<dyn FnOnce(Result<String, String>, &mut App)>;
 
+/// The answer drafts of the pending question: where it is, and what is picked or typed.
+#[derive(Debug, Clone, Default)]
+pub struct PendingInputSession {
+    pub question_index: usize,
+    pub answers: std::collections::HashMap<String, PendingUserInputDraftAnswer>,
+}
+
 pub trait TimelineSource: 'static {
-    /// `onRespondToApproval`.
+    /// `onRespondToApproval`. `failed` runs when the response did not go
+    /// through, so the drawer can offer the buttons again (upstream clears
+    /// `respondingRequestIds` in `finally`).
     fn respond_to_approval(
         &self,
         request_id: &str,
         decision: ProviderApprovalDecision,
+        failed: Box<dyn FnOnce(&mut App)>,
         cx: &mut App,
     );
     /// The composer's pending-user-input submit: answers keyed by question id.
@@ -45,12 +56,30 @@ pub trait TimelineSource: 'static {
     ) -> bool;
     /// `onDismissActivePendingUserInput`.
     fn dismiss_user_input(&self, request_id: &str, cx: &mut App);
+    /// The question index and drafts the composer answers from, shared with
+    /// the drawer so options picked there reach the composer's Next/Submit
+    /// (upstream keeps one set of drafts in `ChatView`). `None` when the
+    /// source keeps no session; the drawer then keeps its own.
+    fn pending_input_session(&self, _request_id: &str) -> Option<PendingInputSession> {
+        None
+    }
+    /// Edits that session; false when the source keeps none.
+    fn edit_pending_input_session(
+        &self,
+        _request_id: &str,
+        _edit: &mut dyn FnMut(&mut PendingInputSession),
+        _cx: &mut App,
+    ) -> bool {
+        false
+    }
     /// `onRevertToTurnCount` ("Edit from here").
     fn revert_to_turn_count(&self, turn_count: u64, message_id: &str, cx: &mut App);
     /// `onOpenTurnDiff`: the diff panel for a run (and file).
     fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, cx: &mut App);
     /// `onOpenThread`: navigate to another thread (subagents, created threads).
     fn open_thread(&self, thread_id: &str, cx: &mut App);
+    /// `historyControls.onLoadEarlier`: fetch the next older page of turns.
+    fn load_earlier_history(&self, _cx: &mut App) {}
     /// `AuthFilesystemWriteScope` for the thread's environment: whether the plan card may
     /// save into the workspace.
     fn can_write_workspace_files(&self) -> bool {
@@ -240,6 +269,7 @@ impl TimelineSource for MockTimelineSource {
         &self,
         request_id: &str,
         decision: ProviderApprovalDecision,
+        _failed: Box<dyn FnOnce(&mut App)>,
         cx: &mut App,
     ) {
         tracing::info!(request_id, ?decision, "mock: approval response");

@@ -145,10 +145,13 @@ impl ProviderDriver for CursorDriver {
         &self,
         input: ProviderDriverCreateInput,
     ) -> Result<ProviderInstance, ProviderDriverError> {
-        let settings = CursorSettings::from_value(input.config.clone())
+        let mut settings = CursorSettings::from_value(input.config.clone())
             .map_err(|error| driver_error(&self.kind, &input.instance_id, error.to_string()))?;
+        // Upstream: `effectiveConfig = { ...config, enabled }`. The instance envelope
+        // flag is the only source of truth (the settings fold strips `config.enabled`).
+        settings.enabled = input.enabled;
         let adapter = CursorAdapter::from_settings(input.instance_id.clone(), &settings);
-        let enabled = settings.enabled && input.enabled;
+        let enabled = input.enabled;
         let environment = merge_provider_instance_environment(
             Some(&input.environment),
             &HostProcess::current().environment,
@@ -637,5 +640,29 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "Enable Cursor before signing in.");
+    }
+
+    /// The settings service folds `config.enabled` into the envelope, so the
+    /// stored form has `enabled: true` on the envelope and none in `config`.
+    #[tokio::test]
+    async fn envelope_enabled_flag_wins_over_folded_config() {
+        for config in [
+            json!({}),
+            json!({"binaryPath": "/nonexistent/turin-cursor-agent-for-tests"}),
+        ] {
+            let id = ProviderInstanceId::new("cursor").unwrap();
+            let mut map = ProviderInstanceConfigMap::default();
+            map.insert(id.clone(), entry(config));
+            let registry = ProviderInstanceRegistry::new(
+                vec![Arc::new(CursorDriver::new()) as Arc<dyn ProviderDriver>],
+                map,
+            )
+            .await;
+            let instance = registry.get_instance(&id).unwrap();
+            assert!(instance.enabled);
+            let refreshed = instance.snapshot.refresh().await;
+            assert!(refreshed.draft.enabled);
+            assert_ne!(refreshed.draft.status, ServerProviderState::Disabled);
+        }
     }
 }

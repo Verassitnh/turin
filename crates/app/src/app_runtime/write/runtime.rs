@@ -66,13 +66,6 @@ use turin_orchestration::reactors::workspace_claims::ProjectionWorkspaceClaims;
 use turin_provider_core::id_allocator::IdAllocator;
 use turin_provider_core::provider_adapter_registry::ProviderAdapterRegistry;
 use turin_provider_core::provider_continuation_requests::ProviderContinuationRequests;
-use turin_providers::provider_auth_service::ProviderAuthService;
-use turin_providers::provider_installation::ProviderInstallation;
-use turin_providers::provider_maintenance_runner::ProviderMaintenanceRunner;
-use turin_runtime::keybindings::Keybindings;
-use turin_runtime::server_settings::ServerSettingsService;
-use turin_runtime::storage_cleanup::StorageCleanup;
-use turin_source_control::source_control::discovery::SourceControlDiscovery;
 
 use super::adapters::{
     HostSettings, IntakeThreads, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes,
@@ -106,6 +99,8 @@ pub struct WriteRuntime {
     pub source_control_discovery:
         Arc<turin_source_control::source_control::discovery::SourceControlDiscovery>,
     pub git: Arc<turin_git::git_vcs_driver_core::GitVcsDriverCore>,
+    /// Reads checkpoint refs for the diff panel.
+    pub checkpoint_store: Arc<turin_git::checkpointing::checkpoint_store::CheckpointStore>,
     pub git_manager: Arc<turin_git::git_manager::GitManager>,
     pub pull_requests: Arc<turin_source_control::pull_request::service::PullRequestService>,
     pub review_guides: Arc<
@@ -226,10 +221,16 @@ impl WriteRuntime {
         let projects = Arc::new(StoredProjects(Arc::clone(&stores.projects)));
 
         // Checkpoints: hidden git refs per run. Non-git workspaces skip capture.
+        let checkpoint_driver = Arc::new(GitVcsDriver::new(
+            turin_git::vcs_process::VcsProcess::new(ProcessRunner),
+        ));
+        let checkpoint_store = Arc::new(
+            turin_git::checkpointing::checkpoint_store::CheckpointStore::new(
+                checkpoint_driver.clone(),
+            ),
+        );
         let checkpoints = Arc::new(CheckpointService::new(Arc::new(TurinCheckpointGit::new(
-            Arc::new(GitVcsDriver::new(turin_git::vcs_process::VcsProcess::new(
-                ProcessRunner,
-            ))),
+            checkpoint_driver,
         ))));
         let capture = Arc::new(CheckpointCaptureService::new(
             Arc::clone(&checkpoints),
@@ -440,6 +441,7 @@ impl WriteRuntime {
             intake,
             attachments_dir,
             workspace_entries: super::path_search::workspace_entries(),
+            checkpoint_store,
             sessions,
             effects,
             _continuations: continuations,
@@ -450,6 +452,7 @@ impl WriteRuntime {
 
     /// Publish the latest persisted settings. Read under the same bridge gate as
     /// file reloads so an older notification cannot replace a newer patch.
+    #[allow(clippy::result_large_err)]
     pub async fn sync_provider_settings(
         &self,
     ) -> Result<ServerSettings, turin_contracts::settings::ServerSettingsError> {

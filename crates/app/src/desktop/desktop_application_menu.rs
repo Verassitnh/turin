@@ -8,31 +8,28 @@ actions!(
     desktop_menu,
     [
         OpenSettings,
-        PasteAsText,
-        Reload,
-        ForceReload,
-        ToggleDevTools,
-        ZoomIn,
-        ZoomOut,
-        ZoomReset,
+        ToggleFullScreen,
         QuitApplication,
         CloseWindow,
+        HideApplication,
+        HideOtherApplications,
+        ShowAllApplications,
     ]
 );
 
-/// Registers upstream menu accelerators on the app shell context.
-pub fn bind_menu_keys(cx: &mut App, context: &'static str) {
+/// Registers upstream menu accelerators app-wide (no key context), so they
+/// work in the settings window too. The shell handles them when focused; the
+/// app-level handlers in `main.rs` otherwise.
+pub fn bind_menu_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-comma", OpenSettings, Some(context)),
-        KeyBinding::new("cmd-shift-v", PasteAsText, Some(context)),
-        KeyBinding::new("cmd-r", Reload, Some(context)),
-        KeyBinding::new("cmd-shift-r", ForceReload, Some(context)),
-        KeyBinding::new("cmd-alt-i", ToggleDevTools, Some(context)),
-        KeyBinding::new("cmd-0", ZoomReset, Some(context)),
-        KeyBinding::new("cmd-=", ZoomIn, Some(context)),
-        KeyBinding::new("cmd-plus", ZoomIn, Some(context)),
-        KeyBinding::new("cmd--", ZoomOut, Some(context)),
-        KeyBinding::new("cmd-w", CloseWindow, Some(context)),
+        KeyBinding::new("cmd-comma", OpenSettings, None),
+        KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
+        KeyBinding::new("cmd-h", HideApplication, None),
+        KeyBinding::new("alt-cmd-h", HideOtherApplications, None),
+        // The shell binds Cmd-Q to the hold-to-quit flow; this is the fallback
+        // with no shell focused (settings window, or no window at all).
+        KeyBinding::new("cmd-q", QuitApplication, None),
     ]);
 }
 
@@ -50,9 +47,9 @@ pub fn install_native_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action(format!("Hide {APP_BASE_NAME}"), gpui_kit::NoAction).disabled(true),
-            MenuItem::action("Hide Others", gpui_kit::NoAction).disabled(true),
-            MenuItem::action("Show All", gpui_kit::NoAction).disabled(true),
+            MenuItem::action(format!("Hide {APP_BASE_NAME}"), HideApplication),
+            MenuItem::action("Hide Others", HideOtherApplications),
+            MenuItem::action("Show All", ShowAllApplications),
             MenuItem::separator(),
             MenuItem::action(format!("Quit {APP_BASE_NAME}"), QuitApplication),
         ]));
@@ -66,7 +63,6 @@ pub fn install_native_menus(cx: &mut App) {
         MenuItem::os_action("Cut", gpui_kit::NoAction, OsAction::Cut),
         MenuItem::os_action("Copy", gpui_kit::NoAction, OsAction::Copy),
         MenuItem::os_action("Paste", gpui_kit::NoAction, OsAction::Paste),
-        MenuItem::action("Paste as Text", PasteAsText),
         MenuItem::os_action("Select All", gpui_kit::NoAction, OsAction::SelectAll),
         MenuItem::separator(),
         MenuItem::submenu(Menu::new("Speech").items([
@@ -74,17 +70,9 @@ pub fn install_native_menus(cx: &mut App) {
             MenuItem::action("Stop Speaking", gpui_kit::NoAction).disabled(true),
         ])),
     ]));
-    menus.push(Menu::new("View").items([
-        MenuItem::action("Reload", Reload),
-        MenuItem::action("Force Reload", ForceReload),
-        MenuItem::action("Toggle Developer Tools", ToggleDevTools),
-        MenuItem::separator(),
-        MenuItem::action("Actual Size", ZoomReset),
-        MenuItem::action("Zoom In", ZoomIn),
-        MenuItem::action("Zoom Out", ZoomOut),
-        MenuItem::separator(),
-        MenuItem::action("Toggle Full Screen", gpui_kit::NoAction).disabled(true),
-    ]));
+    // Reload, Force Reload, Developer Tools, zoom and Paste as Text have no
+    // native equivalent (no webview; GPUI pastes plain text). See PORTING.md.
+    menus.push(Menu::new("View").items([MenuItem::action("Toggle Full Screen", ToggleFullScreen)]));
     menus.push(Menu::new("Window").items([MenuItem::separator()]));
     menus.push(
         Menu::new("Help")

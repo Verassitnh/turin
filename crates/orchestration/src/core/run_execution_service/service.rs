@@ -19,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 use turin_contracts::{
     CommandId, NodeId, ProjectId, ProviderSessionId, ProviderThreadId, ProviderTurnId,
     RunAttemptId, RunId, ThreadId, TurnItemId,
-    base_schemas::js_trim,
     model_selection::ModelSelection,
     orchestration_v2::{
         OrchestrationV2AppThread, OrchestrationV2CheckpointScope, OrchestrationV2ExecutionNode,

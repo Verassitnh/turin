@@ -343,6 +343,9 @@ fn publish_parts(
     store: &RefCell<Option<Entity<SettingsStore>>>,
     cx: &mut App,
 ) {
+    if let Some(appearance) = runtime_appearance(cx) {
+        state.borrow_mut().vm.appearance = appearance;
+    }
     let vm = state.borrow().vm.clone();
     apply_appearance(&vm, cx);
     if let Some(store) = store.borrow().clone() {
@@ -350,11 +353,78 @@ fn publish_parts(
     }
 }
 
+/// `"system" | "light" | "dark"` for the Appearance panel's mode tiles.
+fn mode_name(mode: crate::theme::theme_palette::ThemePreferenceMode) -> &'static str {
+    use crate::theme::theme_palette::ThemePreferenceMode;
+    match mode {
+        ThemePreferenceMode::Light => "light",
+        ThemePreferenceMode::Dark => "dark",
+        ThemePreferenceMode::System => "system",
+    }
+}
+
+fn parse_mode(mode: &str) -> Option<crate::theme::theme_palette::ThemePreferenceMode> {
+    use crate::theme::theme_palette::ThemePreferenceMode;
+    match mode {
+        "light" => Some(ThemePreferenceMode::Light),
+        "dark" => Some(ThemePreferenceMode::Dark),
+        "system" => Some(ThemePreferenceMode::System),
+        _ => None,
+    }
+}
+
+/// The theme runtime's appearance (`useTheme()`), as the Appearance panel shows
+/// it. `None` when no runtime is installed.
+pub fn runtime_appearance(cx: &App) -> Option<super::view_model::AppearanceState> {
+    if !cx.has_global::<crate::theme::theme_runtime::ThemeRuntime>() {
+        return None;
+    }
+    let snapshot = crate::theme::theme_runtime::snapshot(cx);
+    Some(super::view_model::AppearanceState {
+        theme: snapshot.theme,
+        mode: mode_name(snapshot.appearance_mode).to_owned(),
+    })
+}
+
+/// `useTheme().setTheme(theme)`: persists the device-local preference and
+/// repaints the app. A no-op without a theme runtime.
+pub fn set_runtime_theme(theme: &str, cx: &mut App) {
+    if cx.has_global::<crate::theme::theme_runtime::ThemeRuntime>() {
+        crate::theme::theme_runtime::set_theme(theme, cx);
+    }
+}
+
+/// `useTheme().setAppearanceMode(mode)` for `"system" | "light" | "dark"`.
+pub fn set_runtime_appearance_mode(mode: &str, cx: &mut App) {
+    if let Some(mode) = parse_mode(mode)
+        && cx.has_global::<crate::theme::theme_runtime::ThemeRuntime>()
+    {
+        crate::theme::theme_runtime::set_appearance_mode(mode, cx);
+    }
+}
+
 /// What the live app does on every settings change: re-resolve the theme from
 /// the theme preference, contrast and font settings.
 pub fn apply_appearance(vm: &SettingsViewModel, cx: &mut App) {
+    apply_client_appearance(&vm.client, cx);
+}
+
+/// Applies the saved contrast and font settings to the app theme (at startup
+/// and whenever the client settings change).
+pub fn apply_client_appearance(client: &ClientSettings, cx: &mut App) {
+    let current = crate::theme::preferences(cx);
+    if let Some(next) = with_client_appearance(&current, client) {
+        crate::theme::set_preferences(next, cx);
+    }
+}
+
+/// `preferences` with the client settings' contrast and fonts, or `None` when
+/// they already match (nothing to repaint).
+fn with_client_appearance(
+    preferences: &crate::theme::AppearancePreferences,
+    client: &ClientSettings,
+) -> Option<crate::theme::AppearancePreferences> {
     use crate::theme::appearance_fonts::AppearanceFontPreferences;
-    let client = &vm.client;
     let fonts = AppearanceFontPreferences {
         sans: client.font_family_sans.as_str().to_owned(),
         code: client.font_family_code.as_str().to_owned(),
@@ -366,10 +436,14 @@ pub fn apply_appearance(vm: &SettingsViewModel, cx: &mut App) {
     };
     // The theme, appearance mode and light/dark mix belong to the theme runtime
     // (device-local, `useTheme`); settings only own contrast and fonts.
-    let mut preferences = crate::theme::preferences(cx);
-    preferences.contrast = client.appearance_contrast.get() as u32;
-    preferences.fonts = fonts;
-    crate::theme::set_preferences(preferences, cx);
+    let contrast = client.appearance_contrast.get() as u32;
+    if preferences.contrast == contrast && preferences.fonts == fonts {
+        return None;
+    }
+    let mut next = preferences.clone();
+    next.contrast = contrast;
+    next.fonts = fonts;
+    Some(next)
 }
 
 /// `{...target, ...patch}` over the settings' JSON, the way the client-settings
@@ -846,7 +920,8 @@ impl SettingsSource for MockSettingsSource {
     }
 
     fn set_theme(&self, theme: String, cx: &mut App) {
-        self.state.borrow_mut().vm.appearance.theme = theme;
+        self.state.borrow_mut().vm.appearance.theme = theme.clone();
+        set_runtime_theme(&theme, cx);
         self.publish(cx);
     }
 
@@ -860,8 +935,9 @@ impl SettingsSource for MockSettingsSource {
             ) {
                 state.vm.appearance.theme = mode.clone();
             }
-            state.vm.appearance.mode = mode;
+            state.vm.appearance.mode = mode.clone();
         }
+        set_runtime_appearance_mode(&mode, cx);
         self.publish(cx);
     }
 
@@ -1133,6 +1209,33 @@ mod tests {
                 "favorites": [{ "provider": "codex_work", "model": "favorite" }]
             }),
         )
+    }
+
+    #[test]
+    fn saved_contrast_and_fonts_reach_the_theme_preferences() {
+        let preferences = crate::theme::AppearancePreferences::default();
+        let client = merge_client_patch(
+            &default_client_settings(),
+            &json!({ "appearanceContrast": 150, "fontSizeInterface": 16 }),
+        );
+        let next = with_client_appearance(&preferences, &client).expect("contrast changed");
+        assert_eq!(next.contrast, 150);
+        assert_eq!(next.fonts.size_interface, 16);
+        // Already applied: nothing to repaint.
+        assert_eq!(with_client_appearance(&next, &client), None);
+        // Defaults on defaults: also a no-op.
+        assert_eq!(
+            with_client_appearance(&preferences, &default_client_settings()),
+            None
+        );
+    }
+
+    #[test]
+    fn appearance_modes_round_trip_through_the_theme_runtime_names() {
+        for name in ["system", "light", "dark"] {
+            assert_eq!(mode_name(parse_mode(name).unwrap()), name);
+        }
+        assert!(parse_mode("sepia").is_none());
     }
 
     #[test]

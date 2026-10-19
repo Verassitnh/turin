@@ -95,7 +95,10 @@ pub async fn commit_project(
     Ok(())
 }
 
-pub async fn delete_project(runtime: &WriteRuntime, project_id: &ProjectId) -> Result<(), CommandError> {
+pub async fn delete_project(
+    runtime: &WriteRuntime,
+    project_id: &ProjectId,
+) -> Result<(), CommandError> {
     commit_project(
         runtime,
         ProjectCommand::Delete(ProjectDeleteCommand {

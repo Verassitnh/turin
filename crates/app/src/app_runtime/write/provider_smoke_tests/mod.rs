@@ -181,6 +181,7 @@ impl Smoke {
                 model_selection: None,
                 delivery: Delivery::StartImmediately,
                 title_seed: None,
+                source_plan_id: None,
             })
             .await
             .expect("send");

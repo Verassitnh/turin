@@ -42,10 +42,10 @@ use super::confirm_dialog_host::ConfirmDialogHost;
 use super::git_actions_control::live_source::LiveGitActionsBackend;
 use super::git_actions_control::mock_source::MockGitActionsBackend;
 use super::no_active_thread_state::NoActiveThreadState;
+use super::preview_panel_shell::{PreviewPanelMode, PreviewPanelShell};
 use super::quit_hold_overlay::QuitHoldOverlay;
 use super::reopen_closed_view_shortcut::try_reopen_closed_view;
-use super::preview_panel_shell::{PreviewPanelMode, PreviewPanelShell};
-use super::right_panel_tabs::RightPanelTabs;
+use super::right_panel_tabs::{LiveDiffTarget, RightPanelTabs};
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
 use super::sidebar::{self as thread_sidebar, Sidebar, SidebarEvent, SidebarRoute};
@@ -59,10 +59,8 @@ use super::usage::mock_source::{MockUsageBackend, UsageScenario};
 use super::usage::usage_page::{UsagePage, UsagePageEvent};
 use super::workspace_titlebar::workspace_controls_left;
 use crate::desktop::desktop_app_settings::{read_desktop_app_settings, write_desktop_app_settings};
-use crate::desktop::desktop_application_menu::{CloseWindow, QuitApplication};
-use crate::desktop::desktop_client_settings::{
-    client_settings_path, read_client_settings,
-};
+use crate::desktop::desktop_application_menu::{CloseWindow, OpenSettings, QuitApplication};
+use crate::desktop::desktop_client_settings::{client_settings_path, read_client_settings};
 use crate::desktop::notification_badge::clear_notification_badge_on_focus;
 use crate::desktop::quit_hold::{
     QUIT_HOLD_CLOCK_MS, QuitHoldKey, QuitHoldKeyInput, QuitHoldKeyPhase, QuitShortcutCallbacks,
@@ -105,11 +103,10 @@ use turin_contracts::settings::{ClientSettings, QuitConfirmationMode};
 
 use super::sidebar::live_source::LiveSidebar;
 use super::sidebar::view_model::SharedSidebarBackend;
-use crate::app_runtime::write::bus::{CommandBus, CommandBusGlobal};
+use crate::app_runtime::write::bus::CommandBusGlobal;
 use crate::app_runtime::write::commands::CreateThread;
 use crate::state::local_environment_id;
 use crate::state::models::scoped_thread_key;
-use crate::state::store::ClientStore;
 
 actions!(
     turin,
@@ -132,9 +129,6 @@ actions!(
 );
 
 pub const KEY_CONTEXT: &str = "AppShell";
-
-/// The model a new thread starts on until the default-model setting is read.
-const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-6";
 
 /// Upstream default keybindings (packages/shared/src/keybindings.ts) for the
 /// shell's actions.
@@ -229,6 +223,8 @@ pub struct AppSidebarLayout {
     pull_requests: Option<PullRequestsRoute>,
     pr_preferences: crate::hooks::use_local_storage::SharedLocalStorage,
     notifications: ThreadNotificationCoordinator,
+    /// Whether this window is the active one (the dock badge hides while it is).
+    window_active: bool,
     quit_handler: QuitShortcutHandler,
     quit_clock_start: std::time::Instant,
     quit_clock_generation: u64,
@@ -236,6 +232,7 @@ pub struct AppSidebarLayout {
     quit_overlay: Entity<QuitHoldOverlay>,
     confirm_dialog: Entity<ConfirmDialogHost>,
     client_settings: ClientSettings,
+    sidebar_backend: SharedSidebarBackend,
     client_settings_path: std::path::PathBuf,
     _client_settings_watch: gpui_kit::Task<()>,
     bounds_persist: WindowBoundsPersist,
@@ -250,6 +247,24 @@ pub struct AppSidebarLayout {
     anchored_toast_viewport: Entity<crate::ui::toast::AnchoredToastViewport>,
     draft_host: Entity<crate::shell::composer_draft_host::ComposerDraftHost>,
     _keybindings_warning: Option<Subscription>,
+    /// Launch toast and sidebar pill for provider updates (live shell only).
+    provider_updates: Option<Entity<crate::shell::provider_updates::ProviderUpdateHost>>,
+}
+
+/// Where a sidebar `NewThread` event goes.
+#[derive(Debug, PartialEq, Eq)]
+enum NewThreadTarget {
+    InProject(String),
+    Picker,
+}
+
+/// The sidebar resolves the project itself (single project, Shift or
+/// `chat.newLocal`); `None` means the "New thread in…" picker.
+fn sidebar_new_thread_target(project_key: Option<&str>) -> NewThreadTarget {
+    match project_key {
+        Some(key) => NewThreadTarget::InProject(key.to_owned()),
+        None => NewThreadTarget::Picker,
+    }
 }
 
 impl AppSidebarLayout {
@@ -285,15 +300,19 @@ impl AppSidebarLayout {
                 (store, backend, palette)
             }
         };
+        let sidebar_backend = backend.clone();
         let sidebar = cx.new(|cx| Sidebar::new(store.clone(), backend, window, cx));
         let sidebar_events = cx.subscribe_in(&sidebar, window, Self::on_sidebar_event);
         let palette = cx.new(|cx| CommandPalette::new(palette_backend, window, cx));
         let git_host = cx.new(|_| {
             let backends = match &live {
-                Some(live) => ChatGitBackends {
-                    git: Rc::new(LiveGitActionsBackend::new(live.bus.clone())),
-                    branch: Rc::new(LiveBranchBackend::new(live.bus.clone())),
-                },
+                Some(live) => {
+                    let git = LiveGitActionsBackend::new(live.bus.clone());
+                    ChatGitBackends {
+                        branch: Rc::new(LiveBranchBackend::new(live.bus.clone(), git.clone())),
+                        git: Rc::new(git),
+                    }
+                }
                 None => ChatGitBackends {
                     git: Rc::new(MockGitActionsBackend::new()),
                     branch: Rc::new(MockBranchBackend::new()),
@@ -329,10 +348,11 @@ impl AppSidebarLayout {
             });
         }
         let store_watch = cx.observe_global::<ClientStoreGlobal>(|this, cx| {
-            this.sync_notifications(cx);
+            this.sync_notifications(this.window_active, cx);
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            this.window_active = window.is_window_active();
+            if this.window_active {
                 clear_notification_badge_on_focus();
                 this.notifications.clear();
                 this.reload_client_settings(cx);
@@ -344,9 +364,15 @@ impl AppSidebarLayout {
         let anchored_toast_viewport = crate::ui::toast::anchored_toasts(cx);
         let draft_host = cx.new(|_| crate::shell::composer_draft_host::ComposerDraftHost::new());
         crate::shell::composer_draft_host::ComposerDraftHost::register(draft_host.clone(), cx);
+        if let Some(live) = live.as_ref() {
+            crate::shell::startup_failure::start(live.bus.clone(), cx);
+        }
         let _keybindings_warning = live
             .as_ref()
             .map(|live| crate::shell::keybindings_warning::start(live.bus.clone(), cx));
+        let provider_updates = live.as_ref().map(|live| {
+            crate::shell::provider_updates::start(live.clone(), sidebar.downgrade(), cx)
+        });
         Self {
             focus_handle,
             sidebar_open: true,
@@ -369,6 +395,7 @@ impl AppSidebarLayout {
             pull_requests: None,
             pr_preferences: MemoryLocalStorage::shared(),
             notifications: ThreadNotificationCoordinator::new(),
+            window_active: window.is_window_active(),
             quit_handler: QuitShortcutHandler::new(cfg!(target_os = "macos")),
             quit_clock_start: std::time::Instant::now(),
             quit_clock_generation: 0,
@@ -376,6 +403,7 @@ impl AppSidebarLayout {
             quit_overlay,
             confirm_dialog,
             client_settings: ClientSettings::default(),
+            sidebar_backend,
             client_settings_path,
             _client_settings_watch: client_settings_watch,
             bounds_persist,
@@ -390,6 +418,7 @@ impl AppSidebarLayout {
             anchored_toast_viewport,
             draft_host,
             _keybindings_warning,
+            provider_updates,
         }
     }
 
@@ -416,29 +445,17 @@ impl AppSidebarLayout {
     }
 
     fn settings_window_options(&self, cx: &App) -> gpui_kit::WindowOptions {
-        crate::desktop::merge_window_options(
-            gpui_kit::WindowOptions {
-                titlebar: Some(gpui_kit::TitlebarOptions {
-                    title: Some("Settings".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(gpui_kit::point(
-                        gpui_kit::px(16.),
-                        gpui_kit::px(19.),
-                    )),
-                }),
-                app_owns_titlebar_drag: true,
-                ..Default::default()
-            },
-            cx,
-        )
+        crate::shell::live_settings::settings_window_options(cx)
     }
 
-    fn open_live_settings(&mut self, page: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_live_settings(
+        &mut self,
+        page: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(live) = self.live.clone() else {
-            window.push_notification(
-                Notification::info("Settings is not available yet."),
-                cx,
-            );
+            window.push_notification(Notification::info("Settings is not available yet."), cx);
             return;
         };
         let options = self.settings_window_options(cx);
@@ -604,7 +621,8 @@ impl AppSidebarLayout {
                 cx.notify();
             }
             CommandPaletteEvent::OpenProject { project_key } => {
-                // The project's most recent thread, else a new one.
+                // The project's most recent thread, unless it is settled (finished):
+                // then, as upstream does, open a new thread instead.
                 let snapshot = self.store.read(cx).snapshot().clone();
                 let latest = snapshot
                     .threads
@@ -613,6 +631,10 @@ impl AppSidebarLayout {
                         thread.archived_at.is_none() && thread.project_key() == *project_key
                     })
                     .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+                    .filter(|thread| {
+                        thread.settled_override
+                            != Some(crate::state::models::SettledOverride::Settled)
+                    })
                     .map(|thread| thread.key());
                 match latest {
                     Some(key) => {
@@ -730,6 +752,16 @@ impl AppSidebarLayout {
                 cx.notify();
             }
             SidebarEvent::OpenUsage => self.open_usage(window, cx),
+            SidebarEvent::OpenProviderSettings => {
+                if let Some(live) = self.live.clone() {
+                    crate::shell::live_settings::open_provider_settings(&live, None, cx);
+                }
+            }
+            SidebarEvent::DismissProviderUpdatePill(key) => {
+                if let Some(host) = self.provider_updates.clone() {
+                    host.update(cx, |host, cx| host.dismiss_pill(key, cx));
+                }
+            }
             SidebarEvent::OpenSettings => self.open_live_settings("general", window, cx),
             SidebarEvent::OpenProjectSettings(_) => {
                 self.open_live_settings("projects", window, cx);
@@ -745,14 +777,22 @@ impl AppSidebarLayout {
                 window,
                 cx,
             ),
-            SidebarEvent::NewThread {
-                project_key: Some(project_key),
-                ..
-            } if self.live.is_some() => {
-                self.create_thread_in_project(project_key.clone(), window, cx)
-            }
-            SidebarEvent::NewThread { .. } if self.live.is_some() => {
-                self.new_thread_from_context(window, cx)
+            SidebarEvent::NewThread { project_key, .. } if self.live.is_some() => {
+                match sidebar_new_thread_target(project_key.as_deref()) {
+                    NewThreadTarget::InProject(project_key) => {
+                        self.create_thread_in_project(project_key, window, cx)
+                    }
+                    // `handleNewThreadClick`: several projects without Shift open
+                    // the "New thread in…" picker even when a thread is open.
+                    NewThreadTarget::Picker => self.open_command_palette(
+                        CommandPaletteOpenDetail {
+                            open: Some(OpenTarget::NewThreadIn),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    ),
+                }
             }
             SidebarEvent::NewThread { .. } if self.live.is_none() => {
                 Self::notify_unavailable("New thread", window, cx);
@@ -810,15 +850,13 @@ impl AppSidebarLayout {
             return;
         };
         let task = live.bus.task(cx, move |commands| async move {
+            let defaults = commands.new_thread_defaults(&project_id).await?;
             commands
                 .create_thread(CreateThread {
                     project_id,
                     title: "New thread".into(),
-                    model_selection: serde_json::json!({
-                        "instanceId": "claudeAgent",
-                        "model": DEFAULT_CLAUDE_MODEL,
-                    }),
-                    runtime_mode: "full-access".into(),
+                    model_selection: defaults.model_selection,
+                    runtime_mode: defaults.runtime_mode,
                     interaction_mode: "default".into(),
                 })
                 .await
@@ -1037,7 +1075,7 @@ impl AppSidebarLayout {
         }
     }
 
-    fn sync_notifications(&mut self, cx: &App) {
+    fn sync_notifications(&mut self, focused: bool, cx: &App) {
         let environment_ids = vec![crate::state::local_environment_id()];
         let snapshot = cx.global::<ClientStoreGlobal>().0.read(cx).state().clone();
         poll_environment_notifications(
@@ -1045,6 +1083,7 @@ impl AppSidebarLayout {
             &environment_ids,
             Some(snapshot.as_ref()),
             &self.client_settings,
+            focused,
         );
     }
 
@@ -1208,6 +1247,10 @@ impl AppSidebarLayout {
         cx.quit();
     }
 
+    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_live_settings("general", window, cx);
+    }
+
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_bounds(window, cx);
         window.remove_window();
@@ -1219,9 +1262,12 @@ impl AppSidebarLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = window;
-        crate::shell::chat_route_shortcuts::open_command_palette_if_closed();
-        cx.notify();
+        if !self.palette.read(cx).is_open() {
+            self.sync_palette_context(cx);
+            self.palette.update(cx, |palette, cx| {
+                palette.toggle_mode(SearchOverlayMode::Command, window, cx)
+            });
+        }
     }
 
     fn on_reopen_closed_view(
@@ -1308,8 +1354,12 @@ impl AppSidebarLayout {
     }
 
     fn apply_client_settings(&mut self, settings: ClientSettings, cx: &mut Context<Self>) {
+        self.sidebar_backend.apply_client_settings(&settings, cx);
+        crate::composer::view_model::SavedComposerSettings::apply(cx, &settings);
+        // Saved contrast and fonts, at boot and when the file changes.
+        crate::settings::mock_source::apply_client_appearance(&settings, cx);
         self.client_settings = settings;
-        self.sync_notifications(cx);
+        self.sync_notifications(self.window_active, cx);
         cx.notify();
     }
 
@@ -1372,13 +1422,12 @@ impl AppSidebarLayout {
                     .background_executor()
                     .spawn(async move { read_client_settings(&path).ok().flatten() })
                     .await;
-                if let Some(settings) = settings {
-                    if this
+                if let Some(settings) = settings
+                    && this
                         .update(cx, |this, cx| this.apply_client_settings(settings, cx))
                         .is_err()
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
             drop(watcher);
@@ -1398,14 +1447,13 @@ impl Render for AppSidebarLayout {
         }
         if let Some(thread_id) =
             crate::components::chat::thread_navigation::take_thread_open_request(cx)
+            && let Ok(thread_id) = ThreadId::new(&thread_id)
         {
-            if let Ok(thread_id) = ThreadId::new(&thread_id) {
-                self.clear_auxiliary_routes(cx);
-                let key = scoped_thread_key(&local_environment_id(), &thread_id);
-                self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
-                self.sync_palette_context(cx);
-            }
+            self.clear_auxiliary_routes(cx);
+            let key = scoped_thread_key(&local_environment_id(), &thread_id);
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.navigate_to_thread(&key, cx));
+            self.sync_palette_context(cx);
         }
         let theme = cx.app_theme().clone();
         let viewport_width = f32::from(window.viewport_size().width);
@@ -1426,6 +1474,11 @@ impl Render for AppSidebarLayout {
         let right_panel_sheet = panel_presentation == ThreadPanelPresentation::Popover;
         let maximized = right_panel_open && self.right_panel_maximized;
         let right_panel_content = self.right_panel_content.clone();
+        let right_panel_diff = self.live.as_ref().map(|live| LiveDiffTarget {
+            client: live.client.clone(),
+            bus: live.bus.clone(),
+            thread: self.routed_thread_id(cx),
+        });
         let resizing = self.resizing.map(|drag| drag.target);
         let routed_thread = self.routed_thread(cx);
         let routed_thread_id = self.routed_thread_id(cx);
@@ -1573,6 +1626,7 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::cycle_appearance))
             .on_action(cx.listener(Self::on_quit_shortcut))
             .on_action(cx.listener(Self::on_quit_application))
+            .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_open_command_palette))
             .on_action(cx.listener(Self::on_reopen_closed_view))
@@ -1644,45 +1698,46 @@ impl Render for AppSidebarLayout {
                                         thread: routed_thread.clone(),
                                         git_host: self.git_host.clone(),
                                         thread_details_open: self.thread_details_open,
-                                        subagent_bar: crate::components::chat_view::subagent_bar_demo(),
+                                        subagent_bar:
+                                            crate::components::chat_view::subagent_bar_demo(),
                                     }),
                                 }
                             })
                             .when(right_panel_open && !right_panel_sheet, |this| {
                                 let body = match right_panel_content.clone() {
                                     Some(content) => content.into_any_element(),
-                                    None => RightPanelTabs.into_any_element(),
+                                    None => RightPanelTabs::new(right_panel_diff.clone())
+                                        .into_any_element(),
                                 };
                                 this.child(
-                                    PreviewPanelShell::new(PreviewPanelMode::Inline, right_panel_width)
-                                        .maximized(maximized)
-                                        .open(true)
-                                        .child(body),
+                                    PreviewPanelShell::new(
+                                        PreviewPanelMode::Inline,
+                                        right_panel_width,
+                                    )
+                                    .maximized(maximized)
+                                    .open(true)
+                                    .child(body),
                                 )
                             }),
                     ),
             )
             .when(sidebar_open, |this| this.child(sidebar_rail))
-            .when(right_panel_open && !maximized && !right_panel_sheet, |this| {
-                this.child(right_panel_handle)
-            })
+            .when(
+                right_panel_open && !maximized && !right_panel_sheet,
+                |this| this.child(right_panel_handle),
+            )
             .when(right_panel_open && right_panel_sheet, |this| {
                 let body = match right_panel_content {
                     Some(content) => content.into_any_element(),
-                    None => RightPanelTabs.into_any_element(),
+                    None => RightPanelTabs::new(right_panel_diff.clone()).into_any_element(),
                 };
                 this.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .justify_end()
-                        .child(
-                            PreviewPanelShell::new(PreviewPanelMode::Sheet, right_panel_width)
-                                .maximized(false)
-                                .open(true)
-                                .child(body),
-                        ),
+                    div().absolute().inset_0().flex().justify_end().child(
+                        PreviewPanelShell::new(PreviewPanelMode::Sheet, right_panel_width)
+                            .maximized(false)
+                            .open(true)
+                            .child(body),
+                    ),
                 )
             })
             .child(sidebar_toggle)
@@ -1728,4 +1783,18 @@ fn forward_sidebar_actions(
         ThreadJump8,
         ThreadJump9
     )
+}
+
+#[cfg(test)]
+mod new_thread_target_tests {
+    use super::*;
+
+    #[test]
+    fn an_unresolved_project_opens_the_picker_instead_of_the_routed_project() {
+        assert_eq!(sidebar_new_thread_target(None), NewThreadTarget::Picker);
+        assert_eq!(
+            sidebar_new_thread_target(Some("local:p1")),
+            NewThreadTarget::InProject("local:p1".into())
+        );
+    }
 }

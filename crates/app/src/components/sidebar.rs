@@ -23,7 +23,6 @@ pub mod mock_source;
 pub mod runtime;
 pub mod sidebar_actions;
 pub mod sidebar_chrome;
-pub mod sidebar_thread_undo_notice;
 pub mod sidebar_drag;
 pub mod sidebar_gestures;
 pub mod sidebar_list;
@@ -36,6 +35,7 @@ pub mod sidebar_sections;
 pub mod sidebar_snooze;
 pub mod sidebar_thread_header;
 pub mod sidebar_thread_row;
+pub mod sidebar_thread_undo_notice;
 pub mod thread_hover_card;
 pub mod thread_selection;
 pub mod thread_status_indicators;
@@ -160,6 +160,10 @@ pub enum SidebarEvent {
     OpenSettings,
     OpenPullRequestsPage,
     OpenUsage,
+    /// The provider update pill was clicked: open Settings on Providers.
+    OpenProviderSettings,
+    /// The provider update pill's close button (its key).
+    DismissProviderUpdatePill(String),
 }
 
 /// Inline rename state.
@@ -207,6 +211,10 @@ pub struct Sidebar {
         EnvironmentThreadShell,
         sidebar_logic::SidebarSection,
     )>,
+    /// The provider update status pill (`SidebarProviderUpdatePill`), set by the shell.
+    provider_update_pill: Option<
+        crate::components::provider_update_launch_notification_logic::ProviderUpdateSidebarPillView,
+    >,
     _subscriptions: Vec<Subscription>,
     _ticker: Task<()>,
 }
@@ -214,6 +222,20 @@ pub struct Sidebar {
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
 impl Sidebar {
+    /// Shows (or hides) the provider update pill above the utility row.
+    pub fn set_provider_update_pill(
+        &mut self,
+        pill: Option<
+            crate::components::provider_update_launch_notification_logic::ProviderUpdateSidebarPillView,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        if self.provider_update_pill != pill {
+            self.provider_update_pill = pill;
+            cx.notify();
+        }
+    }
+
     pub fn new(
         store: Entity<SidebarStore>,
         backend: SharedSidebarBackend,
@@ -298,6 +320,7 @@ impl Sidebar {
             jump_hint_task: None,
             snooze_menu_for: None,
             last_rows: Vec::new(),
+            provider_update_pill: None,
             _subscriptions: subscriptions,
             _ticker: ticker,
         };
@@ -708,7 +731,10 @@ impl Render for Sidebar {
                     .child(SidebarGroup::new().with(|this| this.flex_1()).child(body)),
             )
             .child(sidebar_thread_undo_notice::SidebarThreadUndoNotice)
-            .child(SidebarChromeFooter::new(cx.entity().downgrade()))
+            .child(
+                SidebarChromeFooter::new(cx.entity().downgrade())
+                    .provider_update_pill(self.provider_update_pill.clone()),
+            )
             .children(self.render_gesture_listeners(window, cx))
     }
 }

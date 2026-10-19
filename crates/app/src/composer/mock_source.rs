@@ -430,7 +430,15 @@ impl ComposerSource for MockComposerSource {
 
     fn previous_pending_question(&self, _cx: &mut App) {}
 
-    fn search_paths(&self, _query: &str, _cx: &mut App) {}
+    fn search_paths(&self, query: &str, cx: &mut App) {
+        let query = query.to_lowercase();
+        self.update(cx, |vm| {
+            vm.path_entries = fixture_paths()
+                .into_iter()
+                .filter(|entry| entry.path.to_lowercase().contains(&query))
+                .collect();
+        });
+    }
 }
 
 #[allow(dead_code)]

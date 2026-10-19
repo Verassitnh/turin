@@ -57,6 +57,7 @@ async fn run(commands: &Commands, workspace: &str, prompt: &str) -> Result<(), S
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .map_err(|error| error.message)?;

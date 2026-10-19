@@ -22,7 +22,7 @@
 //! [`PreviewPanelLayoutTransition`] keeps the suppression state machine for an
 //! owner that animates it), and `pointer-events-none` on a closed panel (it
 //! is clipped to zero width). See PORTING.md Deviations.
-
+#![allow(dead_code)]
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

@@ -206,7 +206,31 @@ impl BranchToolbarBranchSelector {
         if derived.page.is_pending && derived.page.refs.is_empty() || self.action_pending {
             return;
         }
+        // Refs move behind the view's back (git actions, other tools).
+        if let Some(cwd) = &derived.branch_cwd {
+            let query = sanitize_new_ref_name(self.query.read(cx).value().trim());
+            self.backend.reload_refs(cwd, &query, cx);
+        }
         self.set_open(true, window, cx);
+    }
+
+    /// Asks the backend for the first page of the query the view is about to
+    /// read. The read path cannot start a load, so every render does.
+    fn ensure_refs(&self, cx: &mut Context<Self>) {
+        let thread = &self.props.thread;
+        let active_worktree_path = if self.props.force_new_worktree {
+            None
+        } else {
+            thread.worktree_path.clone()
+        };
+        let Some(cwd) = active_worktree_path
+            .or_else(|| thread.project_workspace_root.clone())
+            .or_else(|| thread.project_cwd.clone())
+        else {
+            return;
+        };
+        let query = sanitize_new_ref_name(self.query.read(cx).value().trim());
+        self.backend.ensure_refs(&cwd, &query, cx);
     }
 
     fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1059,6 +1083,7 @@ struct BranchActionResult {
 
 impl Render for BranchToolbarBranchSelector {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_refs(cx);
         let theme = cx.app_theme().clone();
         let derived = self.derive(cx);
         let weak = cx.entity().downgrade();

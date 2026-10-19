@@ -5,11 +5,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui_kit::{App, AppContext as _, Entity, WeakEntity};
+use gpui_kit::{App, AppContext as _, Entity};
 use indexmap::IndexMap;
 use serde_json::Value;
 use turin_contracts::keybindings::KeybindingRule;
-use turin_contracts::provider_instance::{ProviderInstanceId, ProviderInstanceMutation as ContractMutation};
+use turin_contracts::provider_instance::{
+    ProviderInstanceId, ProviderInstanceMutation as ContractMutation,
+};
 use turin_contracts::provider_setup::{
     ProviderAuthCallbackMode, ProviderAuthRespondInput, ProviderAuthStartInput,
     ProviderInstallCancelInput, ProviderSetupInput,
@@ -22,16 +24,23 @@ use turin_runtime::keybindings::UpsertKeybindingInput;
 use crate::state::store::ClientStore;
 
 use super::live_bindings::{LiveSettingsServices, SETTINGS_AUTH_OWNER_SESSION};
-use super::live_commands::{self, update_provider_instance as persist_provider_instance, update_server_settings as persist_server_settings};
+use super::live_commands::{
+    self, update_provider_instance as persist_provider_instance,
+    update_server_settings as persist_server_settings,
+};
 use super::live_projects::{delete_project, set_project_icons};
-use super::live_snapshot::{build_snapshot, cleanup_report, read_client_settings, LiveSnapshotInput};
-use super::mock_source::apply_appearance;
-use crate::settings_logic::use_settings::{
-    persist_client_settings_patch, prepare_model_preferences_patch,
+use super::live_snapshot::{
+    LiveSnapshotInput, build_snapshot, cleanup_report, read_client_settings,
+};
+use super::mock_source::{
+    apply_appearance, runtime_appearance, set_runtime_appearance_mode, set_runtime_theme,
 };
 use super::view_model::{
     ProviderInstanceMutation, RemoveKeybinding, SettingsSource, SettingsStore, SettingsViewModel,
     SetupResult, UpsertKeybinding,
+};
+use crate::settings_logic::use_settings::{
+    persist_client_settings_patch, prepare_model_preferences_patch,
 };
 
 struct LiveState {
@@ -53,6 +62,49 @@ pub struct LiveSettingsSource {
     inner: Arc<Mutex<LiveState>>,
     client: Entity<ClientStore>,
     store: Rc<RefCell<Option<Entity<SettingsStore>>>>,
+    /// Wakes the UI thread from runtime tasks (see [`UiEvents`]).
+    ui_events: UiEvents,
+}
+
+/// Runtime tasks cannot touch GPUI. The state they change lives behind a
+/// mutex, so a write alone never repaints: each sends `()` here and the UI
+/// thread rebuilds and publishes the view model.
+type UiEvents = tokio::sync::mpsc::UnboundedSender<()>;
+
+/// The pieces needed to publish the view model or report a failure from the
+/// UI thread. Cheap to clone into GPUI tasks.
+#[derive(Clone)]
+struct LiveUi {
+    inner: Arc<Mutex<LiveState>>,
+    client: Entity<ClientStore>,
+    store: Rc<RefCell<Option<Entity<SettingsStore>>>>,
+}
+
+impl LiveUi {
+    fn publish(&self, cx: &mut App) {
+        let path = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .keybindings
+            .config_path()
+            .display()
+            .to_string();
+        let vm = snapshot_from(&self.inner, &self.client, cx, &path);
+        apply_appearance(&vm, cx);
+        if let Some(store) = self.store.borrow().clone() {
+            store.update(cx, |store, cx| store.publish(vm, cx));
+        }
+    }
+
+    fn report(&self, title: &str, description: &str, cx: &mut App) {
+        if let Some(store) = self.store.borrow().clone() {
+            store.update(cx, |store, cx| {
+                store.report_failure(title, description, cx);
+            });
+        }
+    }
 }
 
 fn runtime_handle(inner: &Arc<Mutex<LiveState>>) -> tokio::runtime::Handle {
@@ -73,20 +125,16 @@ impl LiveSettingsSource {
         cx: &mut App,
     ) -> Entity<SettingsStore> {
         let handle = services.bus.handle().clone();
-        let keybindings_path = services
-            .keybindings
-            .config_path()
-            .display()
-            .to_string();
+        let keybindings_path = services.keybindings.config_path().display().to_string();
         let initial_server = handle
             .block_on(live_commands::server_settings(&services.bus))
             .unwrap_or_default();
-        let initial_keybindings = handle
-            .block_on(services.keybindings.snapshot())
-            .unwrap_or(turin_runtime::keybindings::KeybindingsConfigState {
+        let initial_keybindings = handle.block_on(services.keybindings.snapshot()).unwrap_or(
+            turin_runtime::keybindings::KeybindingsConfigState {
                 keybindings: Vec::new(),
                 issues: Vec::new(),
-            });
+            },
+        );
         let initial_providers = services.bus.providers().borrow().clone();
         let source_control = handle.block_on(services.source_control.discover());
         let storage_cleanup = services
@@ -108,89 +156,129 @@ impl LiveSettingsSource {
             keybindings: initial_keybindings,
         }));
         let vm = snapshot_from(&inner, &client, cx, &keybindings_path);
+        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
         let source = Rc::new(Self {
             inner: inner.clone(),
             client: client.clone(),
             store: Rc::new(RefCell::new(None)),
+            ui_events: events_tx,
         });
         let store = cx.new(|_| SettingsStore::new(vm, source.clone()));
         *source.store.borrow_mut() = Some(store.clone());
-        source.spawn_feeds(store.downgrade(), cx);
+        source.spawn_feeds(events_rx, cx);
         store
     }
 
     fn publish(&self, cx: &mut App) {
-        let path = self
-            .inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .keybindings
-            .config_path()
-            .display()
-            .to_string();
-        let vm = snapshot_from(&self.inner, &self.client, cx, &path);
-        apply_appearance(&vm, cx);
-        if let Some(store) = self.store.borrow().clone() {
-            store.update(cx, |store, cx| store.publish(vm, cx));
+        self.ui().publish(cx);
+    }
+
+    fn ui(&self) -> LiveUi {
+        LiveUi {
+            inner: self.inner.clone(),
+            client: self.client.clone(),
+            store: self.store.clone(),
         }
     }
 
-    fn spawn_feeds(&self, _store: WeakEntity<SettingsStore>, cx: &mut App) {
-        let refresh = {
-            let inner = self.inner.clone();
-            let client = self.client.clone();
-            let store_cell = self.store.clone();
-            Rc::new(move |cx: &mut App| {
-                let Some(store) = store_cell.borrow().clone() else {
-                    return;
-                };
-                let path = inner
-                    .lock()
-                    .expect("live settings state")
-                    .services
-                    .keybindings
-                    .config_path()
-                    .display()
-                    .to_string();
-                let vm = snapshot_from(&inner, &client, cx, &path);
-                apply_appearance(&vm, cx);
-                store.update(cx, |store, cx| store.publish(vm, cx));
-            })
-        };
+    /// Runs `work` on the runtime, then `finish` on the UI thread with its
+    /// output, and publishes the view model afterwards (the state `work`
+    /// changed lives behind a mutex, so nothing repaints on its own).
+    fn run_then<T: Send + 'static>(
+        &self,
+        work: impl std::future::Future<Output = T> + Send + 'static,
+        finish: impl FnOnce(T, &LiveUi, &mut App) + 'static,
+        cx: &mut App,
+    ) {
+        let (done, outcome) = futures::channel::oneshot::channel();
+        runtime_handle(&self.inner).spawn(async move {
+            let _ = done.send(work.await);
+        });
+        let ui = self.ui();
+        cx.spawn(async move |cx| {
+            let Ok(output) = outcome.await else {
+                return;
+            };
+            cx.update(|cx| {
+                finish(output, &ui, cx);
+                ui.publish(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn spawn_feeds(&self, mut events: tokio::sync::mpsc::UnboundedReceiver<()>, cx: &mut App) {
+        let ui = self.ui();
         cx.observe(&self.client, {
-            let refresh = refresh.clone();
-            move |_, cx| refresh(cx)
+            let ui = ui.clone();
+            move |_, cx| ui.publish(cx)
+        })
+        .detach();
+
+        // A theme picked elsewhere (the command palette) repaints Settings too.
+        // `publish` stores what it shows, so its own repaint does not loop.
+        cx.observe_global::<crate::theme::AppTheme>({
+            let ui = ui.clone();
+            move |cx| {
+                let changed = runtime_appearance(cx).is_some_and(|appearance| {
+                    ui.inner.lock().expect("live settings state").appearance != appearance
+                });
+                if changed {
+                    ui.publish(cx);
+                }
+            }
+        })
+        .detach();
+
+        // One publish per burst of events.
+        cx.spawn(async move |cx| {
+            while events.recv().await.is_some() {
+                while events.try_recv().is_ok() {}
+                cx.update(|cx| ui.publish(cx));
+            }
         })
         .detach();
 
         let inner = self.inner.clone();
-        let handle = inner.lock().expect("live settings state").services.bus.handle().clone();
+        let handle = inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .handle()
+            .clone();
+        let tx = self.ui_events.clone();
         handle.spawn(async move {
             let services = inner.lock().expect("live settings state").services.clone();
             let mut changes = services.server_settings.subscribe();
             while let Some(settings) = changes.recv().await {
                 inner.lock().expect("live settings state").server = settings;
+                let _ = tx.send(());
             }
         });
         let inner = self.inner.clone();
+        let tx = self.ui_events.clone();
         handle.spawn(async move {
             let services = inner.lock().expect("live settings state").services.clone();
             let mut rx = services.keybindings.subscribe();
             while let Some(config) = rx.recv().await {
                 inner.lock().expect("live settings state").keybindings = config;
+                let _ = tx.send(());
             }
         });
         let inner = self.inner.clone();
+        let tx = self.ui_events.clone();
         handle.spawn(async move {
             let services = inner.lock().expect("live settings state").services.clone();
             let mut rx = services.storage_cleanup.subscribe();
             while rx.changed().await.is_ok() {
                 inner.lock().expect("live settings state").storage_cleanup =
                     rx.borrow().clone().map(|report| cleanup_report(&report));
+                let _ = tx.send(());
             }
         });
         let inner = self.inner.clone();
+        let tx = self.ui_events.clone();
         let bus = inner
             .lock()
             .expect("live settings state")
@@ -199,20 +287,105 @@ impl LiveSettingsSource {
             .clone();
         handle.spawn(async move {
             let mut providers = bus.providers();
+            let watched = Arc::new(Mutex::new(SetupWatchers::default()));
             loop {
+                let snapshot = providers.borrow_and_update().clone();
+                inner.lock().expect("live settings state").providers = snapshot.clone();
+                watch_setup_states(&inner, &tx, &watched, &snapshot);
+                let _ = tx.send(());
                 if providers.changed().await.is_err() {
                     break;
                 }
-                inner.lock().expect("live settings state").providers = providers.borrow().clone();
             }
         });
-        let _ = refresh;
     }
 
     fn report(&self, title: &str, description: &str, cx: &mut App) {
-        if let Some(store) = self.store.borrow().clone() {
-            store.update(cx, |store, cx| {
-                store.report_failure(title, description, cx);
+        self.ui().report(title, description, cx);
+    }
+}
+
+/// Instances whose sign-in / install streams already have a watcher task.
+#[derive(Default)]
+struct SetupWatchers {
+    auth: std::collections::HashSet<String>,
+    install: std::collections::HashSet<String>,
+}
+
+/// Subscribes (once per instance) to the sign-in and install state streams so
+/// flow progress (authorization URL, prompts, download progress) reaches the
+/// view. A stream that ends (instance removed, no controller) frees its slot
+/// so the next provider update retries.
+fn watch_setup_states(
+    inner: &Arc<Mutex<LiveState>>,
+    tx: &UiEvents,
+    watched: &Arc<Mutex<SetupWatchers>>,
+    providers: &[turin_provider_core::server_provider::ServerProvider],
+) {
+    use futures::StreamExt as _;
+    let (services, handle) = {
+        let state = inner.lock().expect("live settings state");
+        (state.services.clone(), state.services.bus.handle().clone())
+    };
+    for provider in providers {
+        let id = provider.instance_id.clone();
+        let key = id.as_str().to_owned();
+        let new_auth = watched
+            .lock()
+            .expect("setup watchers")
+            .auth
+            .insert(key.clone());
+        if new_auth {
+            let (inner, tx, watched, services, id, key) = (
+                inner.clone(),
+                tx.clone(),
+                watched.clone(),
+                services.clone(),
+                id.clone(),
+                key.clone(),
+            );
+            handle.spawn(async move {
+                let mut stream = services
+                    .provider_auth
+                    .subscribe(&id, SETTINGS_AUTH_OWNER_SESSION);
+                while let Some(Ok(state)) = stream.next().await {
+                    inner
+                        .lock()
+                        .expect("live settings state")
+                        .provider_auth
+                        .insert(key.clone(), state);
+                    let _ = tx.send(());
+                }
+                watched.lock().expect("setup watchers").auth.remove(&key);
+            });
+        }
+        let new_install = watched
+            .lock()
+            .expect("setup watchers")
+            .install
+            .insert(key.clone());
+        if new_install {
+            let (inner, tx, watched, services, id, key) = (
+                inner.clone(),
+                tx.clone(),
+                watched.clone(),
+                services.clone(),
+                id.clone(),
+                key.clone(),
+            );
+            handle.spawn(async move {
+                let input = ProviderSetupInput { instance_id: id };
+                if let Ok(mut stream) = services.provider_installation.subscribe(&input).await {
+                    while let Some(state) = stream.next().await {
+                        inner
+                            .lock()
+                            .expect("live settings state")
+                            .provider_install
+                            .insert(key.clone(), state);
+                        let _ = tx.send(());
+                    }
+                }
+                watched.lock().expect("setup watchers").install.remove(&key);
             });
         }
     }
@@ -224,7 +397,11 @@ fn snapshot_from(
     cx: &mut App,
     keybindings_path: &str,
 ) -> SettingsViewModel {
-    let state = inner.lock().expect("live settings state");
+    let mut state = inner.lock().expect("live settings state");
+    // Theme and appearance mode are the theme runtime's (device-local).
+    if let Some(appearance) = runtime_appearance(cx) {
+        state.appearance = appearance;
+    }
     build_snapshot(LiveSnapshotInput {
         appearance: state.appearance.clone(),
         client: read_client_settings(),
@@ -278,24 +455,9 @@ impl SettingsSource for LiveSettingsSource {
                 return;
             }
         };
-        let inner = self.inner.clone();
-        let store_cell = self.store.clone();
-        let client = self.client.clone();
-        runtime_handle(&inner).spawn(async move {
-            persist_client_settings_patch(patch).await;
-        });
-        let path = inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .keybindings
-            .config_path()
-            .display()
-            .to_string();
-        if let Some(store) = store_cell.borrow().clone() {
-            let vm = snapshot_from(&inner, &client, cx, &path);
-            store.update(cx, |store, cx| store.publish(vm, cx));
-        }
+        // Publish now (optimistic client snapshot), and again once persisted.
+        self.publish(cx);
+        self.run_then(persist_client_settings_patch(patch), |(), _, _| {}, cx);
     }
 
     fn update_server(&self, patch: Value, cx: &mut App) {
@@ -306,37 +468,35 @@ impl SettingsSource for LiveSettingsSource {
                 return;
             }
         };
-        let inner = self.inner.clone();
-        let store_cell = self.store.clone();
-        let client = self.client.clone();
-        let bus = inner.lock().expect("live settings state").services.bus.clone();
-        let inner_task = Arc::clone(&inner);
-        runtime_handle(&inner).spawn(async move {
-            let Ok(current) = live_commands::server_settings(&bus).await else {
-                return;
-            };
-            let Ok(patch) = prepare_model_preferences_patch(&current, patch).await else {
-                return;
-            };
-            if let Ok(settings) = persist_server_settings(&bus, patch).await {
-                inner_task
-                    .lock()
-                    .expect("live settings state")
-                    .server = settings;
-            }
-        });
-        if let Some(store) = store_cell.borrow().clone() {
-            let path = inner
-                .lock()
-                .expect("live settings state")
-                .services
-                .keybindings
-                .config_path()
-                .display()
-                .to_string();
-            let vm = snapshot_from(&inner, &client, cx, &path);
-            store.update(cx, |store, cx| store.publish(vm, cx));
-        }
+        let inner = Arc::clone(&self.inner);
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
+        self.run_then(
+            async move {
+                let current = live_commands::server_settings(&bus)
+                    .await
+                    .map_err(|error| error.message)?;
+                let patch = prepare_model_preferences_patch(&current, patch)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let settings = persist_server_settings(&bus, patch)
+                    .await
+                    .map_err(|error| error.message)?;
+                inner.lock().expect("live settings state").server = settings;
+                Ok::<(), String>(())
+            },
+            |result, ui, cx| {
+                if let Err(message) = result {
+                    ui.report("Could not update settings", &message, cx);
+                }
+            },
+            cx,
+        );
     }
 
     fn mutate_provider_instance(
@@ -345,27 +505,63 @@ impl SettingsSource for LiveSettingsSource {
         patch: Option<Value>,
         cx: &mut App,
     ) {
+        self.mutate_provider_instance_then(mutation, patch, Box::new(|_, _| {}), cx);
+    }
+
+    fn mutate_provider_instance_then(
+        &self,
+        mutation: ProviderInstanceMutation,
+        patch: Option<Value>,
+        done: super::view_model::MutationDone,
+        cx: &mut App,
+    ) {
         let mutation = match contract_mutation(mutation) {
             Ok(mutation) => mutation,
             Err(error) => {
                 self.report("Could not update provider instance", &error, cx);
+                done(Err(error), cx);
                 return;
             }
         };
-        let server_patch = patch.and_then(|patch| serde_json::from_value(patch).ok());
-        let inner = self.inner.clone();
-        let bus = inner.lock().expect("live settings state").services.bus.clone();
-        runtime_handle(&inner).spawn(async move {
-            if let Some(patch) = server_patch {
-                if persist_server_settings(&bus, patch).await.is_err() {
-                    return;
+        let server_patch = match patch.map(serde_json::from_value::<ServerSettingsPatch>) {
+            Some(Ok(patch)) => Some(patch),
+            Some(Err(error)) => {
+                let error = error.to_string();
+                self.report("Could not update provider instance", &error, cx);
+                done(Err(error), cx);
+                return;
+            }
+            None => None,
+        };
+        let inner = Arc::clone(&self.inner);
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
+        self.run_then(
+            async move {
+                if let Some(patch) = server_patch {
+                    persist_server_settings(&bus, patch)
+                        .await
+                        .map_err(|error| error.message)?;
                 }
-            }
-            if let Ok(settings) = persist_provider_instance(&bus, mutation).await {
+                let settings = persist_provider_instance(&bus, mutation)
+                    .await
+                    .map_err(|error| error.message)?;
                 inner.lock().expect("live settings state").server = settings;
-            }
-        });
-        self.publish(cx);
+                Ok::<(), String>(())
+            },
+            move |result, ui, cx| {
+                if let Err(message) = &result {
+                    ui.report("Could not update provider instance", message, cx);
+                }
+                done(result, cx);
+            },
+            cx,
+        );
     }
 
     fn upsert_keybinding(&self, input: UpsertKeybinding, cx: &mut App) {
@@ -388,26 +584,28 @@ impl SettingsSource for LiveSettingsSource {
             }))
             .ok()
         });
-        let inner = self.inner.clone();
-        let keybindings = inner
+        let keybindings = self
+            .inner
             .lock()
             .expect("live settings state")
             .services
             .keybindings
             .clone();
-        inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .bus
-            .handle()
-            .spawn(async move {
+        self.run_then(
+            async move {
                 keybindings
                     .upsert_keybinding_rule(UpsertKeybindingInput { rule, replace })
                     .await
+                    .map(|_| ())
                     .map_err(|error| error.to_string())
-            });
-        self.publish(cx);
+            },
+            |result, ui, cx| {
+                if let Err(message) = result {
+                    ui.report("Unable to save keybinding", &message, cx);
+                }
+            },
+            cx,
+        );
     }
 
     fn remove_keybinding(&self, input: RemoveKeybinding, cx: &mut App) {
@@ -422,38 +620,48 @@ impl SettingsSource for LiveSettingsSource {
                 return;
             }
         };
-        let inner = self.inner.clone();
-        let keybindings = inner
+        let keybindings = self
+            .inner
             .lock()
             .expect("live settings state")
             .services
             .keybindings
             .clone();
-        inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .bus
-            .handle()
-            .spawn(async move {
+        self.run_then(
+            async move {
                 keybindings
                     .remove_keybinding_rule(&rule)
                     .await
+                    .map(|_| ())
                     .map_err(|error| error.to_string())
-            });
-        self.publish(cx);
+            },
+            |result, ui, cx| {
+                if let Err(message) = result {
+                    ui.report("Unable to save keybinding", &message, cx);
+                }
+            },
+            cx,
+        );
     }
 
     fn refresh_providers(&self, cx: &mut App) {
-        self.inner.lock().expect("live settings state").providers_refreshing = true;
+        self.inner
+            .lock()
+            .expect("live settings state")
+            .providers_refreshing = true;
         self.publish(cx);
         let inner = self.inner.clone();
         let services = inner.lock().expect("live settings state").services.clone();
-        runtime_handle(&inner).spawn(async move {
-            let _ = services.provider_registry.refresh(None).await;
-            inner.lock().expect("live settings state").providers_refreshing = false;
-        });
-        self.publish(cx);
+        self.run_then(
+            async move {
+                let providers = services.provider_registry.refresh(None).await;
+                let mut state = inner.lock().expect("live settings state");
+                state.providers_refreshing = false;
+                state.providers = Arc::new(providers);
+            },
+            |(), _, _| {},
+            cx,
+        );
     }
 
     fn rescan_source_control(&self, cx: &mut App) {
@@ -464,11 +672,14 @@ impl SettingsSource for LiveSettingsSource {
             .services
             .source_control
             .clone();
-        runtime_handle(&inner).spawn(async move {
-            let discovery = source_control.discover().await;
-            inner.lock().expect("live settings state").source_control = discovery;
-        });
-        self.publish(cx);
+        self.run_then(
+            async move {
+                let discovery = source_control.discover().await;
+                inner.lock().expect("live settings state").source_control = discovery;
+            },
+            |(), _, _| {},
+            cx,
+        );
     }
 
     fn update_provider(&self, instance_id: &str, target_version: Option<String>, cx: &mut App) {
@@ -476,37 +687,37 @@ impl SettingsSource for LiveSettingsSource {
             self.report("Could not update provider", "Invalid instance id.", cx);
             return;
         };
-        let inner = self.inner.clone();
         let (maintenance, providers) = {
-            let state = inner.lock().expect("live settings state");
+            let state = self.inner.lock().expect("live settings state");
             (
                 state.services.provider_maintenance.clone(),
                 state.providers.clone(),
             )
         };
-        inner
-            .lock()
-            .expect("live settings state")
-            .services
-            .bus
-            .handle()
-            .spawn(async move {
+        self.run_then(
+            async move {
                 let provider = providers
                     .iter()
                     .find(|entry| entry.instance_id.as_str() == instance_id.as_str())
-                    .map(|entry| entry.driver.clone());
-                let Some(provider) = provider else {
-                    return;
-                };
-                let _ = maintenance
+                    .map(|entry| entry.driver.clone())
+                    .ok_or_else(|| "That provider instance no longer exists.".to_owned())?;
+                maintenance
                     .update_provider(ProviderUpdateTarget {
                         provider,
                         instance_id: Some(instance_id),
                         target_version,
                     })
-                    .await;
-            });
-        self.publish(cx);
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+            |result, ui, cx| {
+                if let Err(message) = result {
+                    ui.report("Could not update provider", &message, cx);
+                }
+            },
+            cx,
+        );
     }
 
     fn start_provider_auth(
@@ -520,9 +731,8 @@ impl SettingsSource for LiveSettingsSource {
         };
         let input = ProviderAuthStartInput {
             instance_id,
-            method_id: method_id.and_then(|id| {
-                turin_contracts::provider_setup::SetupOperationId::new(id).ok()
-            }),
+            method_id: method_id
+                .and_then(|id| turin_contracts::provider_setup::SetupOperationId::new(id).ok()),
             return_url: None,
             callback_mode: Some(ProviderAuthCallbackMode::Client),
         };
@@ -841,22 +1051,32 @@ impl SettingsSource for LiveSettingsSource {
     }
 
     fn clear_provider_auth_delivery(&self, cx: &mut App) {
-        self.inner.lock().expect("live settings state").pending_provider_auth_delivery = None;
+        self.inner
+            .lock()
+            .expect("live settings state")
+            .pending_provider_auth_delivery = None;
         self.publish(cx);
     }
 
     fn set_theme(&self, theme: String, cx: &mut App) {
-        let state = &mut self.inner.lock().expect("live settings state");
-        state.appearance.theme = theme;
+        self.inner
+            .lock()
+            .expect("live settings state")
+            .appearance
+            .theme = theme.clone();
+        set_runtime_theme(&theme, cx);
         self.publish(cx);
     }
 
     fn set_appearance_mode(&self, mode: String, cx: &mut App) {
-        let state = &mut self.inner.lock().expect("live settings state");
-        if matches!(state.appearance.theme.as_str(), "system" | "light" | "dark") {
-            state.appearance.theme = mode.clone();
+        {
+            let state = &mut self.inner.lock().expect("live settings state");
+            if matches!(state.appearance.theme.as_str(), "system" | "light" | "dark") {
+                state.appearance.theme = mode.clone();
+            }
+            state.appearance.mode = mode.clone();
         }
-        state.appearance.mode = mode;
+        set_runtime_appearance_mode(&mode, cx);
         self.publish(cx);
     }
 
@@ -878,7 +1098,13 @@ impl SettingsSource for LiveSettingsSource {
             self.report("Could not unarchive thread", "Invalid thread id.", cx);
             return;
         };
-        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
         bus.spawn(
             move |commands| async move {
                 commands
@@ -896,11 +1122,15 @@ impl SettingsSource for LiveSettingsSource {
             return;
         };
         let title = title.to_owned();
-        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
         bus.spawn(
-            move |commands| async move {
-                commands.rename_project(&project_id, &title).await
-            },
+            move |commands| async move { commands.rename_project(&project_id, &title).await },
             |_| {},
         );
         self.publish(cx);
@@ -911,7 +1141,13 @@ impl SettingsSource for LiveSettingsSource {
             self.report("Could not remove project", "Invalid project id.", cx);
             return;
         };
-        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
         bus.spawn(
             move |commands| async move {
                 delete_project(commands.runtime().as_ref(), &project_id).await
@@ -933,7 +1169,13 @@ impl SettingsSource for LiveSettingsSource {
             .map(|id| ProjectId::new(id.as_str()))
             .collect();
         let ids = ids.map_err(|_| "Invalid project id.".to_string())?;
-        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
         bus.run_blocking(move |commands| async move {
             set_project_icons(
                 commands.runtime().as_ref(),
@@ -952,16 +1194,22 @@ impl SettingsSource for LiveSettingsSource {
         &self,
         cwd: &str,
         query: &str,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> Result<Vec<super::project_file_picker_logic::ProjectEntry>, String> {
         use super::project_file_picker_logic::{ProjectEntry, ProjectEntryKind};
-        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
         let cwd = cwd.to_owned();
         let query = query.to_owned();
         let paths = bus
-            .run_blocking(move |commands| async move {
-                commands.search_paths(&cwd, &query, 40).await
-            })
+            .run_blocking(
+                move |commands| async move { commands.search_paths(&cwd, &query, 40).await },
+            )
             .map_err(|error| error.message)?;
         Ok(paths
             .into_iter()
@@ -988,12 +1236,15 @@ impl SettingsSource for LiveSettingsSource {
             .services
             .storage_cleanup
             .clone();
-        runtime_handle(&inner).spawn(async move {
-            let report = cleanup.run_now().await;
-            inner.lock().expect("live settings state").storage_cleanup =
-                Some(cleanup_report(&report));
-        });
-        self.publish(cx);
+        self.run_then(
+            async move {
+                let report = cleanup.run_now().await;
+                inner.lock().expect("live settings state").storage_cleanup =
+                    Some(cleanup_report(&report));
+            },
+            |(), _, _| {},
+            cx,
+        );
     }
 
     fn delete_thread(&self, thread_id: &str, cx: &mut App) {
@@ -1001,7 +1252,13 @@ impl SettingsSource for LiveSettingsSource {
             self.report("Could not delete thread", "Invalid thread id.", cx);
             return;
         };
-        let bus = self.inner.lock().expect("live settings state").services.bus.clone();
+        let bus = self
+            .inner
+            .lock()
+            .expect("live settings state")
+            .services
+            .bus
+            .clone();
         bus.spawn(
             move |commands| async move {
                 commands

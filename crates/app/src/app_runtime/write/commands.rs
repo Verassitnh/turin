@@ -10,8 +10,6 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use turin_contracts::orchestration_v2::OrchestrationV2Command;
-use turin_contracts::provider_instance::ProviderInstanceMutation;
-use turin_contracts::settings::{ServerSettings, ServerSettingsPatch};
 use turin_contracts::{CommandId, EventId, MessageId, ProjectId, ThreadId, UtcDateTime};
 use turin_orchestration::pipeline::effect_worker::error_chain;
 use turin_orchestration::pipeline::event_sink::ProjectCommit;
@@ -79,6 +77,8 @@ pub struct SendMessage {
     pub delivery: Delivery,
     /// Seeds a title from the first message.
     pub title_seed: Option<String>,
+    /// The proposed plan this message implements (`sourcePlanRef`).
+    pub source_plan_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +135,22 @@ impl Commands {
         let project_id = ProjectId::new(new_id()).expect("uuid project id");
         self.create_project_with_id(project_id, title, workspace_root)
             .await
+    }
+
+    /// `project.create` with `createWorkspaceRootIfMissing: true` (the command
+    /// palette's Add project): the folder is created when it does not exist, so
+    /// a mistyped path never yields a project whose sessions cannot start.
+    pub async fn create_project_creating_folder(
+        &self,
+        title: &str,
+        workspace_root: &str,
+    ) -> Result<ProjectId, CommandError> {
+        tokio::fs::create_dir_all(workspace_root)
+            .await
+            .map_err(|error| CommandError {
+                message: format!("Could not create the folder {workspace_root}: {error}"),
+            })?;
+        self.create_project(title, workspace_root).await
     }
 
     /// Same as [`Self::create_project`], but keeps the caller's project id
@@ -284,6 +300,12 @@ impl Commands {
         if let Some(seed) = input.title_seed {
             object.insert("titleSeed".into(), json!(seed));
         }
+        if let Some(plan_id) = input.source_plan_id {
+            object.insert(
+                "sourcePlanRef".into(),
+                json!({"threadId": input.thread_id, "planId": plan_id}),
+            );
+        }
         let result = self.dispatch(command).await?;
         Ok(SendReceipt {
             command_id,
@@ -314,6 +336,118 @@ impl Commands {
         }))
         .await
         .map(drop)
+    }
+
+    /// `mergeBack` in the thread relationships panel: merges `run_id` of the
+    /// fork `source_thread_id` back into `target_thread_id`.
+    pub async fn merge_thread_back(
+        &self,
+        source_thread_id: &ThreadId,
+        target_thread_id: &ThreadId,
+        run_id: &str,
+    ) -> Result<(), CommandError> {
+        self.dispatch(json!({
+            "type": "thread.merge_back",
+            "createdBy": "user",
+            "creationSource": "web",
+            "commandId": command_id(),
+            "sourceThreadId": source_thread_id,
+            "targetThreadId": target_thread_id,
+            "sourcePoint": {"type": "run", "runId": run_id},
+        }))
+        .await
+        .map(drop)
+    }
+
+    /// `stopSession` ("Disconnect agent session"): detaches every provider
+    /// session of the thread.
+    pub async fn detach_thread_sessions(&self, thread_id: &ThreadId) -> Result<(), CommandError> {
+        let records = self
+            .runtime
+            .orchestrator
+            .get_thread_records(
+                thread_id,
+                &[RecordField::ProviderSessions],
+                &RecordFilter::default(),
+            )
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let base = command_id();
+        for session in records.provider_sessions.iter() {
+            self.dispatch(json!({
+                "type": "provider-session.detach",
+                "commandId": format!("{base}:detach:{}", session.id),
+                "threadId": thread_id,
+                "providerSessionId": session.id,
+                "reason": "client-requested",
+            }))
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The lineage panel's per-row stop (`interruptTurn`): a provider-native
+    /// child stops through `subagent.stop` on the parent; an app-owned child
+    /// is its own thread, so its active run is interrupted.
+    pub async fn stop_subagent(
+        &self,
+        parent_thread_id: &ThreadId,
+        subagent_id: &str,
+        child_thread_id: &ThreadId,
+    ) -> Result<(), CommandError> {
+        let records = self
+            .runtime
+            .orchestrator
+            .get_thread_records(
+                parent_thread_id,
+                &[RecordField::Subagents],
+                &RecordFilter::default(),
+            )
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let native = records.subagents.iter().find(|agent| {
+            agent.id.as_str() == subagent_id
+                && agent.origin
+                    == turin_contracts::orchestration_v2::OrchestrationV2SubagentOrigin::ProviderNative
+        });
+        match native {
+            Some(agent) => {
+                let Some(run_id) = agent.run_id.as_ref() else {
+                    return Ok(());
+                };
+                self.dispatch(json!({
+                    "type": "subagent.stop",
+                    "commandId": command_id(),
+                    "threadId": parent_thread_id,
+                    "runId": run_id,
+                    "subagentId": agent.id,
+                }))
+                .await
+                .map(drop)
+            }
+            None => self.stop_thread(child_thread_id).await,
+        }
+    }
+
+    /// `stopWorkflow`: asks the provider to stop a running workflow coordinator.
+    pub async fn stop_workflow(
+        &self,
+        thread_id: &ThreadId,
+        subagent_id: &str,
+    ) -> Result<(), CommandError> {
+        let subagent_id = turin_contracts::NodeId::new(subagent_id)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+        self.runtime
+            .threads
+            .stop_workflow(
+                turin_contracts::orchestration_v2::OrchestrationV2StopWorkflowInput {
+                    thread_id: thread_id.clone(),
+                    subagent_id,
+                },
+                None,
+            )
+            .await
+            .map_err(|error| CommandError::from_error(&error))
     }
 
     /// `runtime-request.respond`: an approval decision (`accept`,
@@ -359,10 +493,10 @@ impl Commands {
             "requestId": request_id,
             "answers": answers,
         });
-        if let Some(object) = command.as_object_mut() {
-            if let Some(attachments) = attachments_by_question_id {
-                object.insert("attachmentsByQuestionId".into(), attachments);
-            }
+        if let Some(object) = command.as_object_mut()
+            && let Some(attachments) = attachments_by_question_id
+        {
+            object.insert("attachmentsByQuestionId".into(), attachments);
         }
         self.dispatch(command).await.map(drop)
     }
@@ -512,6 +646,34 @@ impl Commands {
         self.dispatch(command).await.map(drop)
     }
 
+    /// The model and runtime mode a new thread in `project_id` starts with
+    /// (project default, then settings default, then the first ready provider).
+    pub async fn new_thread_defaults(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<super::new_thread_defaults::NewThreadDefaults, CommandError> {
+        let settings = self.server_settings().await?;
+        let legacy = self
+            .runtime
+            .stores
+            .projects
+            .get(project_id.clone(), true)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?
+            .map(
+                |row| turin_shared::project_settings::LegacyProjectSettingsFields {
+                    default_model_selection: row.default_model_selection,
+                    default_thread_env_mode: row.default_thread_env_mode,
+                },
+            );
+        Ok(super::new_thread_defaults::resolve_new_thread_defaults(
+            &settings,
+            project_id,
+            legacy.as_ref(),
+            &self.provider_snapshots(),
+        ))
+    }
+
     pub async fn server_settings(
         &self,
     ) -> Result<turin_contracts::settings::ServerSettings, CommandError> {
@@ -577,6 +739,61 @@ impl Commands {
             .map_err(|error| CommandError::from_error(&error))
     }
 
+    /// `reviewEnvironment.diffPreview`: the branch range and working tree diffs.
+    pub async fn review_diff_preview(
+        &self,
+        input: &turin_contracts::review::ReviewDiffPreviewInput,
+    ) -> Result<turin_contracts::review::ReviewDiffPreviewResult, CommandError> {
+        self.runtime
+            .git
+            .get_review_diff_preview(input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `reviewEnvironment.diffFileContents`: the full old and new text behind a partial diff.
+    pub async fn review_diff_file_contents(
+        &self,
+        input: &turin_contracts::review::ReviewDiffFileContentsInput,
+    ) -> Result<turin_contracts::review::ReviewDiffFileContentsResult, CommandError> {
+        self.runtime
+            .git
+            .get_review_diff_file_contents(input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `orchestration.getTurnDiff` over the checkpoint refs `context` names (the thread's
+    /// projection): the unified patch for turns `from..=to`.
+    pub async fn checkpoint_turn_diff(
+        &self,
+        context: turin_git::checkpointing::checkpoint_diff_query::CheckpointProjection,
+        input: &turin_contracts::checkpoint_diff::OrchestrationGetTurnDiffInput,
+    ) -> Result<String, CommandError> {
+        use turin_git::checkpointing::checkpoint_diff_query::{
+            CheckpointContextError, CheckpointDiffQuery, CheckpointProjection,
+            CheckpointQueryContext,
+        };
+        struct Fixed(CheckpointProjection);
+        #[async_trait::async_trait]
+        impl CheckpointQueryContext for Fixed {
+            async fn get_checkpoint_context(
+                &self,
+                _: &ThreadId,
+            ) -> Result<CheckpointProjection, CheckpointContextError> {
+                Ok(self.0.clone())
+            }
+        }
+        CheckpointDiffQuery::new(
+            Arc::new(Fixed(context)),
+            Arc::clone(&self.runtime.checkpoint_store),
+        )
+        .get_turn_diff(input)
+        .await
+        .map(|result| result.diff)
+        .map_err(|error| CommandError::from_error(&error))
+    }
+
     pub async fn git_list_refs(
         &self,
         input: &turin_contracts::git::VcsListRefsInput,
@@ -602,6 +819,129 @@ impl Commands {
             .git_manager
             .invalidate_status(input.cwd.as_str());
         Ok(result)
+    }
+
+    /// `vcsEnvironment.createRef`: creates `ref_name` and, when asked, switches to it.
+    pub async fn git_create_ref(
+        &self,
+        input: turin_contracts::git::VcsCreateRefInput,
+    ) -> Result<turin_contracts::git::VcsCreateRefResult, CommandError> {
+        let result = self
+            .runtime
+            .git
+            .create_ref(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        self.runtime
+            .git_manager
+            .invalidate_status(input.cwd.as_str());
+        Ok(result)
+    }
+
+    /// `vcsEnvironment.pull`: fast-forwards the current branch from its upstream.
+    pub async fn git_pull(
+        &self,
+        cwd: &str,
+    ) -> Result<turin_contracts::git::VcsPullResult, CommandError> {
+        self.runtime
+            .git_manager
+            .pull_current_branch(cwd)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `vcsEnvironment.init`: `git init` in `cwd`.
+    pub async fn git_init(&self, cwd: &str) -> Result<(), CommandError> {
+        let input = turin_contracts::git::VcsInitInput {
+            cwd: turin_contracts::TrimmedNonEmptyString::new(cwd)
+                .map_err(|error| CommandError::new(error.to_string()))?,
+            kind: None,
+        };
+        let result = self
+            .runtime
+            .git
+            .init_repo(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error));
+        self.runtime.git_manager.invalidate_status(cwd);
+        result
+    }
+
+    /// `vcsEnvironment.runStackedAction`: commit, push and pull request steps.
+    /// `progress` hears every phase and hook event as it happens.
+    pub async fn git_run_stacked_action(
+        &self,
+        input: turin_contracts::git::GitRunStackedActionInput,
+        progress: Option<Arc<dyn Fn(turin_contracts::git::GitActionProgressEvent) + Send + Sync>>,
+    ) -> Result<turin_contracts::git::GitRunStackedActionResult, CommandError> {
+        let options = turin_git::git_manager::GitRunStackedActionOptions {
+            progress,
+            project: None,
+        };
+        self.runtime
+            .git_manager
+            .run_stacked_action(&input, options)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
+    /// `sourceControlEnvironment.publishRepository`: creates the remote, wires it
+    /// up and pushes the current branch.
+    pub async fn git_publish_repository(
+        &self,
+        input: turin_contracts::source_control::SourceControlPublishRepositoryInput,
+    ) -> Result<turin_contracts::source_control::SourceControlPublishRepositoryResult, CommandError>
+    {
+        let cwd = input.cwd.as_str().to_owned();
+        let service =
+            turin_source_control::source_control::repository_service::SourceControlRepositoryService::new(
+                turin_source_control::shared::host_process::working_directory(),
+                std::env::var("HOME").unwrap_or_default(),
+                Arc::clone(&self.runtime.source_control) as Arc<_>,
+                Arc::new(turin_git::source_control_bridge::GitRepositoryGit::new(
+                    Arc::clone(&self.runtime.git),
+                )),
+            );
+        let result = service
+            .publish_repository(input)
+            .await
+            .map_err(|error| CommandError::from_error(&error));
+        self.runtime.git_manager.invalidate_status(&cwd);
+        result
+    }
+
+    /// Which source control providers are installed and signed in (Publish needs one).
+    pub async fn source_control_providers(
+        &self,
+    ) -> Vec<turin_contracts::source_control::SourceControlProviderDiscoveryItem> {
+        self.runtime.source_control.discover().await
+    }
+
+    /// `threadEnvironment.updateMetadata` with a branch (and worktree) patch. `None`
+    /// clears the field; `expected_empty` makes the update lose to any launch that
+    /// lands first.
+    pub async fn update_thread_branch(
+        &self,
+        thread_id: &ThreadId,
+        branch: Option<String>,
+        worktree_path: Option<Option<String>>,
+        expected_empty: bool,
+    ) -> Result<(), CommandError> {
+        let mut command = json!({
+            "type": "thread.metadata.update",
+            "commandId": command_id(),
+            "threadId": thread_id,
+            "branch": branch,
+        });
+        if let Some(object) = command.as_object_mut() {
+            if let Some(worktree_path) = worktree_path {
+                object.insert("worktreePath".into(), json!(worktree_path));
+            }
+            if expected_empty {
+                object.insert("expectedEmpty".into(), json!(true));
+            }
+        }
+        self.dispatch(command).await.map(drop)
     }
 
     /// A missing production reader is unavailable, never a successful zero total.

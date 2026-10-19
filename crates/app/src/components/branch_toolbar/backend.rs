@@ -78,6 +78,12 @@ pub trait BranchBackend {
     /// The ref list for `cwd` filtered by `query`.
     fn list_refs(&self, cwd: &str, query: &str, cx: &App) -> RefPage;
     fn load_next_refs(&self, cwd: &str, query: &str, cx: &mut App);
+    /// Starts the first page for `cwd` and `query` when nothing has asked for it
+    /// yet. Cheap and idempotent: the view calls it every render.
+    fn ensure_refs(&self, _cwd: &str, _query: &str, _cx: &mut App) {}
+    /// Reloads the first page (the picker opening: refs change behind the
+    /// view's back when a git action or another tool switches branches).
+    fn reload_refs(&self, _cwd: &str, _query: &str, _cx: &mut App) {}
     /// `vcsEnvironment.listRefs` for one name (is the active ref remote?).
     fn find_ref(&self, cwd: &str, name: &str, cx: &App) -> Option<VcsRef>;
     fn switch_ref(

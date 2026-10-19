@@ -41,6 +41,15 @@ impl LivePaletteBackend {
     }
 }
 
+/// The mock snapshot advertises every capability. "New thread without a project" has no
+/// live implementation (see PORTING.md, "Palette: New thread without a project"), so it is
+/// left out rather than listed as a dead row. "Find in current thread" stays: the chat view
+/// mounts the find bar (`thread_find_provider`).
+pub(crate) fn hide_unported_commands(mut snapshot: PaletteSnapshot) -> PaletteSnapshot {
+    snapshot.scratch_thread_available = false;
+    snapshot
+}
+
 fn home() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".into())
 }
@@ -89,7 +98,7 @@ fn list_directories(directory: &str, show_hidden: bool) -> Result<FilesystemBrow
 
 impl PaletteBackend for LivePaletteBackend {
     fn snapshot(&self, cx: &App) -> PaletteSnapshot {
-        self.inner.snapshot(cx)
+        hide_unported_commands(self.inner.snapshot(cx))
     }
 
     fn search_messages(&self, query: String, cx: &mut App) -> Task<Vec<ThreadSearchMatch>> {
@@ -136,7 +145,7 @@ impl PaletteBackend for LivePaletteBackend {
         }
         let title = crate::state::projects::infer_project_title_from_path(&cwd);
         let task = self.bus.task(cx, move |commands| async move {
-            commands.create_project(&title, &cwd).await
+            commands.create_project_creating_folder(&title, &cwd).await
         });
         cx.spawn(async move |_| match task.await {
             Ok(project_id) => Ok(AddProjectOutcome::Created {

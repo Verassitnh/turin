@@ -31,7 +31,7 @@ use crate::composer::dispatch::{
     ComposerDispatchMode, ResolveComposerDispatchModeInput, resolve_composer_dispatch_mode,
 };
 use crate::composer::draft_store::{
-    ComposerDraftStore, ComposerFileAttachment, ComposerImageAttachment,
+    ComposerFileAttachment, ComposerImageAttachment, SharedDraftStore,
 };
 use crate::composer::editor_state::EditorSnapshot;
 use crate::composer::logic::{
@@ -76,7 +76,7 @@ pub enum Layer {
 pub struct ChatComposer {
     pub(super) store: Entity<ComposerStore>,
     pub(super) editor: Entity<PromptEditor>,
-    pub(super) drafts: ComposerDraftStore,
+    pub(super) drafts: SharedDraftStore,
     pub(super) thread_key: String,
     pub(super) validation: Option<String>,
     pub(super) history_position: Option<ComposerPromptHistoryPosition>,
@@ -88,10 +88,11 @@ pub struct ChatComposer {
     )>,
     pub(super) trigger_bounds: TriggerBounds,
     pub(super) focus: FocusHandle,
-    pub(super) attachment_counter: usize,
     pub(super) menu: super::menu::MenuState,
     pub(super) banner_stack_expanded: bool,
     pub(super) queue_expanded: bool,
+    /// Images being prepared off the UI thread; they hold attachment slots.
+    pub(super) pending_image_compressions: usize,
     pub(super) stash_highlight: Option<String>,
     pub(super) editing_run_id: Option<String>,
     /// The last `DraftRestore` applied.
@@ -130,6 +131,17 @@ pub struct TriggerBounds {
 
 impl ChatComposer {
     pub fn new(store: Entity<ComposerStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_drafts(store, SharedDraftStore::new(), window, cx)
+    }
+
+    /// A composer over `drafts`, which outlives it: the live thread view
+    /// rebuilds the composer per thread but keeps drafts and the stash.
+    pub fn with_drafts(
+        store: Entity<ComposerStore>,
+        drafts: SharedDraftStore,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let editor = cx.new(|cx| {
             PromptEditor::new(
                 "",
@@ -154,7 +166,7 @@ impl ChatComposer {
         let mut this = Self {
             store,
             editor,
-            drafts: ComposerDraftStore::new(),
+            drafts,
             thread_key: String::new(),
             validation: None,
             history_position: None,
@@ -163,10 +175,10 @@ impl ChatComposer {
             language_picker: None,
             trigger_bounds: TriggerBounds::default(),
             focus: cx.focus_handle(),
-            attachment_counter: 0,
             menu: Default::default(),
             banner_stack_expanded: false,
             queue_expanded: true,
+            pending_image_compressions: 0,
             stash_highlight: None,
             editing_run_id: None,
             restored_nonce: 0,
@@ -191,8 +203,10 @@ impl ChatComposer {
     }
 
     fn next_demo_stash_id(&mut self) -> String {
-        self.attachment_counter += 1;
-        format!("stash-{}", self.attachment_counter)
+        format!(
+            "stash-{}",
+            crate::composer::draft_store::next_composer_serial()
+        )
     }
 
     /// Debug aid for screenshots: `TURIN_COMPOSER_DEMO=<scenario>` preloads
@@ -292,7 +306,11 @@ impl ChatComposer {
                 vec![0u8; 2048],
             ));
             self.thread_key = "local:thread-1".into();
-            self.add_picked_files(files, window, cx);
+            self.add_picked_files(
+                crate::composer::attachment_intake::Intake::from_loaded(files),
+                window,
+                cx,
+            );
         }
         if scenario == "stash" {
             for text in [
@@ -499,7 +517,18 @@ impl ChatComposer {
     }
 
     pub(super) fn view_model(&self, cx: &App) -> Arc<ComposerViewModel> {
-        self.store.read(cx).view_model().clone()
+        let vm = self.store.read(cx).view_model().clone();
+        // `hasComposerAttachments`: attachments turn a plan follow-up into an ordinary send.
+        let has_attachments = self
+            .drafts
+            .get_composer_draft(&self.thread_key)
+            .is_some_and(|draft| !draft.images.is_empty() || !draft.files.is_empty());
+        if vm.show_plan_follow_up_prompt && has_attachments {
+            let mut next = (*vm).clone();
+            next.show_plan_follow_up_prompt = false;
+            return Arc::new(next);
+        }
+        vm
     }
 
     pub(super) fn source(&self, cx: &App) -> Option<Arc<dyn ComposerSource>> {
@@ -693,6 +722,7 @@ impl ChatComposer {
                 use gpui_kit::ClipboardEntry;
                 let mut loaded: Vec<(PickedFile, Vec<u8>)> = Vec::new();
                 let mut plain = String::new();
+                let mut errors: Vec<String> = Vec::new();
                 for entry in item.entries() {
                     match entry {
                         ClipboardEntry::Image(image) => {
@@ -716,24 +746,29 @@ impl ChatComposer {
                             ));
                         }
                         ClipboardEntry::ExternalPaths(paths) => {
-                            loaded.extend(
-                                paths
-                                    .paths()
-                                    .iter()
-                                    .cloned()
-                                    .filter_map(super::actions::read_picked_file),
+                            let intake = crate::composer::attachment_intake::load_paths(
+                                paths.paths().iter().cloned(),
                             );
+                            loaded.extend(intake.loaded);
+                            errors.extend(intake.errors);
                         }
                         ClipboardEntry::String(string) => plain.push_str(string.text()),
                     }
                 }
                 let files: Vec<PickedFile> = loaded.iter().map(|(file, _)| file.clone()).collect();
-                if loaded.is_empty() || !should_handle_composer_attachment_paste(&files, &plain) {
+                // Files that could not be read still get their error shown.
+                let handled = if loaded.is_empty() {
+                    !errors.is_empty() && plain.is_empty()
+                } else {
+                    should_handle_composer_attachment_paste(&files, &plain)
+                };
+                if !handled {
                     return false;
                 }
+                let intake = crate::composer::attachment_intake::Intake { loaded, errors };
                 let weak = paste_weak.clone();
                 window.defer(cx, move |window, cx| {
-                    weak.update(cx, |this, cx| this.add_picked_files(loaded, window, cx))
+                    weak.update(cx, |this, cx| this.add_picked_files(intake, window, cx))
                         .ok();
                 });
                 true
@@ -936,9 +971,35 @@ impl ChatComposer {
         let prompt = self.prompt(cx);
         let images = self.draft_images();
         let files = self.draft_files();
-        if prompt.trim().is_empty() && images.is_empty() && files.is_empty() {
+        // Implement/Refine: a plan is ready and the draft carries no attachments.
+        let plan_follow_up = vm
+            .show_plan_follow_up_prompt
+            .then_some(vm.plan_follow_up_plan.as_ref())
+            .flatten()
+            .filter(|_| images.is_empty() && files.is_empty() && vm.pending_answer.is_none());
+        if prompt.trim().is_empty()
+            && images.is_empty()
+            && files.is_empty()
+            && plan_follow_up.is_none()
+        {
             return;
         }
+        let draft_prompt = prompt.clone();
+        let (prompt, interaction_mode, source_plan_id) = match plan_follow_up {
+            Some(plan) => {
+                let follow_up = crate::composer::proposed_plan::resolve_plan_follow_up_submission(
+                    &prompt,
+                    &plan.markdown,
+                );
+                let implementing = follow_up.interaction_mode == InteractionMode::Default;
+                (
+                    follow_up.text,
+                    follow_up.interaction_mode,
+                    implementing.then(|| plan.plan_id.clone()),
+                )
+            }
+            None => (prompt, vm.interaction_mode, None),
+        };
         let running = vm.phase == crate::composer::view_model::SessionPhase::Running;
         let editing_queued_run = vm
             .queue
@@ -962,12 +1023,14 @@ impl ChatComposer {
             model: vm.selected_model.clone(),
             model_options: (!vm.selected_model_options.is_empty())
                 .then(|| vm.selected_model_options.clone()),
-            interaction_mode: vm.interaction_mode,
+            interaction_mode,
             runtime_mode: vm.runtime_mode,
             dispatch_mode,
             submission_intent: intent,
             answering_pending_user_input: answering,
             editing_queued_run,
+            source_plan_id,
+            draft_prompt,
         };
         let target = if answering {
             SubmissionTarget::PendingUserInput
@@ -1149,13 +1212,10 @@ impl Render for ChatComposer {
             .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| style.bg(cx.app_theme().accent))
             .on_drop(
                 cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
-                    let loaded: Vec<_> = paths
-                        .paths()
-                        .iter()
-                        .cloned()
-                        .filter_map(super::actions::read_picked_file)
-                        .collect();
-                    this.add_picked_files(loaded, window, cx);
+                    let intake = crate::composer::attachment_intake::load_paths(
+                        paths.paths().iter().cloned(),
+                    );
+                    this.add_picked_files(intake, window, cx);
                 }),
             )
             .w_full()

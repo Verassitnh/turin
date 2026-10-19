@@ -11,9 +11,11 @@ use gpui_kit::{
 };
 
 use super::SidebarEvent;
+use super::sidebar_provider_update_pill::SidebarProviderUpdatePill;
 use crate::assets::WORDMARK;
 use crate::branding::APP_BASE_NAME;
 use crate::components::drag_region::DragRegion as _;
+use crate::components::provider_update_launch_notification_logic::ProviderUpdateSidebarPillView;
 use crate::components::workspace_titlebar::workspace_titlebar_content_left;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{CONTROL_RADIUS, TEXT_SM, WORKSPACE_TOPBAR_HEIGHT};
@@ -86,11 +88,21 @@ impl RenderOnce for SidebarChromeHeader {
 #[derive(IntoElement)]
 pub struct SidebarChromeFooter {
     sidebar: WeakEntity<super::Sidebar>,
+    provider_update_pill: Option<ProviderUpdateSidebarPillView>,
 }
 
 impl SidebarChromeFooter {
     pub fn new(sidebar: WeakEntity<super::Sidebar>) -> Self {
-        Self { sidebar }
+        Self {
+            sidebar,
+            provider_update_pill: None,
+        }
+    }
+
+    /// `SidebarProviderUpdatePill`, above the utility row.
+    pub fn provider_update_pill(mut self, pill: Option<ProviderUpdateSidebarPillView>) -> Self {
+        self.provider_update_pill = pill;
+        self
     }
 }
 
@@ -108,7 +120,27 @@ impl RenderOnce for SidebarChromeFooter {
                         sidebar.update(cx, |_, cx| cx.emit(event)).ok();
                     })
             };
-        SidebarFooter::new().child(
+        let pill = self.provider_update_pill.clone().map(|view| {
+            let (open, dismiss) = (self.sidebar.clone(), self.sidebar.clone());
+            let key = view.key.clone();
+            SidebarProviderUpdatePill {
+                view,
+                exiting: false,
+                on_open_settings: Box::new(move |_, _, cx| {
+                    open.update(cx, |_, cx| cx.emit(SidebarEvent::OpenProviderSettings))
+                        .ok();
+                }),
+                on_dismiss: Box::new(move |_, _, cx| {
+                    let key = key.clone();
+                    dismiss
+                        .update(cx, |_, cx| {
+                            cx.emit(SidebarEvent::DismissProviderUpdatePill(key))
+                        })
+                        .ok();
+                }),
+            }
+        });
+        SidebarFooter::new().children(pill).child(
             div()
                 .flex()
                 .flex_row()

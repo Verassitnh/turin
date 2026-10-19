@@ -566,3 +566,92 @@ fn import_into_clears_stale_work_dirs_first() {
     assert!(!stale.exists());
     assert!(turin.path().join(TURIN_DATABASE_FILE).is_file());
 }
+
+fn add_project(path: &Path, id: &str) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute(
+        "INSERT INTO projection_projects (
+           project_id, title, workspace_root, default_model_selection_json, scripts_json,
+           created_at, updated_at, deleted_at
+         ) VALUES (?1, 'Imported', '/tmp/imported', NULL, '[]',
+                   '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL)",
+        [id],
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_staged_import_replaces_the_empty_database_the_app_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file_db(dir.path(), "source.sqlite", None);
+    add_project(&src, "from-t3");
+    let turin = tempfile::tempdir().unwrap();
+    // The app creates and opens its database before the wizard can run.
+    let live = file_db(turin.path(), TURIN_DATABASE_FILE, None);
+
+    let report = T3Import::stage_into(&src, turin.path()).unwrap();
+    assert_eq!(report.projects, 1);
+    // Staging never touches the open database.
+    assert!(column(&live, "SELECT project_id FROM projection_projects").is_empty());
+
+    assert_eq!(
+        T3Import::adopt_staged(turin.path()).unwrap(),
+        AdoptStaged::Adopted
+    );
+    assert_eq!(
+        column(&live, "SELECT project_id FROM projection_projects"),
+        vec!["from-t3".to_owned()]
+    );
+    assert!(!turin.path().join(STAGED_IMPORT_DIR).exists());
+    assert!(
+        turin
+            .path()
+            .join("statev2.sqlite.before-t3-import")
+            .is_file()
+    );
+    assert_eq!(
+        T3Import::adopt_staged(turin.path()).unwrap(),
+        AdoptStaged::NothingStaged
+    );
+}
+
+#[test]
+fn a_staged_import_never_replaces_a_database_that_has_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file_db(dir.path(), "source.sqlite", None);
+    let turin = tempfile::tempdir().unwrap();
+    let live = file_db(turin.path(), TURIN_DATABASE_FILE, None);
+    add_project(&live, "created-in-turin");
+
+    T3Import::stage_into(&src, turin.path()).unwrap();
+    assert_eq!(
+        T3Import::adopt_staged(turin.path()).unwrap(),
+        AdoptStaged::KeptExisting
+    );
+    assert_eq!(
+        column(&live, "SELECT project_id FROM projection_projects"),
+        vec!["created-in-turin".to_owned()]
+    );
+    assert!(!turin.path().join(STAGED_IMPORT_DIR).exists());
+}
+
+#[test]
+fn staging_twice_keeps_the_latest_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = file_db(dir.path(), "source.sqlite", None);
+    let turin = tempfile::tempdir().unwrap();
+    T3Import::stage_into(&src, turin.path()).unwrap();
+    add_project(&src, "second");
+    T3Import::stage_into(&src, turin.path()).unwrap();
+    assert_eq!(
+        T3Import::adopt_staged(turin.path()).unwrap(),
+        AdoptStaged::Adopted
+    );
+    assert_eq!(
+        column(
+            &turin.path().join(TURIN_DATABASE_FILE),
+            "SELECT project_id FROM projection_projects"
+        ),
+        vec!["second".to_owned()]
+    );
+}

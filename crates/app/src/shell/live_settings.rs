@@ -75,6 +75,58 @@ fn environment_info(rt: &WriteRuntime) -> EnvironmentInfo {
     }
 }
 
+/// Default settings window size (it is its own window, not the main window's
+/// persisted bounds).
+const SETTINGS_WINDOW_SIZE: (f32, f32) = (980., 720.);
+
+/// Window options of the settings window: centred at its own default size,
+/// whatever the main window's saved or maximized geometry is.
+pub fn settings_window_options(cx: &App) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(gpui_kit::WindowBounds::Windowed(
+            gpui_kit::Bounds::centered(
+                None,
+                gpui_kit::size(
+                    gpui_kit::px(SETTINGS_WINDOW_SIZE.0),
+                    gpui_kit::px(SETTINGS_WINDOW_SIZE.1),
+                ),
+                cx,
+            ),
+        )),
+        window_min_size: Some(gpui_kit::size(gpui_kit::px(640.), gpui_kit::px(480.))),
+        titlebar: Some(gpui_kit::TitlebarOptions {
+            title: Some("Settings".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(gpui_kit::point(gpui_kit::px(16.), gpui_kit::px(19.))),
+        }),
+        app_owns_titlebar_drag: true,
+        ..Default::default()
+    }
+}
+
+/// Opens Settings on the Providers page, with `instance_id` selected when set
+/// (`/settings/providers?instanceId=<id>`). Returns false when the live
+/// services are not ready yet.
+pub fn open_provider_settings(
+    live: &LiveShellHandle,
+    instance_id: Option<&str>,
+    cx: &mut App,
+) -> bool {
+    let Some(services) = live.try_services(cx) else {
+        return false;
+    };
+    let route = SettingsRoute::from_name("providers").expect("providers route");
+    live_window::open_targeting(
+        services,
+        live.client.clone(),
+        route,
+        instance_id.map(str::to_owned),
+        settings_window_options(cx),
+        cx,
+    );
+    true
+}
+
 /// Opens the settings window when live services and the command bus are ready.
 pub fn open_settings_route(
     live: &LiveShellHandle,
@@ -92,13 +144,7 @@ pub fn open_settings_route(
         );
         return false;
     };
-    live_window::open(
-        services,
-        live.client.clone(),
-        route,
-        options,
-        cx,
-    );
+    live_window::open(services, live.client.clone(), route, options, cx);
     true
 }
 

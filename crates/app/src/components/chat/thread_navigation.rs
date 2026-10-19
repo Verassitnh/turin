@@ -16,7 +16,5 @@ pub fn request_open_thread(thread_id: &str, cx: &mut App) {
 }
 
 pub fn take_thread_open_request(cx: &mut App) -> Option<String> {
-    cx.default_global::<ThreadOpenRequests>()
-        .thread_id
-        .take()
+    cx.default_global::<ThreadOpenRequests>().thread_id.take()
 }

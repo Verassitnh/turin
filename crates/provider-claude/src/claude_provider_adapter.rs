@@ -25,8 +25,9 @@ use crate::{
     claude_query_options::{ClaudeQueryOptionsInput, make_claude_query_options},
     claude_subagents::{SubagentRegistry, SubagentScope},
     claude_turn_items::{
-        ItemOrdinals, ToolCall, TurnScope, assistant_artifacts, compaction_item, item_ordinal,
-        reasoning_item, streaming_reasoning_item, tool_call_artifacts,
+        ItemOrdinals, RequestBody, ToolCall, TurnScope, assistant_artifacts, compaction_item,
+        item_ordinal, reasoning_item, request_artifacts, request_kind, streaming_reasoning_item,
+        summarize_tool_request, tool_call_artifacts, user_input_questions,
     },
     claude_turn_token_usage::normalize_claude_turn_token_usage,
     claude_usage_limits::ClaudeUsageLimitHooks,
@@ -49,6 +50,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use turin_claude_protocol::InboundControl;
 use turin_contracts::{
     PositiveInt, ProviderSessionId, RunId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString,
     UtcDateTime,
@@ -753,6 +755,16 @@ struct TrackedTool {
     started_at: UtcDateTime,
     finished: bool,
 }
+/// What a request asks, owned until its artifacts are built.
+enum OwnedRequestBody {
+    Approval {
+        request_kind: &'static str,
+        prompt: String,
+    },
+    UserInput {
+        questions: Vec<Value>,
+    },
+}
 enum PendingRequest {
     Approval(
         oneshot::Sender<ApprovalDecision>,
@@ -1412,17 +1424,64 @@ impl ClaudeActor {
         };
         match request {
             ClaudeHostRequest::Approval { request, reply } => {
+                let (native_id, kind, body) = match &request.kind {
+                    InboundControl::CanUseTool {
+                        tool_name,
+                        input,
+                        tool_use_id,
+                        title,
+                        description,
+                        decision_reason,
+                        ..
+                    } => {
+                        // Upstream: the SDK's own wording first, else what the tool will do.
+                        let prompt = title
+                            .clone()
+                            .or_else(|| description.clone())
+                            .or_else(|| decision_reason.clone())
+                            .unwrap_or_else(|| summarize_tool_request(tool_name, input));
+                        let request_kind = request_kind(tool_name);
+                        (
+                            tool_use_id.clone(),
+                            match request_kind {
+                                "file-read" => OrchestrationV2RuntimeRequestKind::FileRead,
+                                "file-change" => OrchestrationV2RuntimeRequestKind::FileChange,
+                                _ => OrchestrationV2RuntimeRequestKind::Command,
+                            },
+                            Some(OwnedRequestBody::Approval {
+                                request_kind,
+                                prompt,
+                            }),
+                        )
+                    }
+                    _ => (
+                        request.request_id.clone(),
+                        OrchestrationV2RuntimeRequestKind::Command,
+                        None,
+                    ),
+                };
                 self.register_request(
-                    request.request_id,
-                    request.body,
-                    OrchestrationV2RuntimeRequestKind::Command,
+                    native_id,
+                    body,
+                    kind,
                     PendingRequest::Approval(reply, self.placeholder_request(active)),
                 );
             }
             ClaudeHostRequest::Question { request, reply } => {
+                let (native_id, body) = match &request.kind {
+                    InboundControl::CanUseTool {
+                        input, tool_use_id, ..
+                    } => (
+                        tool_use_id.clone(),
+                        Some(OwnedRequestBody::UserInput {
+                            questions: user_input_questions(input),
+                        }),
+                    ),
+                    _ => (request.request_id.clone(), None),
+                };
                 self.register_request(
-                    request.request_id,
-                    request.body,
+                    native_id,
+                    body,
                     OrchestrationV2RuntimeRequestKind::UserInput,
                     PendingRequest::Question(reply, self.placeholder_request(active)),
                 );
@@ -1430,7 +1489,7 @@ impl ClaudeActor {
             ClaudeHostRequest::Dialog { request, reply } => {
                 self.register_request(
                     request.request_id,
-                    request.body,
+                    None,
                     OrchestrationV2RuntimeRequestKind::UserInput,
                     PendingRequest::Dialog(reply, self.placeholder_request(active)),
                 );
@@ -1481,11 +1540,11 @@ impl ClaudeActor {
     fn register_request(
         &mut self,
         native_request_id: String,
-        _body: Value,
+        body: Option<OwnedRequestBody>,
         kind: OrchestrationV2RuntimeRequestKind,
         mut pending: PendingRequest,
     ) {
-        let Some(active) = self.active.as_ref() else {
+        let Some(active) = self.active.as_mut() else {
             return;
         };
         let id =
@@ -1498,11 +1557,59 @@ impl ClaudeActor {
         request.id = id.clone();
         request.kind = kind;
         request.native_request_ref = Some(native_ref(&native_request_id));
-        self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
-            driver: driver(),
-            thread_id: Some(active.input.thread_id.clone()),
-            runtime_request: request.clone(),
+        // Upstream `buildApprovalRequestArtifacts`: a waiting node and the turn
+        // item that says what is asked, so the drawer can show it.
+        let artifacts = body.and_then(|body| {
+            let ordinal = item_ordinal(
+                &mut active.item_ordinals,
+                active.input.provider_turn_ordinal,
+                &format!("{native_request_id}:approval:{native_request_id}"),
+            );
+            let body = match &body {
+                OwnedRequestBody::Approval {
+                    request_kind,
+                    prompt,
+                } => RequestBody::Approval {
+                    request_kind,
+                    prompt,
+                },
+                OwnedRequestBody::UserInput { questions } => RequestBody::UserInput { questions },
+            };
+            request_artifacts(
+                &active.scope,
+                &native_request_id,
+                &id,
+                ordinal,
+                &body,
+                request.created_at,
+            )
         });
+        if let Some(artifacts) = &artifacts {
+            request.node_id = artifacts.node.id.clone();
+        }
+        let request = request.clone();
+        let thread_id = active.input.thread_id.clone();
+        if let Some(artifacts) = artifacts {
+            self.emit(ProviderAdapterV2Event::NodeUpdated {
+                driver: driver(),
+                node: artifacts.node,
+            });
+            self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
+                driver: driver(),
+                thread_id: Some(thread_id),
+                runtime_request: request,
+            });
+            self.emit(ProviderAdapterV2Event::TurnItemUpdated {
+                driver: driver(),
+                turn_item: artifacts.turn_item,
+            });
+        } else {
+            self.emit(ProviderAdapterV2Event::RuntimeRequestUpdated {
+                driver: driver(),
+                thread_id: Some(thread_id),
+                runtime_request: request,
+            });
+        }
         self.pending_requests.insert(id, pending);
     }
     /// Upstream `handleSdkMessage`: while the active turn's prompt is unconfirmed,

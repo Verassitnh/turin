@@ -103,13 +103,17 @@ actions!(
 /// Upstream default bindings (packages/shared/src/keybindings.ts) for the
 /// palette's shortcuts, in the app shell's key context.
 pub fn bind_keys(cx: &mut App, context: &'static str) {
-    cx.bind_keys([
+    cx.bind_keys(bindings(context));
+}
+
+pub(crate) fn bindings(context: &'static str) -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new("cmd-k", ToggleCommandPalette, Some(context)),
         KeyBinding::new("cmd-p", ToggleFilePicker, Some(context)),
         KeyBinding::new("cmd-shift-f", ToggleProjectSearch, Some(context)),
         KeyBinding::new("cmd-alt-a", SelectTheme, Some(context)),
         KeyBinding::new("cmd-alt-shift-a", CycleAppearance, Some(context)),
-    ]);
+    ]
 }
 
 /// Key context of the open overlay.

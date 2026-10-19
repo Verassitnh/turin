@@ -70,6 +70,12 @@ impl Stores {
         tokio::fs::create_dir_all(data_dir)
             .await
             .with_context(|| format!("creating Turin data dir {}", data_dir.display()))?;
+        // An import staged by the welcome wizard replaces an empty database before it is opened.
+        match turin_persistence::T3Import::adopt_staged(data_dir) {
+            Ok(turin_persistence::AdoptStaged::NothingStaged) => {}
+            Ok(outcome) => tracing::info!(?outcome, "staged T3 import"),
+            Err(error) => tracing::error!(%error, "adopting the staged T3 import failed"),
+        }
         let db = Db::open_configured(data_dir::database_path(data_dir))
             .await
             .context("opening Turin database")?;
@@ -89,6 +95,16 @@ impl Stores {
             outbox,
         }
     }
+}
+
+/// What the startup toast says when the database cannot be opened: the
+/// data folder and the underlying error, so the user can see this is not data
+/// loss.
+pub(crate) fn database_open_failure_message(data_dir: &std::path::Path, error: &str) -> String {
+    format!(
+        "Turin could not open its database in {}. Your projects and threads are not shown until this is fixed. ({error})",
+        data_dir.display()
+    )
 }
 
 /// Starts the write path and the feeds for the client store. Returns when the
@@ -114,10 +130,9 @@ pub async fn run(
         Ok(stores) => Arc::new(stores),
         Err(error) => {
             tracing::error!(error = %format!("{error:#}"), "failed to open Turin database; the sidebar stays empty");
-            bus.fail(format!("{error:#}"));
-            sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(
-                error.to_string(),
-            )));
+            let message = database_open_failure_message(&data_dir, &format!("{error:#}"));
+            bus.fail(message.clone());
+            sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message)));
             return;
         }
     };

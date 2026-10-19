@@ -143,6 +143,7 @@ async fn send_message_streams_a_fake_claude_reply_into_the_store() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -337,6 +338,7 @@ async fn stop_interrupts_a_running_turn() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -417,6 +419,7 @@ async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -463,10 +466,22 @@ async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
     .expect("run settled in time");
     assert!(answered, "an approval was raised");
     assert_eq!(status, OrchestrationV2RunStatus::Completed);
+    // The drawer shows what is approved: the item carries the command.
+    let records = orchestrator
+        .get_thread_records(&thread, &[RecordField::TurnItems], &RecordFilter::default())
+        .await
+        .expect("records");
+    let prompt = records.turn_items.iter().find_map(|item| match item {
+        turin_contracts::orchestration_v2::OrchestrationV2TurnItem::ApprovalRequest {
+            prompt,
+            ..
+        } => prompt.clone(),
+        _ => None,
+    });
+    assert_eq!(prompt.as_deref(), Some("Bash: pwd"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "provider-claude emits no user_input_request turn item (register_request drops the control request body), so the question id is unknowable; see docs/handoff/T22.md"]
 async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes() {
     use turin_contracts::orchestration_v2::{
         OrchestrationV2RuntimeRequestStatus, OrchestrationV2TurnItem,
@@ -502,6 +517,7 @@ async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes(
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -591,6 +607,7 @@ async fn queued_runs_can_be_reordered_edited_and_cancelled() {
                     model_selection: None,
                     delivery,
                     title_seed: None,
+                    source_plan_id: None,
                 })
                 .await
                 .expect("send")
@@ -722,6 +739,7 @@ async fn staged_uploads_are_claimed_into_the_thread_with_the_message() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send with attachments");
@@ -770,6 +788,7 @@ async fn the_first_message_gets_a_generated_title() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: Some("Respond with exactly".into()),
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -821,4 +840,439 @@ async fn at_completion_finds_workspace_files_and_folders() {
             .any(|(path, directory)| path == "src/components" && *directory),
         "{folders:?}"
     );
+}
+
+// A file created after the first `@` search (by the agent or the user) turns up
+// once the listing has aged, instead of staying invisible for the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn at_completion_finds_files_created_after_the_first_search() {
+    let harness = harness().await;
+    std::fs::write(harness.workspace.join("old.md"), "").expect("file");
+    let cwd = harness.workspace.to_str().expect("utf-8");
+    let first = harness
+        .commands
+        .search_paths(cwd, "fresh", 20)
+        .await
+        .expect("search");
+    assert!(first.is_empty(), "{first:?}");
+
+    std::fs::write(harness.workspace.join("freshly-made.rs"), "").expect("file");
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    let found = harness
+        .commands
+        .search_paths(cwd, "fresh", 20)
+        .await
+        .expect("search");
+    assert_eq!(
+        found.first(),
+        Some(&("freshly-made.rs".to_owned(), false)),
+        "{found:?}"
+    );
+    // A subsequence match is a match.
+    let fuzzy = harness
+        .commands
+        .search_paths(cwd, "frshmd", 20)
+        .await
+        .expect("search");
+    assert!(
+        fuzzy.iter().any(|(path, _)| path == "freshly-made.rs"),
+        "{fuzzy:?}"
+    );
+}
+
+// The composer's model star is the same saved setting the provider settings
+// panel writes, so it survives a restart and shows in both places.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_favorited_model_is_saved_in_the_server_settings() {
+    use turin_contracts::settings::ServerSettingsPatch;
+    let harness = harness().await;
+    let patch: ServerSettingsPatch = serde_json::from_value(json!({
+        "setModelFavorites": [
+            {"provider": "claudeAgent", "model": "claude-opus-5-5", "favorite": true}
+        ],
+    }))
+    .expect("patch");
+    let patch = crate::settings_logic::use_settings::prepare_model_preferences_patch(
+        &harness.commands.server_settings().await.expect("settings"),
+        patch,
+    )
+    .await
+    .expect("prepared");
+    harness
+        .commands
+        .update_server_settings(patch)
+        .await
+        .expect("update");
+    let saved = harness.commands.server_settings().await.expect("settings");
+    let keys = crate::components::chat::live_chat::favorite_keys(saved);
+    assert!(keys.contains("claudeAgent:claude-opus-5-5"), "{keys:?}");
+}
+
+// Implementing a plan names it on the message (`sourcePlanRef`), and the
+// orchestrator checks that the thread really has that plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn implementing_a_plan_sends_its_source_plan_to_the_orchestrator() {
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let error = harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "PLEASE IMPLEMENT THIS PLAN:\n# Ship it".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: Some("plan-1".into()),
+        })
+        .await
+        .expect_err("the thread has no such plan");
+    assert!(
+        error
+            .message
+            .contains("Proposed plan plan-1 does not exist on thread"),
+        "{}",
+        error.message
+    );
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A repository with one commit on `main`.
+fn git_repo(dir: &Path) {
+    git(dir, &["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("a.txt"), "one\n").expect("write");
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "init"]);
+}
+
+// The live git control: commit, pull, init, create/switch ref and the thread
+// branch update all run through the runtime instead of reporting "not wired".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn git_actions_run_against_a_real_repository() {
+    use turin_contracts::git::{
+        GitRunStackedActionInput, GitStackedAction, VcsCreateRefInput, VcsListRefsInput,
+        VcsSwitchRefInput,
+    };
+    use turin_contracts::{PositiveInt, TrimmedNonEmptyString};
+
+    let harness = harness().await;
+    let commands = &harness.commands;
+    let repo = harness.workspace.clone();
+    git_repo(&repo);
+    let cwd = repo.to_str().expect("utf-8");
+    let text = |value: &str| TrimmedNonEmptyString::new(value).expect("text");
+
+    // Status is a real read: a dirty tree is visible.
+    std::fs::write(repo.join("a.txt"), "one\ntwo\n").expect("edit");
+    let status = commands.git_status(cwd).await.expect("status");
+    assert!(status.is_repo && status.has_working_tree_changes);
+    assert_eq!(status.ref_name.as_ref().map(|n| n.as_str()), Some("main"));
+
+    // Commit through the stacked action, hearing its progress.
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let result = commands
+        .git_run_stacked_action(
+            GitRunStackedActionInput {
+                action_id: text("run-1"),
+                cwd: text(cwd),
+                action: GitStackedAction::Commit,
+                commit_message: Some(text("feat: two")),
+                feature_branch: None,
+                file_paths: None,
+                thread_id: None,
+                project_id: None,
+            },
+            Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        )
+        .await
+        .expect("commit");
+    assert_eq!(
+        result.commit.subject.as_ref().map(|s| s.as_str()),
+        Some("feat: two")
+    );
+    assert!(
+        !events.lock().unwrap().is_empty(),
+        "progress events are reported"
+    );
+    let status = commands.git_status(cwd).await.expect("status");
+    assert!(
+        !status.has_working_tree_changes,
+        "the commit cleaned the tree"
+    );
+
+    // Pull without an upstream reports git's reason, not a stub.
+    let pull = commands.git_pull(cwd).await.expect_err("no upstream");
+    assert!(!pull.message.contains("not wired"), "{pull}");
+
+    // Create + switch refs, and the list shows them.
+    commands
+        .git_create_ref(VcsCreateRefInput {
+            cwd: text(cwd),
+            ref_name: text("feature/x"),
+            switch_ref: Some(true),
+        })
+        .await
+        .expect("create ref");
+    let status = commands.git_status(cwd).await.expect("status");
+    assert_eq!(
+        status.ref_name.as_ref().map(|n| n.as_str()),
+        Some("feature/x")
+    );
+    let switched = commands
+        .git_switch_branch(VcsSwitchRefInput {
+            cwd: text(cwd),
+            ref_name: text("main"),
+        })
+        .await
+        .expect("switch");
+    assert_eq!(switched.ref_name.as_ref().map(|n| n.as_str()), Some("main"));
+    let listed = commands
+        .git_list_refs(&VcsListRefsInput {
+            cwd: text(cwd),
+            query: None,
+            cursor: None,
+            include_matching_remote_refs: Some(true),
+            ref_kind: None,
+            refresh: Some(true),
+            limit: PositiveInt::new(100),
+        })
+        .await
+        .expect("list refs");
+    let names: Vec<_> = listed.refs.iter().map(|r| r.name.as_str()).collect();
+    assert!(
+        names.contains(&"main") && names.contains(&"feature/x"),
+        "{names:?}"
+    );
+
+    // Init in a folder that is not a repository.
+    let plain = tempfile::tempdir().expect("plain dir");
+    let plain_cwd = plain.path().to_str().expect("utf-8");
+    assert!(
+        !commands
+            .git_status(plain_cwd)
+            .await
+            .expect("status")
+            .is_repo
+    );
+    commands.git_init(plain_cwd).await.expect("init");
+    assert!(
+        commands
+            .git_status(plain_cwd)
+            .await
+            .expect("status")
+            .is_repo
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_thread_branch_update_reaches_the_read_model() {
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    harness
+        .commands
+        .update_thread_branch(&thread, Some("feature/x".into()), Some(None), false)
+        .await
+        .expect("update branch");
+    let shell = harness
+        .stores
+        .projections
+        .get_thread_shell(&thread)
+        .await
+        .expect("read shell")
+        .expect("shell");
+    assert_eq!(shell.branch.as_ref().map(|b| b.as_str()), Some("feature/x"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn add_project_creates_a_missing_workspace_folder() {
+    let harness = harness().await;
+    let missing = harness.workspace.join("does/not/exist/foo");
+    assert!(!missing.exists());
+    let project_id = harness
+        .commands
+        .create_project_creating_folder("foo", missing.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    assert!(missing.is_dir(), "the workspace folder is created");
+    let row = harness
+        .stores
+        .projects
+        .get(project_id, false)
+        .await
+        .expect("read project")
+        .expect("project row");
+    assert_eq!(row.workspace_root, missing.to_str().expect("utf-8"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_threads_take_the_configured_default_model_and_runtime_mode() {
+    use turin_contracts::settings::ServerSettingsPatch;
+    let harness = harness().await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let patch: ServerSettingsPatch = serde_json::from_value(json!({
+        "defaultModelSelection": {"instanceId": "claudeAgent", "model": "claude-opus-5-5"},
+        "defaultRuntimeMode": "approval-required",
+    }))
+    .expect("patch");
+    harness
+        .commands
+        .update_server_settings(patch)
+        .await
+        .expect("update settings");
+    let defaults = harness
+        .commands
+        .new_thread_defaults(&project_id)
+        .await
+        .expect("defaults");
+    assert_eq!(
+        defaults.model_selection,
+        json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"})
+    );
+    assert_eq!(defaults.runtime_mode, "approval-required");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lineage_panel_commands_reach_the_orchestrator() {
+    let harness = harness().await;
+    let commands = &harness.commands;
+    let thread = project_and_thread(&harness).await;
+
+    // Merge back is dispatched (a plain thread is not a fork, so the decider
+    // refuses it with its own text rather than the command being dropped).
+    let merge = commands
+        .merge_thread_back(&thread, &thread, "no-such-run")
+        .await
+        .expect_err("not a fork");
+    assert!(merge.message.contains("is not a fork"), "{merge}");
+
+    // Stopping a workflow that does not exist is reported, not swallowed.
+    let stop = commands
+        .stop_workflow(&thread, "no-such-workflow")
+        .await
+        .expect_err("no such workflow");
+    assert!(stop.message.contains("no longer running"), "{stop}");
+
+    // A thread with no provider session has nothing to disconnect.
+    commands
+        .detach_thread_sessions(&thread)
+        .await
+        .expect("detach with no sessions");
+    // A child with nothing running stops as a no-op.
+    commands
+        .stop_subagent(&thread, "no-such-agent", &thread)
+        .await
+        .expect("stop idle child");
+}
+
+// The diff panel's live reads: a finished turn in a git workspace leaves a checkpoint the
+// panel can diff, and the working tree's changes come from the review diff preview.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_diff_panel_reads_a_turn_checkpoint_and_the_working_tree() {
+    use turin_contracts::TrimmedNonEmptyString;
+    use turin_contracts::checkpoint_diff::OrchestrationGetTurnDiffInput;
+    use turin_contracts::review::{ReviewDiffPreviewInput, ReviewDiffPreviewSourceKind};
+
+    let harness = harness().await;
+    let commands = &harness.commands;
+    git_repo(&harness.workspace);
+    let thread = project_and_thread(&harness).await;
+    let client = start(harness.stores.clone());
+    wait_for(&client, "the shell", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.threads.len() == 1)
+    })
+    .await;
+    client.open_thread(thread_id(thread.as_str()));
+    commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    let state = tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "a ready checkpoint", |state| {
+            state
+                .thread(&thread_id(thread.as_str()))
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+                        && data
+                            .checkpoints
+                            .iter()
+                            .any(|checkpoint| checkpoint.app_run_ordinal.is_some())
+                })
+        }),
+    )
+    .await
+    .expect("checkpoint in time");
+    let projection = state
+        .thread(&thread_id(thread.as_str()))
+        .and_then(|entry| entry.state.data.clone())
+        .expect("projection");
+    let context =
+        crate::diff::live_source::checkpoint_projection(&projection).expect("checkpoint context");
+    let patch = commands
+        .checkpoint_turn_diff(
+            context,
+            &OrchestrationGetTurnDiffInput {
+                from_turn_count: 0,
+                to_turn_count: 1,
+                thread_id: thread.clone(),
+                ignore_whitespace: Some(true),
+            },
+        )
+        .await
+        .expect("the turn's checkpoint diff reads");
+    // The fake turn edits nothing, so the turn's patch is empty but the read succeeds.
+    assert!(patch.is_empty(), "{patch}");
+
+    std::fs::write(harness.workspace.join("a.txt"), "one\ntwo\n").expect("edit");
+    let cwd = harness.workspace.to_str().expect("utf-8");
+    let preview = commands
+        .review_diff_preview(&ReviewDiffPreviewInput {
+            cwd: TrimmedNonEmptyString::new(cwd).expect("cwd"),
+            base_ref: None,
+            ignore_whitespace: Some(true),
+            file: None,
+        })
+        .await
+        .expect("preview");
+    let working = preview
+        .sources
+        .iter()
+        .find(|source| source.kind == ReviewDiffPreviewSourceKind::WorkingTree)
+        .expect("a working tree source");
+    assert!(working.diff.contains("+two"), "{}", working.diff);
 }

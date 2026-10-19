@@ -11,8 +11,7 @@ pub use service::ServerSettingsService;
 use serde_json::{Map, Value, json};
 use turin_contracts::provider_instance::{ProviderDriverKind, ProviderInstanceConfig};
 use turin_contracts::settings::{
-    ServerSettings, ServerSettingsPatch, default_server_settings,
-    resolve_provider_instance_enabled,
+    ServerSettings, ServerSettingsPatch, default_server_settings, resolve_provider_instance_enabled,
 };
 use turin_shared::server_settings::{
     derive_legacy_project_overrides, fallback_text_generation_model_selection,

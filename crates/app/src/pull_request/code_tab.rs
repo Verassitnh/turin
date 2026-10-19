@@ -681,10 +681,10 @@ impl CodeTab {
                 if snapshot.action_error.is_some() {
                     self.viewed.revert_inflight();
                     self.dirty = true;
-                } else if snapshot.pending_action.is_none() {
-                    if let Some(batch) = self.viewed.take_inflight() {
-                        self.viewed.acknowledge(&batch);
-                    }
+                } else if snapshot.pending_action.is_none()
+                    && let Some(batch) = self.viewed.take_inflight()
+                {
+                    self.viewed.acknowledge(&batch);
                 }
             }
             self.viewed.sync(&snapshot.files_viewed);

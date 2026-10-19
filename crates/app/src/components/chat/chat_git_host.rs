@@ -65,6 +65,8 @@ pub struct ChatGitHost {
     env_mode: Option<EnvMode>,
     start_from_origin: bool,
     branch_override: Option<Option<String>>,
+    /// The checkout whose git status was last requested.
+    refreshed_cwd: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -80,6 +82,7 @@ impl ChatGitHost {
             env_mode: None,
             start_from_origin: false,
             branch_override: None,
+            refreshed_cwd: None,
             _subscriptions: Vec::new(),
         }
     }
@@ -183,7 +186,24 @@ impl ChatGitHost {
             }
             self.routed = Some(routed.clone());
         }
+        // Git status is a pull model here: ask for it when the checkout
+        // changes (mount, new thread, worktree switch) and on window focus.
+        let cwd = self.git_props(&routed).git_cwd;
+        if self.refreshed_cwd != cwd {
+            if let Some(cwd) = &cwd {
+                self.backends.git.refresh_status(cwd, cx);
+            }
+            self.refreshed_cwd = cwd;
+        }
         if self.composer_toolbar.is_none() {
+            self._subscriptions
+                .push(cx.observe_window_activation(window, |this, window, cx| {
+                    if window.is_window_active()
+                        && let Some(cwd) = this.refreshed_cwd.clone()
+                    {
+                        this.backends.git.refresh_status(&cwd, cx);
+                    }
+                }));
             let make =
                 |layout, section, window: &mut Window, cx: &mut Context<Self>, this: &Self| {
                     let props = this.toolbar_props(&routed, layout, section);
@@ -287,7 +307,11 @@ impl ChatGitHost {
 
     pub fn details_card_with_lineage(
         &self,
-        lineage: Option<gpui_kit::Entity<crate::components::chat::thread_relationships_panel::ThreadRelationshipsPanel>>,
+        lineage: Option<
+            gpui_kit::Entity<
+                crate::components::chat::thread_relationships_panel::ThreadRelationshipsPanel,
+            >,
+        >,
         cx: &gpui_kit::App,
     ) -> Option<AnyElement> {
         let (workspace, branch, git) = (
@@ -327,7 +351,7 @@ impl ChatGitHost {
                     div()
                         .flex()
                         .flex_col()
-                        .children(lineage.map(|panel| panel.clone()))
+                        .children(lineage)
                         .child(section(false).child(workspace.clone()))
                         .child(section(true).child(branch.clone()).child(git.clone())),
                 )

@@ -10,6 +10,7 @@
 //! check (`canOpenEditor`) is cut with auth, so only a missing config path or
 //! an empty editor list disables the button (PORTING.md Deviations). The toast
 //! host is the shell's (T22), so the view takes the click handler.
+#![allow(dead_code)]
 
 use std::rc::Rc;
 

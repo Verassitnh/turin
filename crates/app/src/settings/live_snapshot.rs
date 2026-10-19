@@ -10,12 +10,12 @@ use turin_runtime::keybindings::KeybindingsConfigState;
 use turin_runtime::shared_keybindings::ResolvedKeybinding;
 use turin_shared::keybindings::ResolvedKeybindingRule;
 
+use super::view_model::{
+    AppearanceState, ArchivedThread, CleanupEntry, CleanupReport, EnvironmentInfo, KeybindingIssue,
+    KeybindingsViewModel, SettingsViewModel,
+};
 use crate::state::client_state::ClientState;
 use crate::state::models::EnvironmentProject;
-use super::view_model::{
-    AppearanceState, ArchivedThread, CleanupEntry, CleanupReport, EnvironmentInfo,
-    KeybindingIssue, KeybindingsViewModel, SettingsViewModel,
-};
 
 pub struct LiveSnapshotInput<'a> {
     pub appearance: AppearanceState,
@@ -68,7 +68,7 @@ fn keybindings_vm(state: &KeybindingsConfigState, config_path: String) -> Keybin
         rules: state
             .keybindings
             .iter()
-            .map(resolved_keybinding_rule)
+            .filter_map(resolved_keybinding_rule)
             .collect(),
         issues: state
             .issues
@@ -79,14 +79,14 @@ fn keybindings_vm(state: &KeybindingsConfigState, config_path: String) -> Keybin
                     turin_runtime::keybindings::ServerConfigIssue::MalformedConfig { message } => {
                         message.clone()
                     }
-                    turin_runtime::keybindings::ServerConfigIssue::InvalidEntry { message, .. } => {
-                        message.clone()
-                    }
+                    turin_runtime::keybindings::ServerConfigIssue::InvalidEntry {
+                        message, ..
+                    } => message.clone(),
                 },
                 index: match issue {
-                    turin_runtime::keybindings::ServerConfigIssue::InvalidEntry { index, .. } => {
-                        Some(*index)
-                    }
+                    turin_runtime::keybindings::ServerConfigIssue::InvalidEntry {
+                        index, ..
+                    } => Some(*index),
                     _ => None,
                 },
             })
@@ -95,15 +95,16 @@ fn keybindings_vm(state: &KeybindingsConfigState, config_path: String) -> Keybin
     }
 }
 
-fn resolved_keybinding_rule(rule: &ResolvedKeybinding) -> ResolvedKeybindingRule {
-    let shortcut = runtime_shortcut_expression(&rule.shortcut);
-    let shortcut = turin_shared::keybindings::parse_keybinding_shortcut(&shortcut)
-        .unwrap_or_else(|| panic!("runtime keybinding should round-trip: {shortcut}"));
-    ResolvedKeybindingRule {
+/// Converts a runtime rule to the shared shape. A rule that does not re-parse is
+/// skipped rather than crashing the Settings window.
+fn resolved_keybinding_rule(rule: &ResolvedKeybinding) -> Option<ResolvedKeybindingRule> {
+    let expression = runtime_shortcut_expression(&rule.shortcut);
+    let shortcut = turin_shared::keybindings::parse_keybinding_shortcut(&expression)?;
+    Some(ResolvedKeybindingRule {
         command: rule.command.clone(),
         shortcut,
         when_ast: rule.when_ast.clone(),
-    }
+    })
 }
 
 fn runtime_shortcut_expression(
@@ -125,7 +126,12 @@ fn runtime_shortcut_expression(
     if shortcut.mod_key {
         parts.push("mod");
     }
-    parts.push(shortcut.key.as_str());
+    // The space key is `" "` in memory but must be spelled `space` to survive the
+    // `+`-joined round trip (a bare space leaves an empty token).
+    parts.push(match shortcut.key.as_str() {
+        " " => "space",
+        other => other,
+    });
     parts.join("+")
 }
 
@@ -155,7 +161,9 @@ fn shell_projects_and_threads(
         .chain(view.archived_threads.iter())
     {
         if thread.archived_at.is_none() {
-            *counts.entry(thread.project_id.as_str().to_owned()).or_default() += 1;
+            *counts
+                .entry(thread.project_id.as_str().to_owned())
+                .or_default() += 1;
         }
     }
     let archived_threads = view
@@ -163,9 +171,9 @@ fn shell_projects_and_threads(
         .iter()
         .map(|thread| {
             let project = project_by_id.get(thread.project_id.as_str());
-            let project_name = project.map(|p| p.title.clone()).unwrap_or_else(|| {
-                thread.project_id.as_str().to_owned()
-            });
+            let project_name = project
+                .map(|p| p.title.clone())
+                .unwrap_or_else(|| thread.project_id.as_str().to_owned());
             let (monogram, color) = project
                 .and_then(|p| p.project_icon.as_ref())
                 .map(|icon| match icon {
@@ -175,9 +183,10 @@ fn shell_projects_and_threads(
                     crate::state::models::ProjectIcon::Emoji(emoji) => {
                         (emoji.chars().next().unwrap_or('?').to_string(), 0x155dfc)
                     }
-                    crate::state::models::ProjectIcon::Lucide { .. } => {
-                        (project_name.chars().next().unwrap_or('?').to_string(), 0x155dfc)
-                    }
+                    crate::state::models::ProjectIcon::Lucide { .. } => (
+                        project_name.chars().next().unwrap_or('?').to_string(),
+                        0x155dfc,
+                    ),
                 })
                 .unwrap_or_else(|| {
                     (
@@ -191,7 +200,10 @@ fn shell_projects_and_threads(
                 project_name,
                 project_monogram: monogram,
                 project_color: color,
-                archived_at: thread.archived_at.clone().unwrap_or_else(|| thread.updated_at.clone()),
+                archived_at: thread
+                    .archived_at
+                    .clone()
+                    .unwrap_or_else(|| thread.updated_at.clone()),
                 created_at: thread.created_at.clone(),
             }
         })

@@ -3,8 +3,6 @@
 
 use gpui_kit::{App, KeyBinding, actions};
 
-use super::command_palette_bus::{is_command_palette_open, open_command_palette};
-
 const KEY_CONTEXT: &str = "AppShell";
 
 actions!(
@@ -18,14 +16,43 @@ actions!(
 );
 
 pub fn bind_chat_route_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("cmd-k", OpenCommandPalette, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-t", ReopenClosedView, Some(KEY_CONTEXT)),
-    ]);
+    cx.bind_keys(bindings());
 }
 
-pub fn open_command_palette_if_closed() {
-    if !is_command_palette_open() {
-        open_command_palette(None);
+fn bindings() -> Vec<KeyBinding> {
+    vec![
+        // mod+k is bound once, to `ToggleCommandPalette` in components/command_palette.rs. A second
+        // binding here would shadow it (the later binding wins) and reach a bus nobody listens to.
+        KeyBinding::new("cmd-shift-t", ReopenClosedView, Some(KEY_CONTEXT)),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(bindings: &[KeyBinding]) -> Vec<String> {
+        bindings
+            .iter()
+            .map(|binding| {
+                binding
+                    .keystrokes()
+                    .iter()
+                    .map(|keystroke| keystroke.inner().unparse())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    /// The later of two bindings for one key wins, so a duplicate silently disables the first.
+    /// `cmd-k` once lived here and in the palette's table, and the palette's lost.
+    #[test]
+    fn route_shortcuts_do_not_shadow_the_command_palette_keys() {
+        let palette = keys(&crate::components::command_palette::bindings(KEY_CONTEXT));
+        assert!(palette.iter().any(|key| key == "cmd-k"), "{palette:?}");
+        for key in keys(&bindings()) {
+            assert!(!palette.contains(&key), "{key} is also a palette key");
+        }
     }
 }

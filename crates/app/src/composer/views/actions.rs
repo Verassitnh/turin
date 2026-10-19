@@ -13,8 +13,10 @@ use gpui_kit::{
 use crate::components::chat::chat_media;
 use crate::components::chat::expanded_image::{PreviewAttachment, build_expanded_image_preview};
 use crate::composer::attachment_files::{
-    ComposerAttachmentFileKind, PickedFile, classify_composer_attachment_file,
-    format_attachment_size, infer_image_mime_type_from_name,
+    FileAttachmentCapabilityState, PickedFile, format_attachment_size,
+};
+use crate::composer::attachment_intake::{
+    Intake, load_path, load_paths, plan_staging, prepare_image,
 };
 use crate::composer::draft_store::{
     AddAttachmentsOptions, ComposerFileAttachment, ComposerImageAttachment,
@@ -34,20 +36,6 @@ use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, TEXT_3XS, TEXT_XS};
 use crate::ui::{Icon, IconName, Tooltip};
-
-fn guess_mime(name: &str) -> String {
-    if let Some(mime) = infer_image_mime_type_from_name(name) {
-        return mime.to_owned();
-    }
-    match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
-        Some("txt" | "md" | "log") => "text/plain",
-        Some("json") => "application/json",
-        Some("pdf") => "application/pdf",
-        Some("csv") => "text/csv",
-        _ => "application/octet-stream",
-    }
-    .to_owned()
-}
 
 impl ChatComposer {
     // ----- Model picker ---------------------------------------------------
@@ -137,70 +125,118 @@ impl ChatComposer {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
             };
-            let loaded = cx
+            let intake = cx
                 .background_executor()
-                .spawn(async move {
-                    paths
-                        .into_iter()
-                        .filter_map(read_picked_file)
-                        .collect::<Vec<_>>()
-                })
+                .spawn(async move { load_paths(paths) })
                 .await;
             this.update_in(cx, |this, window, cx| {
-                this.add_picked_files(loaded, window, cx)
+                this.add_picked_files(intake, window, cx)
             })
             .ok();
         })
         .detach();
     }
 
+    /// `addComposerFiles`: stages what the draft may take and reports the rest.
+    /// Images are prepared (HEIC conversion, downscaling to the wire cap) off
+    /// the UI thread and land in the draft when ready.
     pub(super) fn add_picked_files(
         &mut self,
-        loaded: Vec<(PickedFile, Vec<u8>)>,
+        intake: Intake,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut images = Vec::new();
-        let mut files = Vec::new();
-        let mut rejected = Vec::new();
-        for (picked, data) in loaded {
-            let id = format!("att-{}-{}", picked.name, self.next_attachment_id());
-            match classify_composer_attachment_file(&picked) {
-                ComposerAttachmentFileKind::Image => {
-                    images.push(ComposerImageAttachment::new(
-                        &id,
-                        &picked.name,
-                        &picked.mime_type,
-                        data,
-                    ));
-                }
-                ComposerAttachmentFileKind::File => files.push(ComposerFileAttachment {
-                    id,
-                    name: picked.name.clone(),
-                    mime_type: picked.mime_type.clone(),
-                    size_bytes: picked.size_bytes,
-                    data: Some(Arc::new(data)),
-                    uploaded_attachment_id: None,
-                    upload_environment_id: None,
-                }),
-                ComposerAttachmentFileKind::UnsupportedImage => rejected.push(picked.name.clone()),
-            }
-        }
-        if !rejected.is_empty() {
-            self.validation = Some(format!("Unsupported image format: {}", rejected.join(", ")));
-        }
+        let Intake { loaded, mut errors } = intake;
+        let vm = self.view_model(cx);
+        let capability = FileAttachmentCapabilityState {
+            attachment_uploads_capability_known: vm.attachment_uploads_capability_known,
+            supports_attachment_uploads: vm.supports_attachment_uploads,
+            max_file_attachment_bytes: vm.max_file_attachment_bytes,
+        };
         let key = self.thread_key.clone();
-        self.drafts
-            .add_images(&key, images, AddAttachmentsOptions::default());
+        let reserved = self
+            .drafts
+            .get_composer_draft(&key)
+            .map_or(0, |draft| draft.images.len() + draft.files.len())
+            + self.pending_image_compressions;
+        let staged = plan_staging(loaded, reserved, &capability);
+        errors.extend(staged.errors);
+        // The last error wins, as `setThreadError(error)` does.
+        self.validation = errors.pop();
+        let files: Vec<ComposerFileAttachment> = staged
+            .files
+            .into_iter()
+            .map(|(picked, data)| ComposerFileAttachment {
+                id: format!("att-{}-{}", picked.name, self.next_attachment_id()),
+                name: picked.name.clone(),
+                mime_type: picked.mime_type.clone(),
+                size_bytes: data.len() as u64,
+                data: Some(Arc::new(data)),
+                uploaded_attachment_id: None,
+                upload_environment_id: None,
+            })
+            .collect();
         self.drafts
             .add_files(&key, files, AddAttachmentsOptions::default());
+        if !staged.images.is_empty() {
+            let images: Vec<(String, PickedFile, Vec<u8>)> = staged
+                .images
+                .into_iter()
+                .map(|(picked, data)| {
+                    (
+                        format!("att-{}-{}", picked.name, self.next_attachment_id()),
+                        picked,
+                        data,
+                    )
+                })
+                .collect();
+            let count = images.len();
+            self.pending_image_compressions += count;
+            cx.spawn_in(window, async move |this, cx| {
+                let prepared = cx
+                    .background_executor()
+                    .spawn(async move {
+                        images
+                            .into_iter()
+                            .map(|(id, picked, data)| (id, prepare_image(picked, data)))
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                this.update_in(cx, |this, _, cx| {
+                    this.pending_image_compressions =
+                        this.pending_image_compressions.saturating_sub(count);
+                    let mut ready = Vec::new();
+                    let mut failure = None;
+                    for (id, outcome) in prepared {
+                        match outcome {
+                            Ok((picked, data)) => ready.push(ComposerImageAttachment::new(
+                                &id,
+                                &picked.name,
+                                &picked.mime_type,
+                                data,
+                            )),
+                            Err(error) => failure = Some(error),
+                        }
+                    }
+                    this.drafts
+                        .add_images(&key, ready, AddAttachmentsOptions::default());
+                    // Only failures are reported: a success must not clear
+                    // an error something else set meanwhile.
+                    if failure.is_some() {
+                        this.validation = failure;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
         self.focus_editor(window, cx);
         cx.notify();
     }
 
     fn next_attachment_id(&mut self) -> usize {
-        self.attachment_counter += 1;
-        self.attachment_counter
+        crate::composer::draft_store::next_composer_serial()
     }
 
     pub(super) fn render_attachments(
@@ -242,7 +278,7 @@ impl ChatComposer {
                     .child(name.clone())
                     .into_any_element();
                 div()
-                    .id(("composer-image", image.id.len()))
+                    .id(("composer-image", attachment_key(&image.id)))
                     .group("attachment")
                     .relative()
                     .size(rems(4.))
@@ -272,7 +308,7 @@ impl ChatComposer {
                         fallback,
                     })
                     .child(self.remove_button(
-                        ("remove-image", image.id.len()),
+                        ("remove-image", attachment_key(&image.id)),
                         format!("Remove {name}"),
                         {
                             let id = id.clone();
@@ -292,7 +328,7 @@ impl ChatComposer {
                 let id = file.id.clone();
                 let name = file.name.clone();
                 div()
-                    .id(("composer-file", file.id.len()))
+                    .id(("composer-file", attachment_key(&file.id)))
                     .flex()
                     .h(rems(2.))
                     .max_w(rems(16.))
@@ -325,7 +361,7 @@ impl ChatComposer {
                     )
                     .child(
                         div()
-                            .id(("remove-file", file.id.len()))
+                            .id(("remove-file", attachment_key(&file.id)))
                             .flex()
                             .size(rems(1.25))
                             .items_center()
@@ -466,11 +502,9 @@ impl ChatComposer {
     }
 }
 
+/// One file for attachment; `None` when it is refused (see [`load_path`]).
 pub fn read_picked_file(path: PathBuf) -> Option<(PickedFile, Vec<u8>)> {
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    let data = std::fs::read(&path).ok()?;
-    let picked = PickedFile::new(&name, &guess_mime(&name), data.len() as u64);
-    Some((picked, data))
+    load_path(&path).ok()
 }
 
 // ----- Stash and queued-message editing ---------------------------------------
@@ -479,8 +513,10 @@ use crate::composer::draft_store::PromptStashEntry;
 
 impl ChatComposer {
     fn next_stash_id(&mut self) -> String {
-        self.attachment_counter += 1;
-        format!("stash-{}", self.attachment_counter)
+        format!(
+            "stash-{}",
+            crate::composer::draft_store::next_composer_serial()
+        )
     }
 
     /// ⌘S: stash the draft; on an empty composer restore the lone entry or
@@ -688,4 +724,13 @@ impl ChatComposer {
             }
         }
     }
+}
+
+/// A per-attachment element id. Hashing the whole id keeps two attachments with
+/// same-length names (e.g. two `pasted-image.png`) from sharing one GPUI element id.
+fn attachment_key(id: &str) -> usize {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish() as usize
 }

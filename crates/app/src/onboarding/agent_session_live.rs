@@ -25,13 +25,10 @@ use turin_projects::agent_session_discovery::{
 use turin_projects::agent_session_importer::AgentSessionImporter;
 use turin_projects::agent_session_scanner::AgentSessionScanner;
 use turin_projects::project_ports::{
-    ImportedProviderRuntime, OrchestrationEventWriter, PortError, ProjectRow,
-    ProjectStoreReads, ProviderRuntimeRows, ProviderThreadIds, ThreadRecordSummary,
-    ThreadRecordReader,
+    ImportedProviderRuntime, OrchestrationEventWriter, PortError, ProjectRow, ProjectStoreReads,
+    ProviderRuntimeRows, ProviderThreadIds, ThreadRecordReader, ThreadRecordSummary,
 };
-use turin_projects::project_service::{
-    ProjectOperation, ProjectOperationError, ProjectServiceApi,
-};
+use turin_projects::project_service::{ProjectOperation, ProjectOperationError, ProjectServiceApi};
 use turin_provider_core::id_allocator::derive;
 
 use crate::app_runtime::write::runtime::WriteRuntime;
@@ -51,10 +48,7 @@ impl AgentSessionLive {
         let discovery: Arc<dyn AgentSessionScanner> = Arc::new(
             AgentSessionDiscovery::with_local_filesystem(host, settings, projects),
         );
-        let importer = Arc::new(build_importer(
-            Arc::clone(&discovery),
-            Arc::clone(&runtime),
-        ));
+        let importer = Arc::new(build_importer(Arc::clone(&discovery), Arc::clone(&runtime)));
         Self {
             discovery,
             importer,
@@ -211,7 +205,7 @@ fn unimplemented_project_service() -> turin_projects::project_service::ProjectSe
         operation: ProjectOperation::ReadProject,
         project_id: None,
         workspace_root: None,
-        cause: anyhow::anyhow!("project service method not wired for onboarding import").into(),
+        cause: anyhow::anyhow!("project service method not wired for onboarding import"),
     })
 }
 
@@ -220,8 +214,10 @@ impl ProjectServiceApi for ImportProjects {
     async fn create(
         &self,
         _: turin_projects::project_service::ProjectCreateInput,
-    ) -> Result<turin_contracts::project::Project, turin_projects::project_service::ProjectServiceError>
-    {
+    ) -> Result<
+        turin_contracts::project::Project,
+        turin_projects::project_service::ProjectServiceError,
+    > {
         Err(unimplemented_project_service())
     }
 
@@ -238,21 +234,29 @@ impl ProjectServiceApi for ImportProjects {
     async fn update(
         &self,
         _: turin_projects::project_service::ProjectUpdateInput,
-    ) -> Result<turin_contracts::project::Project, turin_projects::project_service::ProjectServiceError>
-    {
-        Err(turin_projects::project_service::ProjectServiceError::NotFound {
-            project_id: ProjectId::new("unused").expect("id"),
-        })
+    ) -> Result<
+        turin_contracts::project::Project,
+        turin_projects::project_service::ProjectServiceError,
+    > {
+        Err(
+            turin_projects::project_service::ProjectServiceError::NotFound {
+                project_id: ProjectId::new("unused").expect("id"),
+            },
+        )
     }
 
     async fn delete(
         &self,
         _: turin_projects::project_service::ProjectDeleteInput,
-    ) -> Result<turin_contracts::project::Project, turin_projects::project_service::ProjectServiceError>
-    {
-        Err(turin_projects::project_service::ProjectServiceError::NotFound {
-            project_id: ProjectId::new("unused").expect("id"),
-        })
+    ) -> Result<
+        turin_contracts::project::Project,
+        turin_projects::project_service::ProjectServiceError,
+    > {
+        Err(
+            turin_projects::project_service::ProjectServiceError::NotFound {
+                project_id: ProjectId::new("unused").expect("id"),
+            },
+        )
     }
 
     async fn get_by_id(
@@ -279,9 +283,10 @@ impl ProjectServiceApi for ImportProjects {
                 row.favicon_path
                     .and_then(|path| TrimmedNonEmptyString::new(&path).ok()),
             ),
-            project_icon: Some(row.project_icon.map(|icon| {
-                ReceivedProjectIcon(Some(icon.0))
-            })),
+            project_icon: Some(
+                row.project_icon
+                    .map(|icon| ReceivedProjectIcon(Some(icon.0))),
+            ),
             default_model_selection: row.default_model_selection,
             default_thread_env_mode: Some(row.default_thread_env_mode),
             auto_pull: Some(row.auto_pull),
@@ -307,7 +312,7 @@ impl ProjectServiceApi for ImportProjects {
             operation: ProjectOperation::ListProjects,
             project_id: None,
             workspace_root: None,
-            cause: anyhow::anyhow!("not implemented").into(),
+            cause: anyhow::anyhow!("not implemented"),
         })
     }
 
@@ -324,8 +329,10 @@ impl ProjectServiceApi for ImportProjects {
     async fn list_shells(
         &self,
         _: Option<&[ProjectId]>,
-    ) -> Result<Vec<turin_contracts::orchestration_project::OrchestrationProjectShell>, ProjectOperationError>
-    {
+    ) -> Result<
+        Vec<turin_contracts::orchestration_project::OrchestrationProjectShell>,
+        ProjectOperationError,
+    > {
         Ok(Vec::new())
     }
 }
@@ -384,13 +391,8 @@ struct RuntimeRows(turin_persistence::Db);
 impl ProviderRuntimeRows for RuntimeRows {
     async fn list_runtime_payloads(&self) -> Result<Vec<Option<Value>>, PortError> {
         let db = self.0.clone();
-        let rows = db
-            .read(|conn| list_provider_sessions(conn, false))
-            .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| row.runtime_payload)
-            .collect())
+        let rows = db.read(|conn| list_provider_sessions(conn, false)).await?;
+        Ok(rows.into_iter().map(|row| row.runtime_payload).collect())
     }
 
     async fn upsert_imported(&self, row: &ImportedProviderRuntime) -> Result<(), PortError> {
@@ -410,7 +412,7 @@ impl ProviderRuntimeRows for RuntimeRows {
             runtime_payload: Some(row.runtime_payload.clone()),
         };
         db.write(move |conn| upsert_provider_session(conn, &runtime, UpsertConflict::Ignore))
-        .await?;
+            .await?;
         Ok(())
     }
 

@@ -31,6 +31,11 @@ pub const SIDEBAR_WIDTH: f32 = 256.;
 pub type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type MouseDownHandler = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App) + 'static>;
 
+/// Parent classes win over the component's own, like `twMerge`.
+fn apply_overrides(base: Div, overrides: Vec<Box<dyn FnOnce(Div) -> Div>>) -> Div {
+    overrides.into_iter().fold(base, |base, apply| apply(base))
+}
+
 /// A plain container with upstream's classes and children.
 macro_rules! container {
     ($(#[$meta:meta])* $name:ident, $style:expr) => {
@@ -38,7 +43,7 @@ macro_rules! container {
         #[derive(IntoElement, Default)]
         pub struct $name {
             children: Vec<AnyElement>,
-            base: Option<Div>,
+            overrides: Vec<Box<dyn FnOnce(Div) -> Div>>,
         }
 
         impl $name {
@@ -46,9 +51,11 @@ macro_rules! container {
                 Self::default()
             }
 
-            /// Layout classes from the parent (`className` on the upstream call site).
-            pub fn with(mut self, f: impl FnOnce(Div) -> Div) -> Self {
-                self.base = Some(f(self.base.take().unwrap_or_else(div)));
+            /// Layout classes from the parent (`className` on the upstream call
+            /// site). They apply after the component's own classes, so they
+            /// win like `twMerge` does (a `flex-row` replaces `flex-col`).
+            pub fn with(mut self, f: impl FnOnce(Div) -> Div + 'static) -> Self {
+                self.overrides.push(Box::new(f));
                 self
             }
         }
@@ -62,7 +69,7 @@ macro_rules! container {
         impl RenderOnce for $name {
             fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
                 let style: fn(Div, &App) -> Div = $style;
-                style(self.base.unwrap_or_else(div), cx).children(self.children)
+                apply_overrides(style(div(), cx), self.overrides).children(self.children)
             }
         }
     };
@@ -614,5 +621,23 @@ impl RenderOnce for SidebarInput {
             .font_weight(FontWeight::MEDIUM)
             .text_color(scope.sidebar_foreground)
             .child(Input::new(&self.state).appearance(false).p_0().h_auto())
+    }
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::*;
+
+    // The inset is `flex-col`, and the app layout passes `flex-row` for the
+    // chat column and the right panel. When the component's own classes won,
+    // the panel stacked under a zero-height chat column.
+    #[test]
+    fn parent_classes_override_the_components_own() {
+        let mut inset = apply_overrides(
+            div().flex().flex_col(),
+            vec![Box::new(|this: Div| this.flex_row())],
+        );
+        let direction = Styled::style(&mut inset).flex_direction;
+        assert_eq!(format!("{direction:?}"), "Some(Row)");
     }
 }

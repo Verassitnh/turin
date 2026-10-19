@@ -60,9 +60,19 @@ impl Providers {
     /// `base_dir` is Turin's data dir (the "T3 home" of R1's host: runtime
     /// state lives in `<base_dir>/userdata`).
     pub async fn build(base_dir: &Path, initial_settings: ServerSettings) -> anyhow::Result<Self> {
-        // No leases yet: the app does not run background probes or refreshes
-        // on its own. Provider status refreshes on demand.
-        let background: ShouldRunBackgroundWork = Arc::new(|_scope| Box::pin(async { false }));
+        // Upstream runs provider-status refreshes while a client holds a
+        // `provider-status` lease. The app window is that client for as long as
+        // the process lives, so the demand is always there: the periodic
+        // refresh (`providerHealthRefreshInterval`) keeps update advisories
+        // current. No other scope has a consumer.
+        let background: ShouldRunBackgroundWork = Arc::new(|scope| {
+            Box::pin(async move {
+                matches!(
+                    scope,
+                    turin_provider_core::background_scope::BackgroundScope::ProviderStatus { .. }
+                )
+            })
+        });
         let live = DesktopProviderHost::new(base_dir, base_dir, initial_settings, background)
             .context("opening the provider host (secret store)")?;
         let settings = live.settings_handle();
@@ -93,13 +103,12 @@ impl Providers {
             if let Some(driver) = drivers
                 .iter()
                 .find(|driver| driver.driver_kind().as_str() == kind)
+                && let Some(reader) = driver.usage()
             {
-                if let Some(reader) = driver.usage() {
-                    usage_readers.push(turin_usage::usage_service::UsageReader {
-                        driver_kind: kind.to_owned(),
-                        reader: reader.clone(),
-                    });
-                }
+                usage_readers.push(turin_usage::usage_service::UsageReader {
+                    driver_kind: kind.to_owned(),
+                    reader: reader.clone(),
+                });
             }
         }
         let hydration = ProviderInstanceRegistryHydration::new(drivers, &host)

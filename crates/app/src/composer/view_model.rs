@@ -71,7 +71,7 @@ pub enum InteractionMode {
 }
 
 /// The settings the composer reads (`UnifiedSettings` subset).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComposerSettings {
     pub send_shortcut: SendShortcut,
     pub follow_up_behavior: ActiveTurnComposerAction,
@@ -79,6 +79,59 @@ pub struct ComposerSettings {
     pub context_window_meter_enabled: bool,
     pub show_skills_in_slash_menu: bool,
     pub plan_mode_enabled: bool,
+}
+
+impl ComposerSettings {
+    /// The composer's slice of the saved client settings (`useSettings()`).
+    pub fn from_client(settings: &turin_contracts::settings::ClientSettings) -> Self {
+        use turin_contracts::settings::{FollowUpBehavior, SendShortcut as Saved};
+        Self {
+            send_shortcut: match settings.send_shortcut {
+                Saved::Enter => SendShortcut::Enter,
+                Saved::ModEnter => SendShortcut::ModEnter,
+                Saved::ModEnterMultiline => SendShortcut::ModEnterMultiline,
+            },
+            follow_up_behavior: match settings.follow_up_behavior {
+                FollowUpBehavior::Queue => ActiveTurnComposerAction::Queue,
+                FollowUpBehavior::Steer => ActiveTurnComposerAction::Steer,
+            },
+            composer_rich_text_enabled: settings.composer_rich_text_enabled,
+            context_window_meter_enabled: settings.context_window_meter_enabled,
+            show_skills_in_slash_menu: settings.show_skills_in_slash_menu,
+            plan_mode_enabled: settings.plan_mode_enabled,
+        }
+    }
+}
+
+/// The saved composer settings every live composer reads; the shell
+/// replaces it when the client settings file changes.
+#[derive(Clone, Default)]
+pub struct SavedComposerSettings(pub Option<ComposerSettings>);
+
+impl gpui_kit::Global for SavedComposerSettings {}
+
+impl SavedComposerSettings {
+    /// Stores `settings` and returns whether the composer-facing slice changed.
+    pub fn apply(
+        cx: &mut gpui_kit::App,
+        settings: &turin_contracts::settings::ClientSettings,
+    ) -> bool {
+        let next = ComposerSettings::from_client(settings);
+        let changed = cx.try_global::<Self>().and_then(|saved| saved.0.as_ref()) != Some(&next);
+        if changed {
+            cx.set_global(Self(Some(next)));
+        }
+        changed
+    }
+
+    /// Saved settings, or upstream's defaults before the file was read.
+    pub fn current(cx: &gpui_kit::App) -> ComposerSettings {
+        cx.try_global::<Self>()
+            .and_then(|saved| saved.0.clone())
+            .unwrap_or_else(|| {
+                ComposerSettings::from_client(&turin_contracts::settings::ClientSettings::default())
+            })
+    }
 }
 
 impl Default for ComposerSettings {
@@ -155,6 +208,13 @@ pub struct BannerItem {
     pub disabled_actions: Vec<String>,
     /// A failure shown under the actions (`<p role="alert" class="basis-full text-xs text-destructive">`).
     pub error: Option<String>,
+}
+
+/// The proposed plan a follow-up acts on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanFollowUpPlan {
+    pub plan_id: String,
+    pub markdown: String,
 }
 
 /// A queued run behind the active turn (`QueuedRunsControl`).
@@ -265,6 +325,8 @@ pub struct ComposerViewModel {
     pub queue: Option<QueueState>,
     pub show_plan_follow_up_prompt: bool,
     pub plan_follow_up_title: Option<String>,
+    /// The plan Implement hands to the agent (`activeProposedPlan`): its id and markdown.
+    pub plan_follow_up_plan: Option<PlanFollowUpPlan>,
     pub pending_answer: Option<PendingAnswer>,
     pub has_pending_approval: bool,
     pub resume_compaction_tokens: Option<f64>,
@@ -325,6 +387,7 @@ impl Default for ComposerViewModel {
             queue: None,
             show_plan_follow_up_prompt: false,
             plan_follow_up_title: None,
+            plan_follow_up_plan: None,
             pending_answer: None,
             has_pending_approval: false,
             resume_compaction_tokens: None,
@@ -374,6 +437,11 @@ pub struct SendRequest {
     pub answering_pending_user_input: bool,
     /// Edits the queued message instead of sending.
     pub editing_queued_run: Option<String>,
+    /// The plan being implemented, sent as the message's source plan.
+    pub source_plan_id: Option<String>,
+    /// What the user typed, which a failed send hands back (the prompt of a
+    /// plan follow-up is not theirs to get back).
+    pub draft_prompt: String,
 }
 
 /// The user's intent, routed to whatever owns the thread.

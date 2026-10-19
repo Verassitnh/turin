@@ -134,7 +134,8 @@ impl ProviderDriver for OpenCodeDriver {
     ) -> Result<ProviderInstance, ProviderDriverError> {
         let settings = settings_from(&input.config)
             .map_err(|error| driver_error(&self.kind, &input.instance_id, error))?;
-        let enabled = settings.enabled && input.enabled;
+        // Upstream: `effectiveConfig = { ...config, enabled }` (envelope flag wins).
+        let enabled = input.enabled;
         let draft = build_open_code_snapshot(OpenCodeSnapshotInput {
             enabled,
             server_url: &settings.server_url,
@@ -294,5 +295,38 @@ mod tests {
             "opencode"
         );
         assert!(driver.decode_config(&json!({"binaryPath": 3})).is_err());
+    }
+
+    /// The settings fold strips `config.enabled` into the envelope; the
+    /// envelope flag alone must enable the instance.
+    #[tokio::test]
+    async fn envelope_enabled_flag_wins_over_folded_config() {
+        use turin_contracts::provider_instance::{
+            ProviderInstanceConfig, ProviderInstanceConfigMap, ProviderInstanceId,
+        };
+        use turin_provider_core::provider_instance_registry::ProviderInstanceRegistry;
+
+        let id = ProviderInstanceId::new("opencode").unwrap();
+        let mut map = ProviderInstanceConfigMap::default();
+        map.insert(
+            id.clone(),
+            ProviderInstanceConfig {
+                driver: ProviderDriverKind::new("opencode").unwrap(),
+                display_name: None,
+                accent_color: None,
+                environment: None,
+                enabled: Some(true),
+                config: Some(json!({"binaryPath": "/opt/opencode"})),
+            },
+        );
+        let registry = ProviderInstanceRegistry::new(
+            vec![Arc::new(OpenCodeDriver::new()) as Arc<dyn ProviderDriver>],
+            map,
+        )
+        .await;
+        let instance = registry.get_instance(&id).unwrap();
+        assert!(instance.enabled);
+        let snapshot = instance.snapshot.get_snapshot().await;
+        assert!(snapshot.draft.enabled);
     }
 }

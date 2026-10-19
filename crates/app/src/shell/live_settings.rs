@@ -75,20 +75,33 @@ fn environment_info(rt: &WriteRuntime) -> EnvironmentInfo {
     }
 }
 
-/// Window options of the settings window.
+/// Default settings window size (it is its own window, not the main window's
+/// persisted bounds).
+const SETTINGS_WINDOW_SIZE: (f32, f32) = (980., 720.);
+
+/// Window options of the settings window: centred at its own default size,
+/// whatever the main window's saved or maximized geometry is.
 pub fn settings_window_options(cx: &App) -> WindowOptions {
-    crate::desktop::merge_window_options(
-        WindowOptions {
-            titlebar: Some(gpui_kit::TitlebarOptions {
-                title: Some("Settings".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(gpui_kit::point(gpui_kit::px(16.), gpui_kit::px(19.))),
-            }),
-            app_owns_titlebar_drag: true,
-            ..Default::default()
-        },
-        cx,
-    )
+    WindowOptions {
+        window_bounds: Some(gpui_kit::WindowBounds::Windowed(
+            gpui_kit::Bounds::centered(
+                None,
+                gpui_kit::size(
+                    gpui_kit::px(SETTINGS_WINDOW_SIZE.0),
+                    gpui_kit::px(SETTINGS_WINDOW_SIZE.1),
+                ),
+                cx,
+            ),
+        )),
+        window_min_size: Some(gpui_kit::size(gpui_kit::px(640.), gpui_kit::px(480.))),
+        titlebar: Some(gpui_kit::TitlebarOptions {
+            title: Some("Settings".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(gpui_kit::point(gpui_kit::px(16.), gpui_kit::px(19.))),
+        }),
+        app_owns_titlebar_drag: true,
+        ..Default::default()
+    }
 }
 
 /// Opens Settings on the Providers page, with `instance_id` selected when set

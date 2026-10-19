@@ -1038,3 +1038,36 @@ async fn new_threads_take_the_configured_default_model_and_runtime_mode() {
     );
     assert_eq!(defaults.runtime_mode, "approval-required");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lineage_panel_commands_reach_the_orchestrator() {
+    let harness = harness().await;
+    let commands = &harness.commands;
+    let thread = project_and_thread(&harness).await;
+
+    // Merge back is dispatched (a plain thread is not a fork, so the decider
+    // refuses it with its own text rather than the command being dropped).
+    let merge = commands
+        .merge_thread_back(&thread, &thread, "no-such-run")
+        .await
+        .expect_err("not a fork");
+    assert!(merge.message.contains("is not a fork"), "{merge}");
+
+    // Stopping a workflow that does not exist is reported, not swallowed.
+    let stop = commands
+        .stop_workflow(&thread, "no-such-workflow")
+        .await
+        .expect_err("no such workflow");
+    assert!(stop.message.contains("no longer running"), "{stop}");
+
+    // A thread with no provider session has nothing to disconnect.
+    commands
+        .detach_thread_sessions(&thread)
+        .await
+        .expect("detach with no sessions");
+    // A child with nothing running stops as a no-op.
+    commands
+        .stop_subagent(&thread, "no-such-agent", &thread)
+        .await
+        .expect("stop idle child");
+}

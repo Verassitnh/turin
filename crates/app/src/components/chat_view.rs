@@ -23,7 +23,7 @@ use super::chat::composer_pending_panels::{
     ComposerPendingApprovalBanner, ComposerPendingUserInputBanner,
 };
 use super::chat::live_chat::LiveChat;
-use super::chat::live_lineage::lineage_panel_snapshot;
+use super::chat::live_lineage::{lineage_panel_snapshot, live_lineage_actions};
 use super::chat::live_wiring::{live_overlay_banners, subagent_bar_from_state};
 use super::chat::messages_timeline::MessagesTimeline;
 use super::chat::provider_status_banner::{
@@ -41,8 +41,7 @@ use super::chat::thread_error_banner::{
     dismiss_thread_error_banner_for_session, get_thread_error_banner_key,
     is_thread_error_banner_dismissed_for_session, should_show_thread_error_banner,
 };
-use super::chat::thread_navigation::request_open_thread;
-use super::chat::thread_relationships_panel::{LineageActions, ThreadRelationshipsPanel};
+use super::chat::thread_relationships_panel::ThreadRelationshipsPanel;
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
 use super::chat::timeline_page_scroll::TimelinePageScrollSession;
@@ -381,18 +380,12 @@ impl ChatView {
                     .map(|entry| entry.driver_kind.clone())
             });
             let snapshot = lineage_panel_snapshot(state, thread_id, driver)?;
-            let open_thread = Rc::new(|id: &ThreadId, _: &mut Window, cx: &mut App| {
-                request_open_thread(id.as_str(), cx);
-            });
+            let actions =
+                live_lineage_actions(live.client.clone(), live.bus.clone(), thread_id.clone());
             let panel = window.use_keyed_state(
                 format!("live-thread-lineage:{}", thread_id.as_str()),
                 cx,
-                |_, _| {
-                    ThreadRelationshipsPanel::new(snapshot.clone()).actions(LineageActions {
-                        open_thread: Some(open_thread.clone()),
-                        ..Default::default()
-                    })
-                },
+                |_, _| ThreadRelationshipsPanel::new(snapshot.clone()).actions(actions.clone()),
             );
             panel.update(cx, |panel, cx| panel.reload(snapshot, cx));
             Some(panel)

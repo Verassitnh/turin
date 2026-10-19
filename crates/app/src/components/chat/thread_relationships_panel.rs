@@ -12,8 +12,8 @@ use std::rc::Rc;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px, rems,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, div, px, rems,
 };
 
 use super::agent_elapsed::AgentElapsed;
@@ -58,16 +58,29 @@ use crate::ui::{Icon, IconName};
 
 type ThreadHandler = Rc<dyn Fn(&ThreadId, &mut Window, &mut App)>;
 type ActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
-type StopSubagentHandler = Rc<dyn Fn(&ThreadId, &RuntimeSubagent, &mut Window, &mut App)>;
-type StopWorkflowHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+/// A command that settles later: the handler gets the panel so it can clear
+/// the busy state through [`ThreadRelationshipsPanel::finish_busy_action`] or
+/// [`ThreadRelationshipsPanel::finish_stop`] once the command finishes.
+type PanelHandler = Rc<dyn Fn(WeakEntity<ThreadRelationshipsPanel>, &mut Window, &mut App)>;
+type StopSubagentHandler = Rc<
+    dyn Fn(
+        WeakEntity<ThreadRelationshipsPanel>,
+        &ThreadId,
+        &RuntimeSubagent,
+        &mut Window,
+        &mut App,
+    ),
+>;
+type StopWorkflowHandler =
+    Rc<dyn Fn(WeakEntity<ThreadRelationshipsPanel>, &str, &mut Window, &mut App)>;
 
 /// The commands the panel fires (`navigate`, `mergeBack`, `stopSession`,
 /// `interruptTurn`, `stopWorkflow`). Unset handlers make the control inert.
 #[derive(Clone, Default)]
 pub struct LineageActions {
     pub open_thread: Option<ThreadHandler>,
-    pub merge: Option<ActionHandler>,
-    pub detach: Option<ActionHandler>,
+    pub merge: Option<PanelHandler>,
+    pub detach: Option<PanelHandler>,
     pub stop_subagent: Option<StopSubagentHandler>,
     pub stop_workflow: Option<StopWorkflowHandler>,
 }
@@ -183,7 +196,10 @@ impl ThreadRelationshipsPanel {
     /// Replace the projected snapshot while keeping wired actions.
     pub fn reload(&mut self, snapshot: LineagePanelSnapshot, cx: &mut Context<Self>) {
         let actions = self.actions.clone();
+        let (busy_action, stopping_id) = (self.busy_action, self.stopping_id.take());
         *self = Self::new(snapshot).actions(actions);
+        self.busy_action = busy_action;
+        self.stopping_id = stopping_id;
         cx.notify();
     }
 
@@ -296,16 +312,19 @@ impl ThreadRelationshipsPanel {
                     gpui_kit::component::menu::PopupMenuItem::new("Disconnect agent session")
                         .icon(IconName::Unplug)
                         .on_click(move |_, window, cx| {
+                            let weak = panel.clone();
                             panel
                                 .update(cx, |panel, cx| {
+                                    // No handler, no busy state: the control stays inert.
+                                    let Some(detach) = panel.actions.detach.clone() else {
+                                        return;
+                                    };
                                     if panel.busy_action.is_some() {
                                         return;
                                     }
                                     panel.busy_action = Some(LineageBusyAction::Detach);
                                     cx.notify();
-                                    if let Some(detach) = panel.actions.detach.clone() {
-                                        detach(window, cx);
-                                    }
+                                    detach(weak, window, cx);
                                 })
                                 .ok();
                         }),
@@ -672,16 +691,18 @@ impl ThreadRelationshipsPanel {
                 let agent_id = agent.id.clone();
                 let panel = cx.entity().downgrade();
                 Rc::new(move |window: &mut Window, cx: &mut App| {
+                    let weak = panel.clone();
                     panel
                         .update(cx, |panel, cx| {
+                            let Some(stop) = panel.actions.stop_workflow.clone() else {
+                                return;
+                            };
                             if panel.stopping_id.is_some() {
                                 return;
                             }
                             panel.stopping_id = Some(agent_id.clone());
                             cx.notify();
-                            if let Some(stop) = panel.actions.stop_workflow.clone() {
-                                stop(&agent_id, window, cx);
-                            }
+                            stop(weak, &agent_id, window, cx);
                         })
                         .ok();
                 }) as ActionHandler
@@ -741,14 +762,15 @@ impl ThreadRelationshipsPanel {
                     .into_any_element()
             })
             .on_click(cx.listener(|this, _, window, cx| {
+                let Some(merge) = this.actions.merge.clone() else {
+                    return;
+                };
                 if this.busy_action.is_some() {
                     return;
                 }
                 this.busy_action = Some(LineageBusyAction::Merge);
                 cx.notify();
-                if let Some(merge) = this.actions.merge.clone() {
-                    merge(window, cx);
-                }
+                merge(cx.entity().downgrade(), window, cx);
             }));
             panel_split_group(
                 SharedString::from(format!("lineage-split-{}", thread_id.as_str())),
@@ -820,14 +842,15 @@ impl ThreadRelationshipsPanel {
                             .into_any_element()
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        let Some(stop) = this.actions.stop_subagent.clone() else {
+                            return;
+                        };
                         if this.stopping_id.is_some() {
                             return;
                         }
                         this.stopping_id = Some(child_id.as_str().to_owned());
                         cx.notify();
-                        if let Some(stop) = this.actions.stop_subagent.clone() {
-                            stop(&child_id, &agent, window, cx);
-                        }
+                        stop(cx.entity().downgrade(), &child_id, &agent, window, cx);
                     })),
                 ))
         });

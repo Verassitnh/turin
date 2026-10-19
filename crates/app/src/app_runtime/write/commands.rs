@@ -330,6 +330,118 @@ impl Commands {
         .map(drop)
     }
 
+    /// `mergeBack` in the thread relationships panel: merges `run_id` of the
+    /// fork `source_thread_id` back into `target_thread_id`.
+    pub async fn merge_thread_back(
+        &self,
+        source_thread_id: &ThreadId,
+        target_thread_id: &ThreadId,
+        run_id: &str,
+    ) -> Result<(), CommandError> {
+        self.dispatch(json!({
+            "type": "thread.merge_back",
+            "createdBy": "user",
+            "creationSource": "web",
+            "commandId": command_id(),
+            "sourceThreadId": source_thread_id,
+            "targetThreadId": target_thread_id,
+            "sourcePoint": {"type": "run", "runId": run_id},
+        }))
+        .await
+        .map(drop)
+    }
+
+    /// `stopSession` ("Disconnect agent session"): detaches every provider
+    /// session of the thread.
+    pub async fn detach_thread_sessions(&self, thread_id: &ThreadId) -> Result<(), CommandError> {
+        let records = self
+            .runtime
+            .orchestrator
+            .get_thread_records(
+                thread_id,
+                &[RecordField::ProviderSessions],
+                &RecordFilter::default(),
+            )
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let base = command_id();
+        for session in records.provider_sessions.iter() {
+            self.dispatch(json!({
+                "type": "provider-session.detach",
+                "commandId": format!("{base}:detach:{}", session.id),
+                "threadId": thread_id,
+                "providerSessionId": session.id,
+                "reason": "client-requested",
+            }))
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The lineage panel's per-row stop (`interruptTurn`): a provider-native
+    /// child stops through `subagent.stop` on the parent; an app-owned child
+    /// is its own thread, so its active run is interrupted.
+    pub async fn stop_subagent(
+        &self,
+        parent_thread_id: &ThreadId,
+        subagent_id: &str,
+        child_thread_id: &ThreadId,
+    ) -> Result<(), CommandError> {
+        let records = self
+            .runtime
+            .orchestrator
+            .get_thread_records(
+                parent_thread_id,
+                &[RecordField::Subagents],
+                &RecordFilter::default(),
+            )
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let native = records.subagents.iter().find(|agent| {
+            agent.id.as_str() == subagent_id
+                && agent.origin
+                    == turin_contracts::orchestration_v2::OrchestrationV2SubagentOrigin::ProviderNative
+        });
+        match native {
+            Some(agent) => {
+                let Some(run_id) = agent.run_id.as_ref() else {
+                    return Ok(());
+                };
+                self.dispatch(json!({
+                    "type": "subagent.stop",
+                    "commandId": command_id(),
+                    "threadId": parent_thread_id,
+                    "runId": run_id,
+                    "subagentId": agent.id,
+                }))
+                .await
+                .map(drop)
+            }
+            None => self.stop_thread(child_thread_id).await,
+        }
+    }
+
+    /// `stopWorkflow`: asks the provider to stop a running workflow coordinator.
+    pub async fn stop_workflow(
+        &self,
+        thread_id: &ThreadId,
+        subagent_id: &str,
+    ) -> Result<(), CommandError> {
+        let subagent_id = turin_contracts::NodeId::new(subagent_id)
+            .map_err(|error| CommandError::new(error.to_string()))?;
+        self.runtime
+            .threads
+            .stop_workflow(
+                turin_contracts::orchestration_v2::OrchestrationV2StopWorkflowInput {
+                    thread_id: thread_id.clone(),
+                    subagent_id,
+                },
+                None,
+            )
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
     /// `runtime-request.respond`: an approval decision (`accept`,
     /// `acceptForSession`, `acceptAlways`, `decline`, `cancel`) or the answers
     /// to a user-input request (question id -> answer).

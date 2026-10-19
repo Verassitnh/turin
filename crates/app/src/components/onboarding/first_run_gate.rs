@@ -180,12 +180,18 @@ impl FirstRunGate {
             let gate = cx.entity().downgrade();
             // Deferred, not async: the gate must finish this frame before the dialog opens.
             window.defer(cx, move |window, cx| {
-                open_welcome_wizard(backend, window, cx, move |cx| {
+                open_welcome_wizard(backend, window, cx, move |landing, window, cx| {
                     gate.update(cx, |gate, cx| {
                         gate.state = FirstRunGateState {
                             decision: FirstRunDecision::App,
                             stalled: false,
                         };
+                        // `openNewThread(projectRef)`, else stay on `/`.
+                        if let Some(project_id) = landing {
+                            gate.layout.update(cx, |layout, cx| {
+                                layout.open_new_thread_in_project(&project_id, window, cx)
+                            });
+                        }
                         cx.notify();
                     })
                     .ok();

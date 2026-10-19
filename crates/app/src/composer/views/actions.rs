@@ -13,7 +13,8 @@ use gpui_kit::{
 use crate::components::chat::chat_media;
 use crate::components::chat::expanded_image::{PreviewAttachment, build_expanded_image_preview};
 use crate::composer::attachment_files::{
-    FileAttachmentCapabilityState, PickedFile, format_attachment_size,
+    FileAttachmentCapabilityState, PickedFile, file_attachment_staging_limit,
+    format_attachment_size,
 };
 use crate::composer::attachment_intake::{
     Intake, load_path, load_paths, plan_staging, prepare_image,
@@ -35,6 +36,8 @@ use crate::state::helpers::image_compression::ImageFile;
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, TEXT_3XS, TEXT_XS};
+use crate::ui::toast::{ToastOptions, toast_manager};
+use crate::ui::toast_logic::ToastType;
 use crate::ui::{Icon, IconName, Tooltip};
 
 impl ChatComposer {
@@ -233,6 +236,61 @@ impl ChatComposer {
         }
         self.focus_editor(window, cx);
         cx.notify();
+    }
+
+    /// What [`fold_pasted_text`](crate::composer::pasted_text::fold_pasted_text)
+    /// needs from the composer.
+    pub(super) fn paste_fold_facts(&self, cx: &gpui_kit::App) -> PasteFoldFacts {
+        let vm = self.view_model(cx);
+        let draft = self.drafts.get_composer_draft(&self.thread_key);
+        PasteFoldFacts {
+            reserved_attachments: draft
+                .as_ref()
+                .map_or(0, |draft| draft.images.len() + draft.files.len())
+                + self.pending_image_compressions,
+            staging_limit: file_attachment_staging_limit(&FileAttachmentCapabilityState {
+                attachment_uploads_capability_known: vm.attachment_uploads_capability_known,
+                supports_attachment_uploads: vm.supports_attachment_uploads,
+                max_file_attachment_bytes: vm.max_file_attachment_bytes,
+            }),
+            file_names: draft
+                .map(|draft| draft.files.iter().map(|file| file.name.clone()).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Carries out a [`PasteFold`](crate::composer::pasted_text::PasteFold)
+    /// other than `Inline`: stages the text as a file and says so, or refuses.
+    pub(super) fn apply_paste_fold(
+        &mut self,
+        fold: crate::composer::pasted_text::PasteFold,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::composer::pasted_text::{PASTED_TEXT_MIME_TYPE, PasteFold, large_paste_toast};
+        let (title, description, kind) = match fold {
+            PasteFold::Inline => return,
+            PasteFold::Refuse { title, description } => {
+                (title.to_owned(), description.to_owned(), ToastType::Error)
+            }
+            PasteFold::Attach { name } => {
+                let bytes = text.into_bytes();
+                let size = bytes.len() as u64;
+                let picked = PickedFile::new(&name, PASTED_TEXT_MIME_TYPE, size);
+                self.add_picked_files(Intake::from_loaded(vec![(picked, bytes)]), window, cx);
+                let (title, description) = large_paste_toast(&name, size);
+                (title, description, ToastType::Info)
+            }
+        };
+        toast_manager(cx).update(cx, |store, cx| {
+            store.add(
+                ToastOptions::new(title)
+                    .type_(kind)
+                    .description(description),
+                cx,
+            );
+        });
     }
 
     fn next_attachment_id(&mut self) -> usize {
@@ -505,6 +563,13 @@ impl ChatComposer {
 /// One file for attachment; `None` when it is refused (see [`load_path`]).
 pub fn read_picked_file(path: PathBuf) -> Option<(PickedFile, Vec<u8>)> {
     load_path(&path).ok()
+}
+
+/// See [`ChatComposer::paste_fold_facts`].
+pub(super) struct PasteFoldFacts {
+    pub reserved_attachments: usize,
+    pub staging_limit: Option<u64>,
+    pub file_names: Vec<String>,
 }
 
 // ----- Stash and queued-message editing ---------------------------------------

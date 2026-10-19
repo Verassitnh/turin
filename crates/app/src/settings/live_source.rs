@@ -1224,8 +1224,25 @@ impl SettingsSource for LiveSettingsSource {
             .collect())
     }
 
-    fn pick_project_favicon(&self, _cwd: &str, _cx: &mut App) -> Result<Option<String>, String> {
-        Ok(None)
+    fn pick_project_favicon(
+        &self,
+        _cwd: &str,
+        cx: &mut App,
+    ) -> gpui_kit::Task<Result<Option<String>, String>> {
+        let picked = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |_| match picked.await {
+            Ok(Ok(paths)) => {
+                classify_picked_favicon(paths.and_then(|paths| paths.into_iter().next()))
+            }
+            Ok(Err(error)) => Err(error.to_string()),
+            // The platform dropped the dialog without answering: same as cancel.
+            Err(_) => Ok(None),
+        })
     }
 
     fn run_storage_cleanup(&self, cx: &mut App) {
@@ -1268,5 +1285,45 @@ impl SettingsSource for LiveSettingsSource {
             |_| {},
         );
         self.publish(cx);
+    }
+}
+
+/// The native picker has no extension filter here (`PathPromptOptions`), so the
+/// `PROJECT_FAVICON_EXTENSIONS` check upstream's dialog filter does runs on the
+/// answer instead.
+fn classify_picked_favicon(path: Option<std::path::PathBuf>) -> Result<Option<String>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let path = path.to_string_lossy().into_owned();
+    if turin_shared::project_favicon::is_project_favicon_path(&path) {
+        Ok(Some(path))
+    } else {
+        Err("Choose an image file (png, jpg, svg, ico, icns, gif, webp or avif).".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod favicon_pick_tests {
+    use super::classify_picked_favicon;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cancel_is_not_an_error() {
+        assert_eq!(classify_picked_favicon(None), Ok(None));
+    }
+
+    #[test]
+    fn image_paths_are_kept_verbatim() {
+        assert_eq!(
+            classify_picked_favicon(Some(PathBuf::from("/Users/me/logo.PNG"))),
+            Ok(Some("/Users/me/logo.PNG".to_owned()))
+        );
+        assert!(classify_picked_favicon(Some(PathBuf::from("/a/app.icns"))).is_ok());
+    }
+
+    #[test]
+    fn non_images_report_an_error() {
+        assert!(classify_picked_favicon(Some(PathBuf::from("/a/notes.txt"))).is_err());
     }
 }

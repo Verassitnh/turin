@@ -162,13 +162,13 @@ async fn a_database_that_cannot_open_is_reported_to_the_ui() {
     let bus = super::write::bus::CommandBus::new(Handle::current());
     let mut failure = bus.startup_failure();
 
-    super::run(
+    // `run` now waits for the user's recovery choice; the UI going away ends it.
+    let running = tokio::spawn(super::run(
         Some(dir.path().to_path_buf()),
         runtime.sender,
         runtime.requests,
         bus.clone(),
-    )
-    .await;
+    ));
 
     failure.changed().await.expect("failure published");
     let message = failure.borrow().clone().expect("a message");
@@ -178,4 +178,82 @@ async fn a_database_that_cannot_open_is_reported_to_the_ui() {
     );
     assert!(message.contains("could not open its database"), "{message}");
     assert!(bus.commands().is_err());
+    assert!(bus.failure_is_recoverable());
+    running.abort();
+}
+
+#[tokio::test]
+async fn start_fresh_moves_the_old_database_aside_and_opens_a_new_one() {
+    use super::write::bus::DatabaseRecovery;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let broken = [0x5a_u8; 4096];
+    std::fs::write(dir.path().join("statev2.sqlite"), broken).expect("corrupt db");
+    let runtime = spawn_client_state(&Handle::current(), crate::state::local_environment_id());
+    let bus = super::write::bus::CommandBus::new(Handle::current());
+    let mut failure = bus.startup_failure();
+    let running = tokio::spawn(super::run(
+        Some(dir.path().to_path_buf()),
+        runtime.sender,
+        runtime.requests,
+        bus.clone(),
+    ));
+    failure.changed().await.expect("failure published");
+    assert!(failure.borrow().is_some());
+
+    // Retrying a database that is still broken keeps reporting it.
+    bus.request_recovery(DatabaseRecovery::Retry);
+    failure.changed().await.expect("still failing");
+    assert!(failure.borrow().is_some());
+
+    bus.request_recovery(DatabaseRecovery::StartFresh);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while failure.borrow().is_some() {
+            failure.changed().await.expect("failure cleared");
+        }
+    })
+    .await
+    .expect("the new database opens");
+    assert!(!bus.failure_is_recoverable());
+
+    let kept: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("data dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.contains(".broken-"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        std::fs::read(dir.path().join(&kept[0])).expect("kept"),
+        broken
+    );
+    running.abort();
+}
+
+#[test]
+fn moving_aside_never_overwrites_an_earlier_set_aside_database() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("statev2.sqlite"), b"first").expect("db");
+    std::fs::write(dir.path().join("statev2.sqlite-wal"), b"wal").expect("wal");
+    super::move_database_aside(dir.path(), "T1").expect("first move");
+    assert_eq!(
+        std::fs::read(dir.path().join("statev2.sqlite.broken-T1-wal")).expect("wal kept"),
+        b"wal"
+    );
+    std::fs::write(dir.path().join("statev2.sqlite"), b"second").expect("db");
+    super::move_database_aside(dir.path(), "T1").expect("second move");
+    assert_eq!(
+        std::fs::read(dir.path().join("statev2.sqlite.broken-T1")).expect("first kept"),
+        b"first"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("statev2.sqlite.broken-T1-1")).expect("second kept"),
+        b"second"
+    );
+    assert!(!dir.path().join("statev2.sqlite").exists());
 }

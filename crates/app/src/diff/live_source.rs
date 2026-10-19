@@ -521,8 +521,22 @@ impl DiffSource for LiveDiffSource {
         self.open_path(workspace_file_path, cx);
     }
 
+    /// `useOpenInPreferredEditor`. A launch that fails (no editor installed)
+    /// falls back to the system's default app for the file.
     fn open_in_editor(&self, target_path: &str, cx: &mut App) {
-        self.open_path(target_path, cx);
+        let opened = crate::hooks::open_in_editor::EditorLauncherService::global().spawn_open(
+            self.bus.handle(),
+            target_path.to_owned(),
+            cx,
+        );
+        let path = target_path.to_owned();
+        cx.spawn(async move |cx| {
+            if let Err(message) = opened.await {
+                tracing::warn!(%message, path, "could not open the file in an editor");
+                cx.update(|cx| cx.open_url(&format!("file://{path}")));
+            }
+        })
+        .detach();
     }
 
     fn refresh(&self, cx: &mut App) {

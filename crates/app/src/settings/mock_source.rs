@@ -1020,8 +1020,12 @@ impl SettingsSource for MockSettingsSource {
         .collect())
     }
 
-    fn pick_project_favicon(&self, _cwd: &str, _cx: &mut App) -> Result<Option<String>, String> {
-        Ok(None)
+    fn pick_project_favicon(
+        &self,
+        _cwd: &str,
+        cx: &mut App,
+    ) -> gpui_kit::Task<Result<Option<String>, String>> {
+        cx.spawn(async move |_| Ok(None))
     }
 
     fn run_storage_cleanup(&self, cx: &mut App) {

@@ -14,6 +14,9 @@
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
+
+use crate::composer::pasted_text::PasteAsTextShortcut;
+use crate::state::helpers::text_paste::{PasteShortcutEvent, is_paste_as_text_shortcut};
 use std::time::Duration;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -229,6 +232,7 @@ pub struct PromptEditor {
     flows: Flows,
     command_handler: Option<CommandKeyHandler>,
     paste_handler: Option<PasteHandler>,
+    paste_as_text: PasteAsTextShortcut,
     last_snapshot: Option<EditorSnapshot>,
     blink_on: bool,
     blink_epoch: u64,
@@ -271,6 +275,7 @@ impl PromptEditor {
             flows: Rc::default(),
             command_handler: None,
             paste_handler: None,
+            paste_as_text: PasteAsTextShortcut::default(),
             last_snapshot: None,
             blink_on: true,
             blink_epoch: 0,
@@ -306,6 +311,11 @@ impl PromptEditor {
 
     pub fn set_command_handler(&mut self, handler: Option<CommandKeyHandler>) {
         self.command_handler = handler;
+    }
+
+    /// The ⌘⇧V flag the paste handler reads (`pasteAsTextShortcutUntilRef`).
+    pub fn paste_as_text_shortcut(&self) -> PasteAsTextShortcut {
+        self.paste_as_text.clone()
     }
 
     pub fn set_paste_handler(&mut self, handler: Option<PasteHandler>) {
@@ -982,6 +992,19 @@ impl PromptEditor {
                         "c" => self.copy(cx),
                         "x" => self.cut(cx),
                         "v" => {
+                            // ⌘⇧V pastes as text: a large paste stays inline.
+                            if is_paste_as_text_shortcut(
+                                &PasteShortcutEvent {
+                                    key: &key.key,
+                                    meta_key: modifiers.platform,
+                                    ctrl_key: modifiers.control,
+                                    alt_key: modifiers.alt,
+                                    shift_key: modifiers.shift,
+                                },
+                                true,
+                            ) {
+                                self.paste_as_text.arm(std::time::Instant::now());
+                            }
                             self.paste(window, cx);
                         }
                         "z" => {

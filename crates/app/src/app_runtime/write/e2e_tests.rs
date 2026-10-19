@@ -1276,3 +1276,107 @@ async fn the_diff_panel_reads_a_turn_checkpoint_and_the_working_tree() {
         .expect("a working tree source");
     assert!(working.diff.contains("+two"), "{}", working.diff);
 }
+
+// A pull request created from a thread is linked to it: GitManager's linker
+// dispatches `thread.pull-request.link` (`source: "created"`) through the runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_created_pull_request_is_linked_to_its_thread() {
+    use turin_contracts::git::GitRunStackedActionResult;
+    use turin_contracts::thread_pull_request::ThreadPullRequestLinkSource;
+    use turin_orchestration::pipeline::orchestrator_port::OrchestratorPort as _;
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let result: GitRunStackedActionResult = serde_json::from_value(json!({
+        "action": "commit_push_pr",
+        "branch": {"status": "skipped_not_requested"},
+        "commit": {"status": "skipped_no_changes"},
+        "push": {"status": "pushed"},
+        "pr": {
+            "status": "created",
+            "url": "https://github.com/acme/widgets/pull/42",
+            "number": 42,
+        },
+        "toast": {"title": "Created PR #42", "cta": {"kind": "none"}},
+    }))
+    .expect("result decodes");
+
+    harness
+        .commands
+        .runtime()
+        .git_manager
+        .link_created_pull_request(thread.as_str(), &result, None)
+        .await;
+
+    let projection = harness
+        .commands
+        .runtime()
+        .orchestrator
+        .get_thread_projection(&thread)
+        .await
+        .expect("thread reads back");
+    let links = projection.thread.pull_requests.unwrap_or_default();
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert_eq!(links[0].number.get(), 42);
+    assert_eq!(links[0].repository.as_str(), "acme/widgets");
+    assert_eq!(links[0].source, ThreadPullRequestLinkSource::Created);
+}
+
+// Palette "New project": a named project is a new Git repository under
+// `<baseDir>/projects/<slug>` (upstream's `ManagedProjectFolders`), and a second
+// project of the same name takes `-2` rather than the first one's folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_named_project_is_created_under_the_managed_projects_folder() {
+    use crate::components::command_palette::named_project::create_named_project;
+    use turin_projects::testing::SystemGit;
+
+    let harness = harness().await;
+    let base = tempfile::tempdir().expect("base dir");
+    let global = base.path().join("gitconfig");
+    std::fs::write(&global, "").expect("empty git config");
+    let git: Arc<dyn turin_projects::managed_project_folders::GitCli> =
+        Arc::new(SystemGit::with_identity(&global));
+
+    let first = create_named_project(
+        harness.commands.clone(),
+        base.path().to_path_buf(),
+        git.clone(),
+        "Pinball Stats",
+    )
+    .await
+    .expect("first project");
+    let second = create_named_project(
+        harness.commands.clone(),
+        base.path().to_path_buf(),
+        git,
+        "Pinball Stats",
+    )
+    .await
+    .expect("second project");
+
+    let root = base.path().join("projects");
+    assert_eq!(
+        first.workspace_root,
+        root.join("pinball-stats").to_string_lossy()
+    );
+    assert_eq!(
+        second.workspace_root,
+        root.join("pinball-stats-2").to_string_lossy()
+    );
+    assert!(root.join("pinball-stats/README.md").is_file());
+    assert!(root.join("pinball-stats/.git").exists());
+    assert_eq!(first.commit_error, None);
+
+    let shells = harness
+        .stores
+        .projects
+        .list_shells(None)
+        .await
+        .expect("project shells");
+    let mut titles: Vec<_> = shells
+        .iter()
+        .map(|shell| shell.title.as_str().to_owned())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, ["Pinball Stats", "Pinball Stats"]);
+}

@@ -39,6 +39,7 @@ use turin_source_control::source_control::provider_registry::{
 };
 use turin_source_control::source_control_core::Cause;
 
+use super::created_pr_linker::LateCreatedPullRequestLinker;
 use crate::app_runtime::Stores;
 
 pub struct SourceControlServices {
@@ -47,6 +48,8 @@ pub struct SourceControlServices {
     pub discovery: Arc<SourceControlDiscovery>,
     pub git: Arc<GitVcsDriverCore>,
     pub git_manager: Arc<GitManager>,
+    /// Bound to the runtime once it exists (`WriteRuntime::build`).
+    pub created_pr_linker: Arc<LateCreatedPullRequestLinker>,
     pub pull_requests: Arc<PullRequestService>,
     pub review_guides: Arc<PullRequestReviewGuideService>,
 }
@@ -145,16 +148,20 @@ impl SourceControlServices {
                 worktrees_dir: data_dir.join("userdata/worktrees"),
             },
         ));
-        let git_manager = Arc::new(GitManager::with_host(
+        let created_pr_linker = LateCreatedPullRequestLinker::new();
+        let mut git_manager = GitManager::with_host(
             git.clone(),
             Arc::new(SourceControlChangeRequestHost::new(source_control.clone())),
-        ));
+        );
+        git_manager.set_linker(created_pr_linker.clone());
+        let git_manager = Arc::new(git_manager);
         Self {
             host,
             providers: source_control,
             discovery,
             git,
             git_manager,
+            created_pr_linker,
             pull_requests,
             review_guides,
         }

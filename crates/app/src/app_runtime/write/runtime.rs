@@ -411,7 +411,8 @@ impl WriteRuntime {
             Err(error) => tracing::warn!(%error, "failed to resume queued runs"),
         }
 
-        Ok(Arc::new(Self {
+        let created_pr_linker = source_control.created_pr_linker.clone();
+        let runtime = Arc::new(Self {
             storage_cleanup,
             config,
             _cleanup_schedule: cleanup_schedule,
@@ -447,7 +448,9 @@ impl WriteRuntime {
             _continuations: continuations,
             recovery,
             _terminal_runs: terminal_runs,
-        }))
+        });
+        created_pr_linker.bind(&runtime);
+        Ok(runtime)
     }
 
     /// Publish the latest persisted settings. Read under the same bridge gate as

@@ -48,8 +48,23 @@ pub struct ComposerDraftHost {
 
 impl ComposerDraftHost {
     pub fn new() -> Self {
+        Self::with_store(SharedDraftStore::new())
+    }
+
+    /// The live host: the stash is kept in the data directory.
+    pub fn persistent() -> Self {
+        Self::with_store(SharedDraftStore::with_stash_persistence(Box::new(
+            crate::composer::stash_persistence::PromptStashPersistence::over(
+                crate::hooks::use_local_storage::FileLocalStorage::shared_in_data_dir(
+                    "local-storage.json",
+                ),
+            ),
+        )))
+    }
+
+    fn with_store(store: SharedDraftStore) -> Self {
         Self {
-            store: SharedDraftStore::new(),
+            store,
             sessions: HashMap::new(),
             logical: IndexMap::new(),
             undo: ThreadUndo::default(),

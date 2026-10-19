@@ -3,11 +3,18 @@
 
 use std::rc::Rc;
 
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, rems,
+    Anchor, App, Context, IntoElement, ParentElement as _, Render, RenderOnce, SharedString,
+    Styled as _, Window, div, rems,
 };
 use turin_contracts::editor::EditorId;
+
+use crate::hooks::open_in_editor::EditorLauncherService;
+use crate::pull_request::dropdown::dropdown;
+use crate::ui::menu::PopupMenuItem;
 
 use super::super::jetbrains_icons;
 use crate::assets::PROVIDER_CURSOR;
@@ -158,7 +165,9 @@ impl RenderOnce for OpenInPicker {
                         }
                     }),
             )
-            .child(
+            .child(dropdown(
+                "open-in-menu",
+                Anchor::TopRight,
                 Button::new("open-in-menu")
                     .size(if self.panel {
                         ButtonSize::Sm
@@ -171,8 +180,120 @@ impl RenderOnce for OpenInPicker {
                         ButtonVariant::Outline
                     })
                     .icon(IconName::ChevronDown)
-                    .disabled(self.options.is_empty()),
-            )
+                    .disabled(self.options.is_empty() || disabled),
+                {
+                    let options = self.options.clone();
+                    let on_open = self.on_open.clone();
+                    move |mut menu, _, _| {
+                        for option in &options {
+                            let editor = option.value;
+                            let on_open = on_open.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(option.label.clone())
+                                    .icon(
+                                        gpui_kit::component::Icon::empty()
+                                            .path(option.icon_path.clone())
+                                            .size_4(),
+                                    )
+                                    .on_click(move |_, window, cx| on_open(editor, window, cx)),
+                            );
+                        }
+                        menu
+                    }
+                },
+            ))
+    }
+}
+
+/// The live "Open in" control: finds the installed editors, remembers the last
+/// one used (`usePreferredEditor`) and opens the checkout in it.
+pub struct OpenInPickerView {
+    cwd: Option<String>,
+    panel: bool,
+    available: Vec<EditorId>,
+    preferred: Option<EditorId>,
+    service: std::sync::Arc<EditorLauncherService>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl OpenInPickerView {
+    pub fn new(
+        cwd: Option<String>,
+        panel: bool,
+        runtime: tokio::runtime::Handle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let service = EditorLauncherService::global();
+        let found = service.spawn_available(&runtime, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let available = found.await;
+            this.update(cx, |this, cx| {
+                this.available = available;
+                this.preferred = turin_launcher::editor_preferences::preferred_editor(
+                    &this.available,
+                    this.service.stored_editor(),
+                );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        Self {
+            cwd,
+            panel,
+            available: Vec::new(),
+            preferred: None,
+            service,
+            runtime,
+        }
+    }
+
+    pub fn set_cwd(&mut self, cwd: Option<String>, cx: &mut Context<Self>) {
+        if self.cwd != cwd {
+            self.cwd = cwd;
+            cx.notify();
+        }
+    }
+
+    fn open(&mut self, editor: EditorId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cwd) = self.cwd.clone() else {
+            return;
+        };
+        self.preferred = Some(editor);
+        cx.notify();
+        let opened = self.service.spawn_open_in(&self.runtime, cwd, editor, cx);
+        cx.spawn_in(window, async move |_, cx| {
+            if let Err(message) = opened.await {
+                cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::error(message).title("Unable to open in editor"),
+                        cx,
+                    )
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+}
+
+impl Render for OpenInPickerView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity().downgrade();
+        let on_open: OpenHandler = Rc::new(move |editor, window, cx| {
+            view.update(cx, |this, cx| this.open(editor, window, cx))
+                .ok();
+        });
+        OpenInPicker {
+            options: resolve_open_in_options("MacIntel", &self.available),
+            preferred_editor: self.preferred,
+            open_in_cwd: self.cwd.clone(),
+            can_open: true,
+            panel: self.panel,
+            on_open: on_open.clone(),
+            on_choose_preferred: on_open,
+        }
     }
 }
 

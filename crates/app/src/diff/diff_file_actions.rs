@@ -146,7 +146,7 @@ pub fn resolve_diff_path_for_workspace(
 
 /// `resolvePathLinkTarget` for a plain workspace-relative path (diff paths
 /// carry no `:line:col` position).
-fn resolve_path_link_target(raw_path: &str, cwd: &str) -> String {
+pub(crate) fn resolve_path_link_target(raw_path: &str, cwd: &str) -> String {
     if raw_path.starts_with('/') || is_windows_absolute_path(raw_path) {
         return raw_path.to_string();
     }

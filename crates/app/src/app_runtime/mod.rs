@@ -107,6 +107,43 @@ pub(crate) fn database_open_failure_message(data_dir: &std::path::Path, error: &
     )
 }
 
+/// "Start fresh": renames the database and its WAL/SHM sidecars to
+/// `<name>.broken-<stamp>` next to it. Nothing is deleted, so the old data can
+/// still be recovered by hand. A name already taken gets a numeric suffix.
+/// Returns what was moved, as `(from, to)`.
+pub(crate) fn move_database_aside(
+    data_dir: &Path,
+    stamp: &str,
+) -> std::io::Result<Vec<(std::path::PathBuf, std::path::PathBuf)>> {
+    let database = data_dir::database_path(data_dir);
+    let mut moved = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let mut from = database.clone().into_os_string();
+        from.push(suffix);
+        let from = std::path::PathBuf::from(from);
+        if !from.exists() {
+            continue;
+        }
+        let mut attempt = 0_u32;
+        let to = loop {
+            let mut name = database.clone().into_os_string();
+            name.push(format!(".broken-{stamp}"));
+            if attempt > 0 {
+                name.push(format!("-{attempt}"));
+            }
+            name.push(suffix);
+            let candidate = std::path::PathBuf::from(name);
+            if !candidate.exists() {
+                break candidate;
+            }
+            attempt += 1;
+        };
+        std::fs::rename(&from, &to)?;
+        moved.push((from, to));
+    }
+    Ok(moved)
+}
+
 /// Starts the write path and the feeds for the client store. Returns when the
 /// store drops its request channel or the database cannot be opened. An
 /// unopenable database leaves the store empty; the UI still starts, and the
@@ -126,14 +163,52 @@ pub async fn run(
         )));
         return;
     };
-    let stores = match Stores::open(&data_dir).await {
-        Ok(stores) => Arc::new(stores),
-        Err(error) => {
-            tracing::error!(error = %format!("{error:#}"), "failed to open Turin database; the sidebar stays empty");
-            let message = database_open_failure_message(&data_dir, &format!("{error:#}"));
-            bus.fail(message.clone());
-            sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message)));
+    // An unopenable database waits here for the user's choice (retry, or move
+    // it aside and start fresh) instead of ending startup.
+    let mut recovery = bus.take_recovery_requests();
+    let mut requests = requests;
+    let stores = loop {
+        match Stores::open(&data_dir).await {
+            Ok(stores) => {
+                bus.clear_failure();
+                break Arc::new(stores);
+            }
+            Err(error) => {
+                tracing::error!(error = %format!("{error:#}"), "failed to open Turin database; the sidebar stays empty");
+                let message = database_open_failure_message(&data_dir, &format!("{error:#}"));
+                bus.fail_recoverable(message.clone());
+                sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message)));
+            }
+        }
+        let Some(recovery) = recovery.as_mut() else {
             return;
+        };
+        loop {
+            tokio::select! {
+                action = recovery.recv() => match action {
+                    Some(write::bus::DatabaseRecovery::Retry) => break,
+                    Some(write::bus::DatabaseRecovery::StartFresh) => {
+                        match move_database_aside(&data_dir, &chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string()) {
+                            Ok(moved) => tracing::warn!(?moved, "moved the unopenable database aside"),
+                            Err(error) => {
+                                let message = format!(
+                                    "Turin could not move the old database aside in {}. ({error})",
+                                    data_dir.display()
+                                );
+                                bus.fail_recoverable(message.clone());
+                                sender.send(ClientStateEvent::ShellFeed(FeedStatus::Failed(message)));
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    None => return,
+                },
+                // Nothing is served yet; the UI going away ends startup.
+                request = requests.recv() => if request.is_none() {
+                    return;
+                },
+            }
         }
     };
     // Held until `serve` returns: dropping it stops the effect worker and the

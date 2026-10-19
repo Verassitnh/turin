@@ -13,11 +13,27 @@ use turin_provider_core::server_provider::ServerProvider;
 
 use super::commands::{CommandError, Commands};
 
+/// What the user can do about a database that would not open
+/// (the startup failure dialog's buttons).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DatabaseRecovery {
+    /// Try opening the same database again.
+    Retry,
+    /// Move the unopenable database aside (never deleting it) and open a new one.
+    StartFresh,
+}
+
 struct Shared {
     commands: OnceLock<Commands>,
-    failure: OnceLock<String>,
-    /// Mirrors `failure` for the UI, which shows it once.
+    /// Why startup failed, `None` while starting or once it succeeded. A
+    /// database that would not open can be retried, so this can clear.
     failed: tokio::sync::watch::Sender<Option<String>>,
+    /// Whether the failure is an unopenable database the user can recover
+    /// from ([`DatabaseRecovery`]).
+    recoverable: std::sync::atomic::AtomicBool,
+    recovery: tokio::sync::mpsc::UnboundedSender<DatabaseRecovery>,
+    recovery_requests:
+        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<DatabaseRecovery>>>,
     /// The provider status list (`ProviderRegistry::get_providers`), kept
     /// current by the composition root.
     providers: tokio::sync::watch::Sender<Arc<Vec<ServerProvider>>>,
@@ -31,12 +47,15 @@ pub struct CommandBus {
 
 impl CommandBus {
     pub fn new(handle: Handle) -> Self {
+        let (recovery, recovery_requests) = tokio::sync::mpsc::unbounded_channel();
         Self {
             handle,
             shared: Arc::new(Shared {
                 commands: OnceLock::new(),
-                failure: OnceLock::new(),
                 failed: tokio::sync::watch::channel(None).0,
+                recoverable: std::sync::atomic::AtomicBool::new(false),
+                recovery,
+                recovery_requests: std::sync::Mutex::new(Some(recovery_requests)),
                 providers: tokio::sync::watch::channel(Arc::default()).0,
             }),
         }
@@ -48,8 +67,51 @@ impl CommandBus {
 
     /// Startup failed: every command reports `message`.
     pub(crate) fn fail(&self, message: String) {
-        let _ = self.shared.failure.set(message.clone());
+        self.shared
+            .recoverable
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.shared.failed.send_replace(Some(message));
+    }
+
+    /// [`Self::fail`] for a database that would not open: the user can retry or
+    /// start fresh ([`Self::request_recovery`]).
+    pub(crate) fn fail_recoverable(&self, message: String) {
+        self.shared
+            .recoverable
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shared.failed.send_replace(Some(message));
+    }
+
+    /// The database opened after all: commands work again and the UI hears
+    /// that the failure is over.
+    pub(crate) fn clear_failure(&self) {
+        self.shared
+            .recoverable
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.shared.failed.send_replace(None);
+    }
+
+    /// Whether the current startup failure offers [`DatabaseRecovery`].
+    pub fn failure_is_recoverable(&self) -> bool {
+        self.shared
+            .recoverable
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The user's choice on the startup failure dialog.
+    pub fn request_recovery(&self, action: DatabaseRecovery) {
+        let _ = self.shared.recovery.send(action);
+    }
+
+    /// The composition root's end of [`Self::request_recovery`]; taken once.
+    pub(crate) fn take_recovery_requests(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<DatabaseRecovery>> {
+        self.shared
+            .recovery_requests
+            .lock()
+            .expect("recovery requests")
+            .take()
     }
 
     /// Holds the startup failure once there is one (`None` while starting or
@@ -75,7 +137,7 @@ impl CommandBus {
         if let Some(commands) = self.shared.commands.get() {
             return Ok(commands.clone());
         }
-        Err(match self.shared.failure.get() {
+        Err(match self.shared.failed.borrow().as_deref() {
             Some(message) => CommandError::new(format!("Turin could not start: {message}")),
             None => CommandError::new("Turin is still starting. Try again in a moment."),
         })

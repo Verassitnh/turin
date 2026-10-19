@@ -18,9 +18,6 @@ use crate::components::sidebar::view_model::{
 };
 use crate::state::local_environment_id;
 
-/// Where "new project" folders go until `newProjectsRoot` is a setting.
-const NEW_PROJECTS_ROOT: &str = "~/Projects/t3";
-
 pub struct LivePaletteBackend {
     inner: MockPaletteBackend,
     store: Entity<SidebarStore>,
@@ -47,6 +44,20 @@ impl LivePaletteBackend {
 /// mounts the find bar (`thread_find_provider`).
 pub(crate) fn hide_unported_commands(mut snapshot: PaletteSnapshot) -> PaletteSnapshot {
     snapshot.scratch_thread_available = false;
+    snapshot
+}
+
+/// `serverConfig.newProjectsRoot`: shown in the New project step and gating its
+/// row. Absent when there is no data folder to keep the projects in.
+pub(crate) fn with_new_projects_root(
+    mut snapshot: PaletteSnapshot,
+    data_dir: Option<&std::path::Path>,
+) -> PaletteSnapshot {
+    snapshot.new_projects_root = data_dir.map(|dir| {
+        super::named_project::new_projects_root(dir)
+            .to_string_lossy()
+            .into_owned()
+    });
     snapshot
 }
 
@@ -98,7 +109,10 @@ fn list_directories(directory: &str, show_hidden: bool) -> Result<FilesystemBrow
 
 impl PaletteBackend for LivePaletteBackend {
     fn snapshot(&self, cx: &App) -> PaletteSnapshot {
-        hide_unported_commands(self.inner.snapshot(cx))
+        with_new_projects_root(
+            hide_unported_commands(self.inner.snapshot(cx)),
+            crate::app_runtime::data_dir::resolve_data_dir().as_deref(),
+        )
     }
 
     fn search_messages(&self, query: String, cx: &mut App) -> Task<Vec<ThreadSearchMatch>> {
@@ -155,39 +169,28 @@ impl PaletteBackend for LivePaletteBackend {
         })
     }
 
-    /// `useNewProject`: a Git repository at `<root>/<name>`, then the project.
+    /// `useNewProject` (`projects.createNew`): a new Git repository in
+    /// `<baseDir>/projects/<slug>`, then the project. Returns its key.
     fn create_new_project(&self, name: String, cx: &mut App) -> Task<Result<String, String>> {
-        let folder = format!("{}/{name}", expand_home(NEW_PROJECTS_ROOT));
-        let make_folder = {
-            let folder = folder.clone();
-            cx.background_spawn(async move {
-                std::fs::create_dir_all(&folder)
-                    .map_err(|error| format!("Cannot create {folder}: {error}"))?;
-                let init = std::process::Command::new("git")
-                    .args(["init", "-q"])
-                    .current_dir(&folder)
-                    .status()
-                    .map_err(|error| format!("Cannot run git init: {error}"))?;
-                init.success()
-                    .then_some(())
-                    .ok_or_else(|| format!("git init failed in {folder}"))
-            })
+        let Some(data_dir) = crate::app_runtime::data_dir::resolve_data_dir() else {
+            return Task::ready(Err(
+                "Turin has no data folder to keep new projects in.".to_owned()
+            ));
         };
-        let add = {
-            let title = name.clone();
-            let bus = self.bus.clone();
-            move |cx: &mut App| {
-                bus.task(cx, move |commands| async move {
-                    commands.create_project(&title, &folder).await
-                })
-            }
-        };
-        cx.spawn(async move |cx| {
-            make_folder.await?;
-            let task = cx.update(add);
-            task.await
-                .map(|project_id| project_key(&project_id))
-                .map_err(|error| error.message)
+        let base_dir = super::named_project::managed_base_dir(&data_dir);
+        let task = self.bus.task(cx, move |commands| async move {
+            super::named_project::create_named_project(
+                commands,
+                base_dir,
+                super::named_project::system_git(),
+                &name,
+            )
+            .await
+            .map_err(crate::app_runtime::write::commands::CommandError::new)
+        });
+        cx.spawn(async move |_| match task.await {
+            Ok(project) => Ok(project_key(&project.project_id)),
+            Err(error) => Err(error.message),
         })
     }
 

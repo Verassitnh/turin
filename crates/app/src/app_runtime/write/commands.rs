@@ -294,6 +294,76 @@ impl Commands {
         self.commit_project(command).await
     }
 
+    /// `ProjectService.delete` with `force: true` (the project settings panel's "Remove"):
+    /// every live and archived thread of the project is deleted first, under command ids
+    /// derived from this one so a retry resumes the cascade, then the project, then its
+    /// settings overrides.
+    pub async fn delete_project(&self, project_id: &ProjectId) -> Result<(), CommandError> {
+        let stores = &self.runtime.stores;
+        let first_delete = stores
+            .projects
+            .get(project_id.clone(), true)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?
+            .is_some_and(|row| row.deleted_at.is_none());
+        let base = command_id();
+        if first_delete {
+            let shell = stores
+                .projections
+                .get_shell_snapshot(
+                    turin_orchestration::projection::store::shell::ShellSnapshotOptions {
+                        project_id: Some(project_id.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| CommandError::from_error(&error))?;
+            for thread in shell.threads.iter().chain(shell.archived_threads.iter()) {
+                if &thread.project_id != project_id {
+                    continue;
+                }
+                self.dispatch(json!({
+                    "type": "thread.delete",
+                    "commandId": format!("{base}:delete-thread:{}", thread.id),
+                    "threadId": thread.id,
+                }))
+                .await
+                .map_err(|error| {
+                    CommandError::new(format!(
+                        "Could not delete the thread \"{}\": {}",
+                        thread.title, error.message
+                    ))
+                })?;
+            }
+        }
+        self.commit_project(ProjectCommand::Delete(
+            turin_orchestration::pipeline::project_commands::ProjectDeleteCommand {
+                command_id: base,
+                project_id: project_id.clone(),
+            },
+        ))
+        .await?;
+        if first_delete {
+            // Best-effort: a settings write failure must not block the deletion it cleans up after.
+            let clear = serde_json::from_value::<turin_contracts::settings::ServerSettingsPatch>(
+                json!({"projectSettingsOverrides": {project_id.as_str(): null}}),
+            );
+            match clear {
+                Ok(patch) => {
+                    if let Err(error) = self.update_server_settings(patch).await {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            error = %error.message,
+                            "Failed to clear settings overrides for deleted project"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "project override clear patch is invalid"),
+            }
+        }
+        Ok(())
+    }
+
     async fn commit_project(&self, command: ProjectCommand) -> Result<(), CommandError> {
         commit_project_command(&self.runtime.stores, command).await
     }

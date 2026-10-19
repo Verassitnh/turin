@@ -4,8 +4,8 @@
 use turin_contracts::{CommandId, EventId, ProjectId, UtcDateTime};
 use turin_orchestration::pipeline::event_sink::ProjectCommit;
 use turin_orchestration::pipeline::project_commands::{
-    ProjectCommand, ProjectCommandRow, ProjectCommandState, ProjectDeleteCommand,
-    ProjectMetaUpdateCommand, plan_project_command,
+    ProjectCommand, ProjectCommandRow, ProjectCommandState, ProjectMetaUpdateCommand,
+    plan_project_command,
 };
 
 use crate::app_runtime::write::commands::CommandError;
@@ -93,20 +93,6 @@ pub async fn commit_project(
         .await
         .map_err(|error| CommandError::new(error.to_string()))?;
     Ok(())
-}
-
-pub async fn delete_project(
-    runtime: &WriteRuntime,
-    project_id: &ProjectId,
-) -> Result<(), CommandError> {
-    commit_project(
-        runtime,
-        ProjectCommand::Delete(ProjectDeleteCommand {
-            command_id: command_id(),
-            project_id: project_id.clone(),
-        }),
-    )
-    .await
 }
 
 pub async fn set_project_icons(

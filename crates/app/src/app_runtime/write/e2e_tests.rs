@@ -2028,3 +2028,140 @@ async fn a_thread_created_on_a_branch_keeps_its_branch_and_worktree() {
     let shell = shell_of(plain).await;
     assert!(shell.branch.is_none() && shell.worktree_path.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_a_project_deletes_its_threads_first() {
+    use turin_orchestration::projection::store::shell::ShellSnapshotOptions;
+
+    let harness = harness().await;
+    let commands = &harness.commands;
+    let kept_workspace = tempfile::tempdir().expect("second workspace");
+    let kept_project = commands
+        .create_project("Kept", kept_workspace.path().to_str().expect("utf-8"))
+        .await
+        .expect("kept project");
+    let kept_thread = commands
+        .create_thread(CreateThread {
+            project_id: kept_project.clone(),
+            title: "Survivor".into(),
+            model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+            runtime_mode: "auto".into(),
+            interaction_mode: "default".into(),
+            branch: None,
+            worktree_path: None,
+        })
+        .await
+        .expect("kept thread");
+
+    // The doomed project has a thread that ran (so it holds a provider session) and an
+    // archived one.
+    let project_id = commands
+        .create_project("Doomed", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let create = |title: &str| CreateThread {
+        project_id: project_id.clone(),
+        title: title.into(),
+        model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+        runtime_mode: "auto".into(),
+        interaction_mode: "default".into(),
+        branch: None,
+        worktree_path: None,
+    };
+    let ran = commands.create_thread(create("Ran")).await.expect("thread");
+    let archived = commands
+        .create_thread(create("Archived"))
+        .await
+        .expect("thread");
+    commands
+        .thread_command("thread.archive", &archived, json!({}))
+        .await
+        .expect("archive");
+    let client = open_client_of(&harness, &ran, 2).await;
+    commands
+        .send_message(SendMessage {
+            thread_id: ran.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    let target = thread_id(ran.as_str());
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the turn", |state| {
+            state.thread(&target).is_some_and(|entry| {
+                entry.state.data.as_ref().is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+                })
+            })
+        }),
+    )
+    .await
+    .expect("the turn completes in time");
+
+    commands
+        .delete_project(&project_id)
+        .await
+        .expect("remove the project");
+
+    let shell = harness
+        .stores
+        .projections
+        .get_shell_snapshot(ShellSnapshotOptions::default())
+        .await
+        .expect("shell");
+    let remaining: Vec<_> = shell
+        .threads
+        .iter()
+        .chain(shell.archived_threads.iter())
+        .map(|thread| thread.id.clone())
+        .collect();
+    assert_eq!(
+        remaining,
+        [kept_thread],
+        "only the other project's thread stays"
+    );
+    let row = harness
+        .stores
+        .projects
+        .get(project_id.clone(), true)
+        .await
+        .expect("read")
+        .expect("the deleted row is kept");
+    assert!(row.deleted_at.is_some());
+    // The other project is untouched.
+    assert!(
+        harness
+            .stores
+            .projects
+            .get(kept_project, false)
+            .await
+            .expect("read")
+            .is_some()
+    );
+}
+
+/// Like [`open_client`] but waits for `threads` shell rows.
+async fn open_client_of(
+    harness: &Harness,
+    thread: &turin_contracts::ThreadId,
+    threads: usize,
+) -> crate::state::store::ClientStateHandle {
+    let client = start(harness.stores.clone());
+    wait_for(&client, "the shell", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.threads.len() >= threads)
+    })
+    .await;
+    client.open_thread(thread_id(thread.as_str()));
+    client
+}

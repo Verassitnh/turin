@@ -28,7 +28,7 @@ use super::live_commands::{
     self, update_provider_instance as persist_provider_instance,
     update_server_settings as persist_server_settings,
 };
-use super::live_projects::{delete_project, set_project_icons};
+use super::live_projects::set_project_icons;
 use super::live_snapshot::{
     LiveSnapshotInput, build_snapshot, cleanup_report, read_client_settings,
 };
@@ -1148,12 +1148,21 @@ impl SettingsSource for LiveSettingsSource {
             .services
             .bus
             .clone();
-        bus.spawn(
-            move |commands| async move {
-                delete_project(commands.runtime().as_ref(), &project_id).await
-            },
-            |_| {},
-        );
+        // `deleteProject` with `force: true`: the project's threads go first.
+        let task = bus.task(cx, move |commands| async move {
+            commands.delete_project(&project_id).await
+        });
+        let ui = self.ui();
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            cx.update(|cx| {
+                if let Err(error) = outcome {
+                    ui.report("Could not remove project", &error.message, cx);
+                }
+                ui.publish(cx);
+            });
+        })
+        .detach();
         self.publish(cx);
     }
 

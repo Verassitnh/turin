@@ -362,6 +362,56 @@ impl LiveChat {
             }
         })
         .detach();
+        // A favourite starred in Settings reaches this composer at once: the
+        // settings service announces every change (`streamChanges`).
+        let weak = source.me.clone();
+        cx.spawn(async move |_, cx| {
+            // The runtime may still be starting; wait for it a while.
+            let mut changes = None;
+            for _ in 0..40 {
+                // `Err`: the view is gone. `Ok(None)`: the runtime is not up yet.
+                let found = cx.update(|_| {
+                    let source = weak.upgrade().ok_or(())?;
+                    Ok(source
+                        .bus
+                        .commands()
+                        .ok()
+                        .map(|commands| commands.runtime().server_settings.subscribe()))
+                });
+                match found {
+                    Ok(Some(subscription)) => {
+                        changes = Some(subscription);
+                        break;
+                    }
+                    Ok(None) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(500))
+                            .await;
+                    }
+                    Err(()) => return,
+                }
+            }
+            let Some(mut changes) = changes else {
+                return;
+            };
+            while let Some(settings) = changes.recv().await {
+                let alive = cx.update(|cx| {
+                    let Some(source) = weak.upgrade() else {
+                        return false;
+                    };
+                    let favorites = favorite_keys(settings);
+                    if SavedModelFavorites::current(cx) != favorites {
+                        SavedModelFavorites::store(favorites, cx);
+                        source.republish(cx);
+                    }
+                    true
+                });
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
             source,
             timeline,

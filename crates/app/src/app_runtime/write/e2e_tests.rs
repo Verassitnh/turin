@@ -908,6 +908,38 @@ async fn a_favorited_model_is_saved_in_the_server_settings() {
     assert!(keys.contains("claudeAgent:claude-opus-5-5"), "{keys:?}");
 }
 
+// A favourite set in Settings is announced to subscribers with the new keys, which is
+// how an open composer's stars follow it (`LiveChat` listens to the same stream).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_favorite_changed_in_settings_is_announced_to_open_composers() {
+    use turin_contracts::provider_instance::ProviderInstanceId;
+    use turin_contracts::settings::{ServerSettingsPatch, SetModelFavorite};
+
+    let harness = harness().await;
+    let mut changes = harness.commands.runtime().server_settings.subscribe();
+    harness
+        .commands
+        .update_server_settings(ServerSettingsPatch {
+            set_model_favorites: Some(vec![SetModelFavorite {
+                provider: ProviderInstanceId::new("claudeAgent").expect("instance"),
+                model: turin_contracts::base_schemas::TrimmedNonEmptyString::new(
+                    "claude-opus-5-5",
+                )
+                .expect("model"),
+                favorite: true,
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("update");
+    let announced = tokio::time::timeout(Duration::from_secs(10), changes.recv())
+        .await
+        .expect("the change is announced")
+        .expect("a settings snapshot");
+    let keys = crate::components::chat::live_chat::favorite_keys(announced);
+    assert!(keys.contains("claudeAgent:claude-opus-5-5"), "{keys:?}");
+}
+
 // Implementing a plan names it on the message (`sourcePlanRef`), and the
 // orchestrator checks that the thread really has that plan.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

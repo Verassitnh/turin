@@ -50,11 +50,13 @@ impl IntakeDispatcher for ThreadManagementService {
         &self,
         command: OrchestrationV2ServerCommand,
     ) -> Result<DispatchResult, ThreadManagementError> {
-        ThreadManagementService::dispatch(self, command).await
+        // Inherent methods live on the core this service derefs to; naming
+        // `ThreadManagementService::dispatch` here would call this trait method again.
+        std::ops::Deref::deref(self).dispatch(command).await
     }
 
     async fn send_to_thread(&self, input: SendInput) -> Result<SendResult, ThreadManagementError> {
-        ThreadManagementService::send_to_thread(self, input).await
+        std::ops::Deref::deref(self).send_to_thread(input).await
     }
 }
 

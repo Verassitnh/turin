@@ -94,7 +94,11 @@ impl RestartThreads for ThreadManagementService {
         &self,
         command: OrchestrationV2ServerCommand,
     ) -> Result<DispatchResult, ThreadManagementError> {
-        ThreadManagementService::dispatch(self, command).await
+        // `ThreadManagementService` has no inherent `dispatch`; the real one is on
+        // the core it derefs to. Calling `ThreadManagementService::dispatch` here
+        // resolved to this trait method and recursed until the stack overflowed
+        // (crash on launch with an interrupted run to continue).
+        std::ops::Deref::deref(self).dispatch(command).await
     }
 
     async fn recover_delegated_task(&self, thread_id: &ThreadId, source_run_id: &RunId) {

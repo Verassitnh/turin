@@ -25,6 +25,7 @@ mod settings;
 mod sign_in;
 mod skills;
 mod status;
+mod usage_host;
 mod usage_limits;
 
 pub use account_cache::{
@@ -80,6 +81,9 @@ pub use session::{
     CursorAdapter, CursorSession, CursorThread, PromptImage, PromptOutcome, RuntimeReply,
 };
 pub use settings::CursorSettings;
+pub use usage_host::{
+    CursorUsageLimitsSource, HostCursorUsageLimits, cursor_usage_reader, cursor_usage_reader_with,
+};
 pub use usage_limits::{
     BillingCycleEnd, CursorPlanUsage, CursorUsageHttp, CursorUsageLimitsHost, CursorUsageResponse,
     ReqwestCursorUsageHttp, cursor_usage_response_to_limits, read_cursor_usage_limits,

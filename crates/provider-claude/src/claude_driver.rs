@@ -12,6 +12,7 @@ use crate::{
     claude_model_catalog::resolve_claude_model_catalog,
     claude_model_manifest::resolve_claude_provider_catalog,
     claude_provider_adapter::ClaudeProviderAdapter,
+    claude_usage::claude_usage_reader,
     claude_usage_limits::{
         ClaudeScopedLimitNames, ClaudeUsageLimitHooks, SharedClaudeScopedLimitNames,
     },
@@ -50,6 +51,7 @@ use turin_provider_core::{
         ProviderTextGeneration, ReviewGuideGenerationInput, ReviewGuideGenerationResult,
         ThreadTitleGenerationInput, ThreadTitleGenerationResult,
     },
+    usage::ProviderUsageReader,
 };
 
 const DRIVER_NAME: &str = "claudeAgent";
@@ -58,6 +60,8 @@ pub struct ClaudeDriver {
     kind: ProviderDriverKind,
     metadata: ProviderDriverMetadata,
     services: Arc<ClaudeSharedServices>,
+    /// The `<home>/projects` transcripts the usage page reads (`claudeUsage.ts`).
+    usage: ProviderUsageReader,
 }
 
 impl ClaudeDriver {
@@ -72,6 +76,7 @@ impl ClaudeDriver {
             kind: ProviderDriverKind::new(DRIVER_NAME).expect("valid Claude driver"),
             metadata: ProviderDriverMetadata::new("Claude"),
             services,
+            usage: claude_usage_reader(),
         }
     }
 
@@ -200,6 +205,10 @@ impl ProviderDriver for ClaudeDriver {
     fn decode_config(&self, raw: &Value) -> Result<Value, String> {
         decode(raw)
             .and_then(|settings| serde_json::to_value(settings).map_err(|error| error.to_string()))
+    }
+
+    fn usage(&self) -> Option<&ProviderUsageReader> {
+        Some(&self.usage)
     }
 
     async fn create(
@@ -415,6 +424,19 @@ mod tests {
             config,
             scope,
         }
+    }
+
+    #[tokio::test]
+    async fn exposes_the_transcript_usage_reader_for_the_usage_page() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let driver = ClaudeDriver::new(host(dir.path(), json!({})));
+        assert!(matches!(
+            driver.usage(),
+            Some(ProviderUsageReader::Transcripts {
+                provider: turin_contracts::usage::UsageProviderKind::Claude,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

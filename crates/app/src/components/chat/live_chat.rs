@@ -580,10 +580,11 @@ impl LiveSource {
             attachments_dir.as_deref(),
         );
         snapshot.history = history_controls(&entry.state.history);
-        snapshot.supports_conversation_rollback = super::live_resume::supports_conversation_rollback(
-            &self.bus.providers().borrow(),
-            projection,
-        );
+        snapshot.supports_conversation_rollback =
+            super::live_resume::supports_conversation_rollback(
+                &self.bus.providers().borrow(),
+                projection,
+            );
         snapshot.is_reverting_checkpoint = self.overrides.borrow().reverting;
         self.timeline
             .update(cx, |store, cx| {
@@ -1780,19 +1781,15 @@ impl TimelineSource for LiveSource {
             let overrides = self.overrides.borrow();
             overrides.sending || overrides.reverting
         };
-        let text = match super::live_resume::revert_request(
-            &data,
-            message_id,
-            supports_rollback,
-            busy,
-        ) {
-            Ok(text) => text,
-            Err(super::live_resume::RevertRefusal::NotAUserMessage) => return,
-            Err(super::live_resume::RevertRefusal::Blocked(message)) => {
-                push_error(cx, TITLE, message);
-                return;
-            }
-        };
+        let text =
+            match super::live_resume::revert_request(&data, message_id, supports_rollback, busy) {
+                Ok(text) => text,
+                Err(super::live_resume::RevertRefusal::NotAUserMessage) => return,
+                Err(super::live_resume::RevertRefusal::Blocked(message)) => {
+                    push_error(cx, TITLE, message);
+                    return;
+                }
+            };
         let source = self.me.clone();
         open_revert_dialog(
             move |restore_files, cx| {

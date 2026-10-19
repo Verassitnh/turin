@@ -90,10 +90,7 @@ async fn a_find_match_in_older_history_pages_through_its_entry() {
     .await;
 
     // The first turn's user message is older than the window.
-    handle.load_earlier_through(
-        thread_id(ATLAS_LOGIN),
-        format!("message-{ATLAS_LOGIN}-1"),
-    );
+    handle.load_earlier_through(thread_id(ATLAS_LOGIN), format!("message-{ATLAS_LOGIN}-1"));
     let state = wait_for(&handle, "the page through the match", |state| {
         visible_items(state, ATLAS_LOGIN) == Some(26)
     })

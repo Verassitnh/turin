@@ -18,7 +18,6 @@ use gpui_kit::{
 };
 use turin_contracts::{EnvironmentId, ThreadId};
 
-use crate::components::chat::open_in_picker::OpenInPickerView;
 use crate::components::branch_toolbar::backend::{
     BranchThreadContext, ProjectThreadInfo, SharedBranchBackend,
 };
@@ -28,6 +27,7 @@ use crate::components::branch_toolbar::branch_toolbar_logic::{
 use crate::components::branch_toolbar::{
     BranchToolbar, BranchToolbarEvent, BranchToolbarLayout, BranchToolbarProps, PanelSection,
 };
+use crate::components::chat::open_in_picker::OpenInPickerView;
 use crate::components::git_actions_control::backend::{GitThreadContext, SharedGitActionsBackend};
 use crate::components::git_actions_control::{
     GitActionsControl, GitActionsControlEvent, GitActionsControlProps, GitDisplayMode,
@@ -286,7 +286,8 @@ impl ChatGitHost {
             ));
             if let Some(runtime) = self.backends.runtime.clone() {
                 let cwd = open_in_cwd(&routed);
-                self.open_in = Some(cx.new(|cx| OpenInPickerView::new(cwd, true, runtime, window, cx)));
+                self.open_in =
+                    Some(cx.new(|cx| OpenInPickerView::new(cwd, true, runtime, window, cx)));
             }
             self.composer_toolbar = Some(composer);
             self.workspace_toolbar = Some(workspace);
@@ -491,7 +492,10 @@ mod tests {
             open_in_cwd(&routed(Some("/wt/feature"), "/repo")).as_deref(),
             Some("/wt/feature")
         );
-        assert_eq!(open_in_cwd(&routed(None, "/repo")).as_deref(), Some("/repo"));
+        assert_eq!(
+            open_in_cwd(&routed(None, "/repo")).as_deref(),
+            Some("/repo")
+        );
         assert_eq!(open_in_cwd(&routed(None, "")), None);
     }
 }

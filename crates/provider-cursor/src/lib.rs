@@ -81,14 +81,14 @@ pub use session::{
     CursorAdapter, CursorSession, CursorThread, PromptImage, PromptOutcome, RuntimeReply,
 };
 pub use settings::CursorSettings;
+pub use skills::{
+    CursorSkillsProbeError, discover_cursor_skills, has_cursor_skill_mention, probe_cursor_skills,
+    rewrite_cursor_skill_mentions,
+};
 pub use usage_host::{
     CursorUsageLimitsSource, HostCursorUsageLimits, cursor_usage_reader, cursor_usage_reader_with,
 };
 pub use usage_limits::{
     BillingCycleEnd, CursorPlanUsage, CursorUsageHttp, CursorUsageLimitsHost, CursorUsageResponse,
     ReqwestCursorUsageHttp, cursor_usage_response_to_limits, read_cursor_usage_limits,
-};
-pub use skills::{
-    CursorSkillsProbeError, discover_cursor_skills, has_cursor_skill_mention, probe_cursor_skills,
-    rewrite_cursor_skill_mentions,
 };

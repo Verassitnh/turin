@@ -19,7 +19,6 @@ pub mod assistant_citation_source;
 pub mod assistant_citation_target;
 pub mod assistant_selection_state;
 pub mod assistant_selection_toolbar;
-pub mod markdown_thread_link;
 pub mod changed_files_tree;
 pub mod chat_canvas;
 #[allow(dead_code)]
@@ -29,6 +28,7 @@ pub mod chat_header;
 pub mod chat_overlay_banners;
 #[allow(dead_code)]
 pub mod context_window;
+pub mod markdown_thread_link;
 pub mod question_attachment_drafts;
 pub mod question_attachment_submit;
 pub mod thread_navigation;

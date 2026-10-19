@@ -922,10 +922,8 @@ async fn a_favorite_changed_in_settings_is_announced_to_open_composers() {
         .update_server_settings(ServerSettingsPatch {
             set_model_favorites: Some(vec![SetModelFavorite {
                 provider: ProviderInstanceId::new("claudeAgent").expect("instance"),
-                model: turin_contracts::base_schemas::TrimmedNonEmptyString::new(
-                    "claude-opus-5-5",
-                )
-                .expect("model"),
+                model: turin_contracts::base_schemas::TrimmedNonEmptyString::new("claude-opus-5-5")
+                    .expect("model"),
                 favorite: true,
             }]),
             ..Default::default()
@@ -1310,7 +1308,10 @@ async fn the_diff_panel_reads_a_turn_checkpoint_and_the_working_tree() {
 }
 
 /// Opens `thread` on a client store over the harness' stores.
-async fn open_client(harness: &Harness, thread: &turin_contracts::ThreadId) -> crate::state::store::ClientStateHandle {
+async fn open_client(
+    harness: &Harness,
+    thread: &turin_contracts::ThreadId,
+) -> crate::state::store::ClientStateHandle {
     let client = start(harness.stores.clone());
     wait_for(&client, "the shell", |state| {
         state
@@ -1396,12 +1397,20 @@ async fn resume_continues_an_interrupted_run() {
 
     let state = client.snapshot();
     let plan = resume_plan(&projection_of(&state, &thread));
-    let interrupted = plan.resumable_run_id.clone().expect("the interrupted run resumes");
+    let interrupted = plan
+        .resumable_run_id
+        .clone()
+        .expect("the interrupted run resumes");
     assert!(plan.can_resume());
 
     harness
         .commands
-        .resume_thread(&thread, Some(interrupted.to_string()), plan.has_held_queued_runs, None)
+        .resume_thread(
+            &thread,
+            Some(interrupted.to_string()),
+            plan.has_held_queued_runs,
+            None,
+        )
         .await
         .expect("resume");
 
@@ -1621,7 +1630,10 @@ async fn a_scratch_thread_is_created_without_a_project_and_works_in_its_own_fold
     // "New thread without a project": the Scratch project is found or created once.
     let project = commands.ensure_scratch_project().await.expect("ensure");
     assert_eq!(
-        commands.ensure_scratch_project().await.expect("ensure again"),
+        commands
+            .ensure_scratch_project()
+            .await
+            .expect("ensure again"),
         project
     );
     let row = harness
@@ -1635,7 +1647,10 @@ async fn a_scratch_thread_is_created_without_a_project_and_works_in_its_own_fold
     assert_eq!(row.workspace_root, root);
     assert!(row.project_icon.is_some(), "Scratch has its own icon");
 
-    let defaults = commands.new_thread_defaults(&project).await.expect("defaults");
+    let defaults = commands
+        .new_thread_defaults(&project)
+        .await
+        .expect("defaults");
     let create = |title: &str| CreateThread {
         project_id: project.clone(),
         title: title.into(),
@@ -1643,8 +1658,14 @@ async fn a_scratch_thread_is_created_without_a_project_and_works_in_its_own_fold
         runtime_mode: defaults.runtime_mode.clone(),
         interaction_mode: "default".into(),
     };
-    let first = commands.create_thread(create("New thread")).await.expect("first");
-    let second = commands.create_thread(create("New thread")).await.expect("second");
+    let first = commands
+        .create_thread(create("New thread"))
+        .await
+        .expect("first");
+    let second = commands
+        .create_thread(create("New thread"))
+        .await
+        .expect("second");
 
     let client = start(harness.stores.clone());
     wait_for(&client, "the shell", |state| {

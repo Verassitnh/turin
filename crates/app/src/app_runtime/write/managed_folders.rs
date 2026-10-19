@@ -14,10 +14,10 @@ use turin_contracts::project::{
     Project, ProjectCreatePayload, ProjectSnapshot, ProjectUpdatePayload, ReceivedProjectIcon,
 };
 use turin_contracts::{CommandId, ProjectId};
-use turin_orchestration::projection::project_store::ProjectRow;
 use turin_orchestration::pipeline::project_commands::{
     ProjectCommand, ProjectCreateCommand, ProjectMetaUpdateCommand,
 };
+use turin_orchestration::projection::project_store::ProjectRow;
 use turin_projects::managed_project_folders::ManagedProjectFolders;
 use turin_projects::project_service::{
     ProjectBootstrap, ProjectCreateInput, ProjectDeleteInput, ProjectOperation,

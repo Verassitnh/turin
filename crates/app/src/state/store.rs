@@ -163,20 +163,19 @@ impl Reducer {
                     status: FeedStatus::Disconnected,
                 })
             }
-            Input::LoadEarlier(thread_id, through_entry_id) => match self
-                .core
-                .begin_load_earlier(&thread_id)
-            {
-                Some(cursor) => {
-                    let _ = self.requests.send(ClientStateRequest::LoadEarlier {
-                        thread_id,
-                        cursor,
-                        through_entry_id,
-                    });
-                    true
+            Input::LoadEarlier(thread_id, through_entry_id) => {
+                match self.core.begin_load_earlier(&thread_id) {
+                    Some(cursor) => {
+                        let _ = self.requests.send(ClientStateRequest::LoadEarlier {
+                            thread_id,
+                            cursor,
+                            through_entry_id,
+                        });
+                        true
+                    }
+                    None => false,
                 }
-                None => false,
-            },
+            }
             Input::Expire(thread_id, generation) => {
                 if self.expire_generation.get(&thread_id) == Some(&generation)
                     && !self.open_counts.contains_key(&thread_id)

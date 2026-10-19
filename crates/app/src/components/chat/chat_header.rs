@@ -12,14 +12,14 @@ use std::sync::Arc;
 
 use crate::components::project_favicon::ProjectFavicon;
 use crate::components::project_monogram::ProjectMonogram;
-use crate::project_icon_colors::project_icon_color;
-use crate::project_identity::derive_project_identity;
-use crate::state::models::EnvironmentProject;
-use crate::theme::ActiveAppTheme as _;
 use crate::components::workspace_breadcrumb::{
     WorkspaceBreadcrumb, WorkspaceBreadcrumbItem, WorkspaceBreadcrumbSeparator,
     workspace_breadcrumb_text,
 };
+use crate::project_icon_colors::project_icon_color;
+use crate::project_identity::derive_project_identity;
+use crate::state::models::EnvironmentProject;
+use crate::theme::ActiveAppTheme as _;
 
 #[derive(IntoElement)]
 pub struct ChatHeader {

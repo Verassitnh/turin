@@ -76,9 +76,8 @@ impl ThreadPullRequestsSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let panel = cx.new(|cx| {
-            ThreadPullRequestsPanel::new(store.clone(), thread_id.clone(), window, cx)
-        });
+        let panel =
+            cx.new(|cx| ThreadPullRequestsPanel::new(store.clone(), thread_id.clone(), window, cx));
         let subscription = cx.subscribe_in(
             &panel,
             window,
@@ -99,11 +98,7 @@ impl ThreadPullRequestsSurface {
     }
 
     /// Keeps what the dialog resolves against current as projects change.
-    pub fn set_linking(
-        &mut self,
-        linking: PullRequestLinking,
-        project: Option<LinkDialogProject>,
-    ) {
+    pub fn set_linking(&mut self, linking: PullRequestLinking, project: Option<LinkDialogProject>) {
         self.linking = linking;
         self.project = project;
     }
@@ -115,9 +110,8 @@ impl ThreadPullRequestsSurface {
             store: self.store.clone(),
         };
         let project = self.project.clone();
-        let dialog = cx.new(|cx| {
-            LinkPullRequestDialog::new(project, window, cx).with_commands(commands)
-        });
+        let dialog =
+            cx.new(|cx| LinkPullRequestDialog::new(project, window, cx).with_commands(commands));
         cx.subscribe(&dialog, |this, _, _: &LinkPullRequestDialogEvent, cx| {
             // Linked (the dialog sent the command itself) or dismissed.
             this.dialog = None;

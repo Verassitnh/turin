@@ -4,18 +4,18 @@
 
 use turin_provider_core::server_provider::ServerProvider;
 
+use crate::components::chat::timeline::live_projection::active_run;
 use crate::composer::view_model::{BannerItem, BannerPriority, BannerVariant};
-use crate::state::thread_execution::present_provider_goal;
-use crate::ui::IconName;
 use crate::state::contracts::{
     OrchestrationV2ProviderFailureClass, OrchestrationV2RunStatus, RunId,
 };
-use crate::components::chat::timeline::live_projection::active_run;
 use crate::state::models::ProviderFailureClass;
-use turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole;
 use crate::state::support::thread_error::{latest_executed_run, latest_root_provider_failure};
 use crate::state::thread_execution::derive_thread_runtime;
+use crate::state::thread_execution::present_provider_goal;
 use crate::state::thread_projection::ThreadProjection;
+use crate::ui::IconName;
+use turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole;
 
 /// What the composer's Resume does for the thread right now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,8 +40,9 @@ pub fn resume_plan(projection: &ThreadProjection) -> ResumePlan {
     let resumable_run_id = latest_executed_run(&projection.runs).and_then(|run| match run.status {
         OrchestrationV2RunStatus::Interrupted => Some(run.id.clone()),
         OrchestrationV2RunStatus::Failed => {
-            let runtime_limited = derive_thread_runtime(projection)
-                .is_some_and(|runtime| runtime.last_error_class == Some(ProviderFailureClass::UsageLimit));
+            let runtime_limited = derive_thread_runtime(projection).is_some_and(|runtime| {
+                runtime.last_error_class == Some(ProviderFailureClass::UsageLimit)
+            });
             let run_limited = latest_root_provider_failure(Some(run), &projection.turn_items)
                 .is_some_and(|failure| {
                     failure.class == OrchestrationV2ProviderFailureClass::UsageLimit
@@ -190,7 +191,10 @@ mod tests {
             run("run-1", 1, "completed", false),
             run("run-2", 2, "interrupted", false),
         ]));
-        assert_eq!(plan.resumable_run_id.as_ref().map(RunId::as_str), Some("run-2"));
+        assert_eq!(
+            plan.resumable_run_id.as_ref().map(RunId::as_str),
+            Some("run-2")
+        );
         assert!(!plan.has_held_queued_runs);
         assert!(plan.can_resume());
     }
@@ -314,17 +318,31 @@ mod tests {
     #[test]
     fn a_paused_goal_offers_resume_and_clear_when_idle() {
         let banner = goal_banner(&goal_projection("paused"), false).expect("banner");
-        let labels: Vec<_> = banner.actions.iter().map(|(label, _)| label.as_str()).collect();
+        let labels: Vec<_> = banner
+            .actions
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect();
         assert_eq!(labels, ["Resume", "Clear"]);
         assert_eq!(banner.description.as_deref(), Some("Ship it"));
-        assert_eq!(goal_action_command("resume"), Some(("/goal resume", "Failed to resume goal")));
-        assert_eq!(goal_action_command("clear"), Some(("/goal clear", "Failed to clear goal")));
+        assert_eq!(
+            goal_action_command("resume"),
+            Some(("/goal resume", "Failed to resume goal"))
+        );
+        assert_eq!(
+            goal_action_command("clear"),
+            Some(("/goal clear", "Failed to clear goal"))
+        );
     }
 
     #[test]
     fn an_active_or_working_goal_cannot_resume() {
         let idle = goal_banner(&goal_projection("active"), false).expect("banner");
-        let labels: Vec<_> = idle.actions.iter().map(|(label, _)| label.as_str()).collect();
+        let labels: Vec<_> = idle
+            .actions
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect();
         assert_eq!(labels, ["Clear"]);
         let working = goal_banner(&goal_projection("paused"), true).expect("banner");
         assert!(working.actions.is_empty());

@@ -224,11 +224,10 @@ impl ChatView {
                         cx,
                         move |window, cx| {
                             // `onClose: focusComposer`.
-                            let on_close: CloseHandler =
-                                Rc::new(move |window, cx| {
-                                    let focus = composer.read(cx).focus_handle(cx);
-                                    window.focus(&focus, cx);
-                                });
+                            let on_close: CloseHandler = Rc::new(move |window, cx| {
+                                let focus = composer.read(cx).focus_handle(cx);
+                                window.focus(&focus, cx);
+                            });
                             ThreadFind::new(thread_id, bus, timeline, store, on_close, window, cx)
                         },
                     )

@@ -322,11 +322,9 @@ impl TurinEffectExecutor {
                     thread_id,
                     request_id: effect.command_id.clone(),
                     kind: match kind {
-                        ThreadTitleKind::Initial { message_id } => {
-                            TitleRegenerationKind::Initial {
-                                message_id: message_id.clone(),
-                            }
-                        }
+                        ThreadTitleKind::Initial { message_id } => TitleRegenerationKind::Initial {
+                            message_id: message_id.clone(),
+                        },
                         ThreadTitleKind::Regenerate => TitleRegenerationKind::Regenerate,
                     },
                 })
@@ -362,9 +360,7 @@ impl TurinEffectExecutor {
                 // message; the cause stays in the log.
                 tracing::warn!(effect_id = %effect.id, %error, cause = ?error.cause, "rollback failed");
                 if !will_retry
-                    && let Err(record_error) = self
-                        .record_rollback_failure(effect, thread_id)
-                        .await
+                    && let Err(record_error) = self.record_rollback_failure(effect, thread_id).await
                 {
                     tracing::warn!(effect_id = %effect.id, %record_error, "failed to record rollback failure");
                 }

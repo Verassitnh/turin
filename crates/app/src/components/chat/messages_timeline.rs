@@ -44,9 +44,7 @@ use super::timeline::messages_timeline_logic::{
     compute_stable_messages_timeline_rows, derive_messages_timeline_rows_with_state,
 };
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
-use super::timeline::types::{
-    ThreadTimelineSnapshot, TimelineEntryKind, TimelineHistoryControls,
-};
+use super::timeline::types::{ThreadTimelineSnapshot, TimelineEntryKind, TimelineHistoryControls};
 use super::timeline_message_rows::{
     assistant_meta_row, assistant_row, proposed_plan_row, user_row,
 };
@@ -567,7 +565,10 @@ impl MessagesTimeline {
             loading: history.loading,
             error: history.error.is_some(),
         });
-        let first_entry_id = snapshot.timeline_entries.first().map(|entry| entry.id.as_str());
+        let first_entry_id = snapshot
+            .timeline_entries
+            .first()
+            .map(|entry| entry.id.as_str());
         let row_loaded = self.find_row_index(&active.entry_id).is_some();
         let ask = plan_earlier_history_request(
             &mut self.find_history_requests,

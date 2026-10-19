@@ -42,7 +42,9 @@ pub fn show_about_panel() {
     ];
     let options = NSDictionary::from_retained_objects(&[&*name, &*version], &values);
     // SAFETY: the keys are `NSAboutPanelOptionKey` strings and the values strings.
-    unsafe { NSApplication::sharedApplication(mtm).orderFrontStandardAboutPanelWithOptions(&options) };
+    unsafe {
+        NSApplication::sharedApplication(mtm).orderFrontStandardAboutPanelWithOptions(&options)
+    };
 }
 
 #[cfg(not(target_os = "macos"))]

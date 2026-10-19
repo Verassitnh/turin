@@ -99,12 +99,11 @@ pub(super) async fn commit_project_command(
     command: ProjectCommand,
 ) -> Result<(), CommandError> {
     let project_id = command.project_id().clone();
-    let row =
-        |row: turin_orchestration::projection::project_store::ProjectRow| ProjectCommandRow {
-            project_id: row.project_id,
-            scripts: row.scripts,
-            deleted_at: row.deleted_at,
-        };
+    let row = |row: turin_orchestration::projection::project_store::ProjectRow| ProjectCommandRow {
+        project_id: row.project_id,
+        scripts: row.scripts,
+        deleted_at: row.deleted_at,
+    };
     let project = stores
         .projects
         .get(project_id.clone(), true)
@@ -404,11 +403,12 @@ impl Commands {
             )
             .await
             .map_err(|error| CommandError::from_error(&error))?;
-        let checkpoint = rollback_checkpoint(&records.checkpoints, turn_count).ok_or_else(|| {
-            CommandError::new(format!(
-                "Checkpoint for turn {turn_count} is not available for thread {thread_id}."
-            ))
-        })?;
+        let checkpoint =
+            rollback_checkpoint(&records.checkpoints, turn_count).ok_or_else(|| {
+                CommandError::new(format!(
+                    "Checkpoint for turn {turn_count} is not available for thread {thread_id}."
+                ))
+            })?;
         let request_id = command_id();
         self.dispatch(json!({
             "type": "checkpoint.rollback",

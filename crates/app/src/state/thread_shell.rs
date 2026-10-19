@@ -162,9 +162,11 @@ impl ShellView {
 
     /// The project a thread belongs to (its icon heads the chat header).
     pub fn project_of_thread(&self, thread_id: &ThreadId) -> Option<&Arc<EnvironmentProject>> {
-        let thread = self
-            .thread(thread_id)
-            .or_else(|| self.archived_threads.iter().find(|row| &row.id == thread_id))?;
+        let thread = self.thread(thread_id).or_else(|| {
+            self.archived_threads
+                .iter()
+                .find(|row| &row.id == thread_id)
+        })?;
         self.project(&thread.project_id)
     }
 

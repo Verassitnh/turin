@@ -343,7 +343,10 @@ fn the_live_palette_offers_threads_without_a_project_only_with_a_scratch_folder(
         "{with:?}"
     );
     // The find bar is live either way, so the palette keeps its row.
-    assert!(without.contains(&"find-current-thread".to_owned()), "{without:?}");
+    assert!(
+        without.contains(&"find-current-thread".to_owned()),
+        "{without:?}"
+    );
 }
 
 #[test]

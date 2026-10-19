@@ -245,7 +245,10 @@ fn reopen_main_window(command_bus: &app_runtime::write::bus::CommandBus, cx: &mu
 /// The main window and its shell, when it is still open.
 fn open_main(
     cx: &mut App,
-) -> Option<(AnyWindowHandle, gpui_kit::Entity<components::app_sidebar_layout::AppSidebarLayout>)> {
+) -> Option<(
+    AnyWindowHandle,
+    gpui_kit::Entity<components::app_sidebar_layout::AppSidebarLayout>,
+)> {
     let (handle, layout) = cx
         .try_global::<MainWindow>()
         .map(|main| (main.handle, main.layout.clone()))?;

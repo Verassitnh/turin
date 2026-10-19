@@ -15,7 +15,10 @@ pub enum WindowActionRoute {
 }
 
 /// `main` is the main window, `active` the focused one; both `None` when absent.
-pub fn route_window_action<T: PartialEq>(main: Option<&T>, active: Option<&T>) -> WindowActionRoute {
+pub fn route_window_action<T: PartialEq>(
+    main: Option<&T>,
+    active: Option<&T>,
+) -> WindowActionRoute {
     match (main, active) {
         (Some(main), Some(active)) if main == active => WindowActionRoute::MainShell,
         (Some(_), None) => WindowActionRoute::MainShell,

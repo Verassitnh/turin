@@ -13,9 +13,9 @@ use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, BoxShadow, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Window, div, point, px,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    px,
 };
 
 use crate::components::chat::assistant_citation_chip::replace_citation_comment;
@@ -52,8 +52,7 @@ use crate::composer::views::prompt_editor::{
 };
 use crate::composer::views::queued_run_keys::{QueuedRunKey, queued_run_key};
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::{MixSpace, color_mix, with_alpha};
-use crate::theme::tokens::{self, RADIUS_3XL, TEXT_XS, tw};
+use crate::theme::tokens::TEXT_XS;
 
 /// Composer placeholder copy (ChatComposer.tsx, default state).
 pub const COMPOSER_PLACEHOLDER: &str =
@@ -1189,18 +1188,6 @@ impl Focusable for ChatComposer {
     }
 }
 
-/// The dark frame's top sheen: `dark:after:inset-shadow-2xs` in
-/// `--chat-composer-highlight` (3% white), a 1px inset line with no blur.
-fn composer_dark_highlight() -> BoxShadow {
-    BoxShadow {
-        color: with_alpha(tw::WHITE, 0.03).into(),
-        offset: point(px(0.), px(1.)),
-        blur_radius: px(0.),
-        spread_radius: px(0.),
-        inset: true,
-    }
-}
-
 impl Render for ChatComposer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let vm = self.view_model(cx);
@@ -1211,21 +1198,13 @@ impl Render for ChatComposer {
         self.sync_editor_config(&vm, cx);
         let theme = cx.app_theme().clone();
         let dark = theme.is_dark();
-        // Light: `--card` at the 80% glass opacity; dark: `--surface-raised`.
-        // Flattened over the canvas: GPUI paints box shadows under the
-        // element (CSS clips them to outside the border box), so a
-        // translucent fill would show its own drop shadow through it.
-        let glass = if dark {
+        // Cursor-style: a solid, flat, slightly raised box with a 1px border.
+        let surface = if dark {
             theme.surface_raised
         } else {
             theme.card
         };
-        let surface = color_mix(MixSpace::Srgb, glass, 0.8, theme.background);
-        let outline = if dark {
-            with_alpha(tw::WHITE, 0.05)
-        } else {
-            with_alpha(tw::BLACK, 0.08)
-        };
+        let outline = theme.border;
 
         if self.menu.is_open() {
             self.refresh_menu_items(cx);
@@ -1254,22 +1233,17 @@ impl Render for ChatComposer {
                 }),
             )
             .w_full()
-            .rounded(RADIUS_3XL)
+            .rounded(px(8.))
             .bg(surface)
             .border_1()
             .border_color(outline)
-            .shadow(if dark {
-                vec![composer_dark_highlight()]
-            } else {
-                tokens::shadow_composer(false)
-            })
             .child(
-                // Body: `px-4 pt-4 pb-2`.
+                // Body: Cursor-compact `px-2 pt-2 pb-1`.
                 div()
                     .relative()
-                    .px_4()
-                    .pt_4()
-                    .pb_2()
+                    .px(px(8.))
+                    .pt(px(8.))
+                    .pb(px(4.))
                     .child(super::chrome::track_bounds(&self.trigger_bounds.body))
                     .children(attachments)
                     .child({
@@ -1308,8 +1282,8 @@ impl Render for ChatComposer {
                 // ComposerPromptLengthValidation: `px-3 pb-2 text-xs text-destructive sm:px-4`.
                 this.child(
                     div()
-                        .px_4()
-                        .pb_2()
+                        .px(px(8.))
+                        .pb(px(4.))
                         .text_size(TEXT_XS.size)
                         .text_color(theme.destructive)
                         .child(SharedString::from(message)),

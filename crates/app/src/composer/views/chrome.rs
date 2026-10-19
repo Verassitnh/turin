@@ -6,9 +6,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui_kit::{
-    Anchor, AnyElement, App, Bounds, CursorStyle, Div, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, SharedString, Stateful, Styled as _, anchored, canvas,
-    deferred, div, point, px, rems,
+    Anchor, AnyElement, App, Bounds, CursorStyle, Div, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, SharedString, Stateful, Styled as _, anchored, canvas, deferred,
+    div, point, px, rems,
 };
 
 use crate::theme::ActiveAppTheme;
@@ -46,7 +46,7 @@ pub fn composer_control(
         .id(id)
         .relative()
         .flex()
-        .h(rems(1.75))
+        .h(rems(1.5))
         .flex_shrink_0()
         .items_center()
         .justify_center()
@@ -59,8 +59,7 @@ pub fn composer_control(
         ControlSize::Sm => base
             .gap(rems(0.375))
             .px(rems(0.625))
-            .text_size(TEXT_SM.size)
-            .font_weight(FontWeight::MEDIUM)
+            .text_size(TEXT_XS.size)
             .text_color(theme.secondary_label)
             .hover(|style| style.bg(theme.accent).text_color(theme.foreground)),
         ControlSize::Xs => base

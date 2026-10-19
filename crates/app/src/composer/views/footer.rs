@@ -32,8 +32,8 @@ use crate::composer::views::chrome::{
 };
 use crate::composer::views::provider_model_picker::provider_model_trigger_children;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::{MixSpace, color_mix, with_alpha};
-use crate::theme::tokens::{self, TEXT_SM, TEXT_XS, tw};
+use crate::theme::color::with_alpha;
+use crate::theme::tokens::{TEXT_XS, tw};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
 /// `runtimeModeConfig`.
@@ -99,9 +99,9 @@ impl ChatComposer {
             .min_w_0()
             .items_center()
             .justify_between()
-            .gap_2()
-            .px_4()
-            .pb_4()
+            .gap(px(4.))
+            .px(px(8.))
+            .pb(px(6.))
             .child(left)
             .child(right)
             .into_any_element()
@@ -284,7 +284,7 @@ impl ChatComposer {
             .flex_shrink_0()
             .items_center()
             .justify_end()
-            .gap(if compact { rems(0.375) } else { rems(0.5) })
+            .gap(px(4.))
             .children(meter)
             .child(attach)
             .child(actions)
@@ -311,7 +311,7 @@ impl ChatComposer {
                     .flex()
                     .items_center()
                     .justify_end()
-                    .gap(if compact { rems(0.375) } else { rems(0.5) })
+                    .gap(px(4.))
                     .children(stop)
                     .when(show_previous, |this| {
                         this.child(
@@ -337,16 +337,16 @@ impl ChatComposer {
                         submit_label,
                         submit_disabled,
                         compact,
-                        28.,
+                        24.,
                         cx,
                     ))
                     .into_any_element()
             }
             PrimaryActions::Refine { label, disabled } => self
-                .pill_button("composer-refine", label, disabled, compact, 32., cx)
+                .pill_button("composer-refine", label, disabled, compact, 24., cx)
                 .into_any_element(),
             PrimaryActions::Implement { label, disabled } => self
-                .pill_button("composer-implement", label, disabled, compact, 32., cx)
+                .pill_button("composer-implement", label, disabled, compact, 24., cx)
                 .into_any_element(),
             PrimaryActions::Stop => self
                 .stop_button(false, !vm.can_operate_thread, cx)
@@ -362,7 +362,7 @@ impl ChatComposer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let size = if inside_pending { px(28.) } else { px(32.) };
+        let size = if inside_pending { px(22.) } else { px(24.) };
         div()
             .id("composer-stop")
             .flex()
@@ -373,13 +373,12 @@ impl ChatComposer {
             .rounded_full()
             .bg(with_alpha(theme.destructive, 0.9))
             .text_color(tw::WHITE)
-            .shadow(tokens::shadow_xs(0.05))
             .cursor(CursorStyle::PointingHand)
             .hover(|style| style.bg(theme.destructive))
             .when(disabled, |this| this.opacity(0.64))
             .child(
                 // `<rect x=2 y=2 width=8 height=8 rx=1.5>` in a 12px box.
-                div().size(px(8.)).rounded(px(1.5)).bg(tw::WHITE),
+                div().size(px(7.)).rounded(px(1.5)).bg(tw::WHITE),
             )
             .tooltip(|window, cx| Tooltip::new("Interrupt").build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -414,9 +413,8 @@ impl ChatComposer {
             .whitespace_nowrap()
             .bg(theme.message_action)
             .text_color(theme.message_action_foreground)
-            .text_size(TEXT_SM.size)
+            .text_size(TEXT_XS.size)
             .font_weight(FontWeight::MEDIUM)
-            .shadow(tokens::shadow_xs(0.05))
             .when(!disabled, |this| {
                 this.cursor(CursorStyle::PointingHand)
                     .hover(|style| style.bg(theme.message_action_hover))
@@ -440,12 +438,6 @@ impl ChatComposer {
         let tooltip = button.tooltip.clone();
         let _ = vm;
         let dark = theme.is_dark();
-        let glow = color_mix(
-            MixSpace::Srgb,
-            theme.message_action,
-            0.24,
-            with_alpha(theme.message_action, 0.),
-        );
         let icon: AnyElement = match button.icon {
             SendIcon::Spinner => Icon::new(IconName::LoaderCircle)
                 .color(theme.message_action_foreground)
@@ -473,20 +465,13 @@ impl ChatComposer {
             .id("composer-send")
             .flex()
             .flex_shrink_0()
-            .size_8()
+            .size(px(24.))
             .items_center()
             .justify_center()
             .rounded_full()
             .bg(theme.message_action)
             .when(!disabled, |this| {
                 this.cursor(CursorStyle::PointingHand)
-                    .shadow(vec![gpui_kit::BoxShadow {
-                        color: glow.into(),
-                        offset: gpui_kit::point(px(0.), px(1.)),
-                        blur_radius: px(2.),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
                     .hover(|style| style.bg(theme.message_action_hover))
                     .on_click(
                         cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {

@@ -21,6 +21,7 @@ use turin_orchestration::pipeline::project_commands::{
     ProjectMetaUpdateCommand, plan_project_command,
 };
 use turin_orchestration::pipeline::thread_management_service::latest_active_run;
+use turin_providers::provider_registry::RefreshWorkspaceSnapshotInput;
 
 use super::runtime::WriteRuntime;
 
@@ -567,6 +568,55 @@ impl Commands {
             }))
             .await?;
         }
+        Ok(())
+    }
+
+    /// Palette "Restart agent session" (`restart-agent-session`): stops the
+    /// provider process of every session of the thread (`stopSession`), which
+    /// keeps the conversation. The next message opens a fresh session that
+    /// resumes it, so skills, plugins and MCP servers reload. Then a fresh
+    /// workspace scan of the thread's provider updates the composer's slash
+    /// menu (`refreshProviders` with `fresh`).
+    pub async fn restart_agent_session(&self, thread_id: &ThreadId) -> Result<(), CommandError> {
+        self.detach_thread_sessions(thread_id).await?;
+        let projection = self
+            .runtime
+            .orchestrator
+            .get_thread_projection(thread_id)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let thread = &projection.thread;
+        let cwd = match &thread.worktree_path {
+            Some(path) => path.as_str().to_owned(),
+            None => {
+                let project = self
+                    .runtime
+                    .stores
+                    .projects
+                    .get(thread.project_id.clone(), false)
+                    .await
+                    .map_err(|error| CommandError::from_error(&error))?;
+                // Without a project there is no workspace to scan; the session
+                // is stopped all the same.
+                let Some(project) = project else {
+                    return Ok(());
+                };
+                project.workspace_root
+            }
+        };
+        let instance_id = projection.provider_sessions.last().map_or_else(
+            || thread.provider_instance_id.clone(),
+            |session| session.provider_instance_id.clone(),
+        );
+        self.runtime
+            .providers
+            .registry
+            .refresh_workspace_snapshot(RefreshWorkspaceSnapshotInput {
+                instance_id,
+                cwd,
+                fresh: true,
+            })
+            .await;
         Ok(())
     }
 

@@ -50,7 +50,6 @@ use gpui_kit::{
     Subscription, Task, Window, actions, div, px,
 };
 use turin_contracts::filesystem::{FilesystemBrowseEntry, FilesystemBrowseResult};
-use turin_contracts::{EnvironmentId, ThreadId};
 
 use self::command_palette_logic::{
     AppearanceModeChoice, BuildBrowseGroupsInput, CommandPaletteGroup, CommandPaletteItem,
@@ -1091,15 +1090,18 @@ impl CommandPalette {
     }
 
     fn restart_agent_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.context.active_thread_key.clone() else {
-            return;
-        };
-        let Some((environment, thread)) = key.split_once(':') else {
-            return;
-        };
-        let (Ok(environment_id), Ok(thread_id)) =
-            (EnvironmentId::new(environment), ThreadId::new(thread))
+        let Some((environment_id, thread_id)) = self
+            .context
+            .active_thread_key
+            .as_deref()
+            .and_then(crate::state::models::parse_scoped_thread_key)
         else {
+            self.toast_error(
+                "Unable to run command",
+                "Open a thread to restart its agent session.",
+                window,
+                cx,
+            );
             return;
         };
         let task = self.backend.restart_agent_session(

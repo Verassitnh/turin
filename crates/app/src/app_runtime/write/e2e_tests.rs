@@ -53,6 +53,8 @@ struct Harness {
     stores: Arc<Stores>,
     _dirs: Vec<tempfile::TempDir>,
     workspace: PathBuf,
+    /// The fake CLI's directory; its `argv.log` has one line per launch.
+    cli: PathBuf,
 }
 
 async fn harness() -> Harness {
@@ -69,10 +71,12 @@ async fn harness_with(transcript: &str) -> Harness {
         .await
         .expect("write runtime");
     let workspace_path = workspace.path().to_path_buf();
+    let cli_path = cli.path().to_path_buf();
     Harness {
         commands: Commands::new(runtime),
         stores,
         workspace: workspace_path,
+        cli: cli_path,
         _dirs: vec![data, workspace, cli],
     }
 }
@@ -1842,4 +1846,200 @@ async fn a_named_project_is_created_under_the_managed_projects_folder() {
         .collect();
     titles.sort();
     assert_eq!(titles, ["Pinball Stats", "Pinball Stats"]);
+}
+
+/// Sends `text` with `delivery` on `thread`.
+async fn send_text(
+    harness: &Harness,
+    thread: &turin_contracts::ThreadId,
+    text: &str,
+    delivery: Delivery,
+) {
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: text.into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+}
+
+/// Waits (60 s) until the thread's projection satisfies `ready`.
+async fn wait_for_projection(
+    client: &crate::state::store::ClientStateHandle,
+    thread: &turin_contracts::ThreadId,
+    label: &str,
+    ready: impl Fn(&crate::state::thread_projection::ThreadProjection) -> bool,
+) {
+    let target = thread_id(thread.as_str());
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(client, label, |state| {
+            state
+                .thread(&target)
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| ready(data))
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
+}
+
+/// [`wait_for_projection`] on the thread's runs.
+async fn wait_for_runs(
+    client: &crate::state::store::ClientStateHandle,
+    thread: &turin_contracts::ThreadId,
+    label: &str,
+    ready: impl Fn(&[Arc<turin_contracts::orchestration_v2::OrchestrationV2Run>]) -> bool,
+) {
+    wait_for_projection(client, thread, label, |data| ready(data.runs.as_slice())).await;
+}
+
+/// How many provider sessions launched the fake CLI. `argv.log` has a line per
+/// launch; probes (`--version`, capability and skill scans) carry no session flag.
+fn session_launches(harness: &Harness) -> usize {
+    std::fs::read_to_string(harness.cli.join("argv.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("--session-id") || line.contains("--resume"))
+        .count()
+}
+
+// Palette "Restart agent session": the thread's provider session is stopped but
+// the conversation stays, so the next message launches a fresh CLI process
+// that resumes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restarting_the_agent_session_starts_a_fresh_provider_process() {
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let client = open_client(&harness, &thread).await;
+
+    // Nothing to stop yet: accepted.
+    harness
+        .commands
+        .restart_agent_session(&thread)
+        .await
+        .expect("restart before any session");
+
+    send_text(&harness, &thread, "first", Delivery::StartImmediately).await;
+    wait_for_runs(&client, &thread, "the first run to finish", |runs| {
+        runs.iter()
+            .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+    })
+    .await;
+    assert_eq!(session_launches(&harness), 1);
+    assert_eq!(
+        projection_of(&client.snapshot(), &thread)
+            .provider_sessions
+            .len(),
+        1,
+        "the finished turn leaves its provider session open"
+    );
+
+    harness
+        .commands
+        .restart_agent_session(&thread)
+        .await
+        .expect("restart");
+    // Restarting again, with the session already stopped, is accepted too.
+    harness
+        .commands
+        .restart_agent_session(&thread)
+        .await
+        .expect("restart twice");
+    // The session is gone from the thread; the conversation is kept.
+    wait_for_projection(&client, &thread, "the session to stop", |data| {
+        data.provider_sessions.is_empty()
+    })
+    .await;
+    let kept = projection_of(&client.snapshot(), &thread);
+    assert!(
+        kept.messages.iter().any(|message| message.text == "first"),
+        "the conversation survives the restart"
+    );
+
+    send_text(&harness, &thread, "second", Delivery::StartImmediately).await;
+    wait_for_runs(&client, &thread, "the second run to finish", |runs| {
+        runs.iter()
+            .filter(|run| run.status == OrchestrationV2RunStatus::Completed)
+            .count()
+            == 2
+    })
+    .await;
+    assert_eq!(
+        session_launches(&harness),
+        2,
+        "the next turn launched a fresh provider process"
+    );
+}
+
+// The composer's restart dispatch (`restart_active`) reaches the orchestrator's
+// decider. Claude cannot interrupt-and-restart a turn (capabilities
+// `supportsSteeringByInterruptRestart: false`), so it is refused with the
+// decider's reason, and the active run is left alone. Providers that can
+// (Codex, Cursor, OpenCode) are covered by the orchestrator's `restart_active`
+// tests in `message_steer_tests`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_dispatch_is_refused_by_a_provider_that_cannot_restart_a_turn() {
+    let harness = harness_with("claude_turn_interrupt.ndjson").await;
+    let thread = project_and_thread(&harness).await;
+    let client = open_client(&harness, &thread).await;
+
+    send_text(
+        &harness,
+        &thread,
+        "Do not answer immediately.",
+        Delivery::StartImmediately,
+    )
+    .await;
+    // A restart needs the provider turn too, not just the running run.
+    wait_for_projection(&client, &thread, "a running provider turn", |data| {
+        data.runs
+            .iter()
+            .any(|run| run.status == OrchestrationV2RunStatus::Running)
+            && data.provider_turns.iter().any(|turn| {
+                turn.status
+                    == turin_contracts::orchestration_v2::OrchestrationV2ProviderTurnStatus::Running
+            })
+    })
+    .await;
+    let active = projection_of(&client.snapshot(), &thread)
+        .runs
+        .iter()
+        .find(|run| run.status == OrchestrationV2RunStatus::Running)
+        .expect("a running run")
+        .id
+        .clone();
+
+    let refused = harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Do this instead.".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::RestartActive {
+                target_run_id: active.to_string(),
+            },
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect_err("claude cannot restart a turn");
+    assert!(
+        refused.message.contains("interrupt-and-restart"),
+        "{refused}"
+    );
+    assert!(!refused.message.contains("not wired"), "{refused}");
+    // Nothing changed: still the one running run, and Stop still works.
+    let projection = projection_of(&client.snapshot(), &thread);
+    assert_eq!(projection.runs.len(), 1);
+    assert_eq!(projection.runs[0].status, OrchestrationV2RunStatus::Running);
+    harness.commands.stop_thread(&thread).await.expect("stop");
 }

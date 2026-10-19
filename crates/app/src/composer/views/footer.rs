@@ -345,14 +345,94 @@ impl ChatComposer {
             PrimaryActions::Refine { label, disabled } => self
                 .pill_button("composer-refine", label, disabled, compact, 32., cx)
                 .into_any_element(),
-            PrimaryActions::Implement { label, disabled } => self
-                .pill_button("composer-implement", label, disabled, compact, 32., cx)
-                .into_any_element(),
+            PrimaryActions::Implement { label, disabled } => {
+                self.implement_actions(label, disabled, vm.can_operate_thread, compact, cx)
+            }
             PrimaryActions::Stop => self
                 .stop_button(false, !vm.can_operate_thread, cx)
                 .into_any_element(),
             PrimaryActions::Send(button) => self.send_button(&button, vm, cx),
         }
+    }
+
+    /// `data-chat-composer-implement-actions`: the Implement pill and, joined
+    /// to it, a chevron whose menu offers "Implement in a new thread".
+    fn implement_actions(
+        &mut self,
+        label: &'static str,
+        disabled: bool,
+        can_operate_thread: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.app_theme().clone();
+        let height = 32.;
+        let round = px(9999.);
+        let main = div()
+            .id("composer-implement")
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .h(px(height))
+            .px(if compact { rems(0.75) } else { rems(1.) })
+            .rounded_tl(round)
+            .rounded_bl(round)
+            .whitespace_nowrap()
+            .bg(theme.message_action)
+            .text_color(theme.message_action_foreground)
+            .text_size(TEXT_SM.size)
+            .font_weight(FontWeight::MEDIUM)
+            .shadow(tokens::shadow_xs(0.05))
+            .when(!disabled, |this| {
+                this.cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(theme.message_action_hover))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.submit(ComposerSubmissionIntent::Foreground, window, cx)
+                    }))
+            })
+            .when(disabled, |this| this.opacity(0.64))
+            .child(label);
+        let chevron = ImplementChevron {
+            height,
+            disabled,
+            selected: false,
+            background: theme.message_action,
+            hover_background: theme.message_action_hover,
+            foreground: theme.message_action_foreground,
+        };
+        let trigger = if disabled {
+            chevron.into_any_element()
+        } else {
+            let source = self.source(cx);
+            crate::pull_request::dropdown::dropdown(
+                "composer-implement-actions",
+                gpui_kit::Anchor::BottomRight,
+                chevron,
+                move |menu, _, _| {
+                    let source = source.clone();
+                    menu.item(
+                        gpui_kit::component::menu::PopupMenuItem::new("Implement in a new thread")
+                            .disabled(disabled)
+                            .on_click(move |_, _, cx| {
+                                if implement_in_new_thread_runs(disabled, can_operate_thread)
+                                    && let Some(source) = &source
+                                {
+                                    source.implement_plan_in_new_thread(cx);
+                                }
+                            }),
+                    )
+                },
+            )
+            .into_any_element()
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(main)
+            .child(trigger)
+            .into_any_element()
     }
 
     fn stop_button(
@@ -638,3 +718,80 @@ pub fn provider_mark(
 
 #[allow(dead_code)]
 fn _phase(_: SessionPhase) {}
+
+/// The chevron half of the Implement split button
+/// (`aria-label="Implementation actions"`).
+#[derive(gpui_kit::IntoElement)]
+struct ImplementChevron {
+    height: f32,
+    disabled: bool,
+    selected: bool,
+    background: gpui_kit::Hsla,
+    hover_background: gpui_kit::Hsla,
+    foreground: gpui_kit::Hsla,
+}
+
+impl gpui_kit::component::Selectable for ImplementChevron {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl gpui_kit::RenderOnce for ImplementChevron {
+    fn render(self, _window: &mut Window, _cx: &mut gpui_kit::App) -> impl IntoElement {
+        let round = px(9999.);
+        let hover = self.hover_background;
+        div()
+            .id("composer-implement-chevron")
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .h(px(self.height))
+            .px(rems(0.5))
+            .rounded_tr(round)
+            .rounded_br(round)
+            .border_l_1()
+            .border_color(with_alpha(self.foreground, 0.2))
+            .bg(if self.selected {
+                hover
+            } else {
+                self.background
+            })
+            .text_color(self.foreground)
+            .shadow(tokens::shadow_xs(0.05))
+            .when(!self.disabled, |this| {
+                this.cursor(CursorStyle::PointingHand)
+                    .hover(move |style| style.bg(hover))
+            })
+            .when(self.disabled, |this| this.opacity(0.64))
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .size(rems(0.875))
+                    .color(self.foreground),
+            )
+    }
+}
+
+/// The "Implement in a new thread" item acts only while the Implement pill is
+/// enabled and the user may operate the thread (`if (canOperateThread)`).
+fn implement_in_new_thread_runs(implement_disabled: bool, can_operate_thread: bool) -> bool {
+    !implement_disabled && can_operate_thread
+}
+
+#[cfg(test)]
+mod implement_actions_tests {
+    use super::implement_in_new_thread_runs;
+
+    #[test]
+    fn implement_in_a_new_thread_needs_an_enabled_pill_and_an_operate_grant() {
+        assert!(implement_in_new_thread_runs(false, true));
+        assert!(!implement_in_new_thread_runs(true, true));
+        assert!(!implement_in_new_thread_runs(false, false));
+    }
+}

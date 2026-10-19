@@ -39,6 +39,14 @@ use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
 use crate::theme::tokens::{self, RADIUS_3XL};
 
+/// Shown under the disabled "New worktree" entry.
+const NEW_WORKTREE_NOTE: &str =
+    "Threads start in a new worktree from a thread.created hook, not from this menu.";
+
+pub fn new_worktree_note() -> &'static str {
+    NEW_WORKTREE_NOTE
+}
+
 /// Where "Open in" opens the thread: its worktree, else the project checkout
 /// (`openInCwd`: the git cwd).
 pub fn open_in_cwd(routed: &RoutedGitThread) -> Option<String> {
@@ -143,6 +151,10 @@ impl ChatGitHost {
             layout,
             panel_section: section,
             force_new_worktree: false,
+            // The choice only sets a draft flag: no code creates a worktree
+            // from it (PORTING.md: launching is the `thread.created` hooks'
+            // job), so it must not look like it does.
+            new_worktree_note: Some(NEW_WORKTREE_NOTE.to_owned()),
             environment_id: routed.environment_id.clone(),
             thread_id: routed.thread_id.clone(),
             show_git_controls: true,

@@ -79,12 +79,21 @@ pub enum PanelSection {
     Branch,
 }
 
+/// Whether the "New worktree" row can be chosen: a started thread's workspace
+/// is pinned, and a host that cannot launch into a worktree says so in a note.
+fn new_worktree_selectable(env_locked: bool, host_note: Option<&str>) -> bool {
+    !env_locked && host_note.is_none()
+}
+
 /// `BranchToolbarProps`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchToolbarProps {
     pub layout: BranchToolbarLayout,
     pub panel_section: PanelSection,
     pub force_new_worktree: bool,
+    /// Set when the host cannot launch a thread into a new worktree from this
+    /// menu: the "New worktree" row is disabled and the note is shown under it.
+    pub new_worktree_note: Option<String>,
     pub environment_id: EnvironmentId,
     pub thread_id: ThreadId,
     pub show_git_controls: bool,
@@ -426,7 +435,7 @@ impl BranchToolbar {
                     .child(resolve_env_mode_label(EnvMode::Worktree))
                     .into_any_element(),
                 effective == EnvMode::Worktree,
-                locked,
+                !new_worktree_selectable(locked, self.props.new_worktree_note.as_deref()),
                 weak.clone(),
                 WorkspaceChoice::Mode(EnvMode::Worktree),
                 &theme,
@@ -465,6 +474,14 @@ impl BranchToolbar {
                     .child("Workspace"),
             )
             .children(rows)
+            .children(self.props.new_worktree_note.clone().map(|note| {
+                div()
+                    .px_2()
+                    .pb(rems(0.375))
+                    .text_size(TEXT_XS.size)
+                    .text_color(theme.muted_foreground)
+                    .child(note)
+            }))
             .into_any_element()
     }
 
@@ -679,4 +696,24 @@ pub fn new_branch_toolbar(
     cx: &mut gpui_kit::App,
 ) -> Entity<BranchToolbar> {
     cx.new(|cx| BranchToolbar::new(backend, git_backend, props, window, cx))
+}
+
+#[cfg(test)]
+mod new_worktree_tests {
+    use super::new_worktree_selectable;
+
+    #[test]
+    fn new_worktree_is_not_offered_when_the_host_cannot_launch_into_one() {
+        assert!(new_worktree_selectable(false, None));
+        assert!(!new_worktree_selectable(true, None));
+        assert!(!new_worktree_selectable(
+            false,
+            Some("Threads start in a new worktree from a thread.created hook.")
+        ));
+    }
+
+    #[test]
+    fn the_chat_host_explains_why_new_worktree_is_unavailable() {
+        assert!(super::super::chat::chat_git_host::new_worktree_note().contains("thread.created"));
+    }
 }

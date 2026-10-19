@@ -484,27 +484,38 @@ impl AppSidebarLayout {
             cx,
         );
         self.set_main_content(Some(host.read(cx).page_view()), cx);
-        let layout = cx.entity().downgrade();
         let host_for_sub = host.clone();
-        let subscription = cx.subscribe_in(&host, window, move |_, _, event, _, cx| {
-            if matches!(event, PullRequestsRouteEvent::OpenPanel) {
-                layout
-                    .update(cx, |this, cx| {
-                        if let Some(route) = &this.pull_requests {
-                            this.set_right_panel_content(
-                                Some(route.host.read(cx).panel_view()),
-                                cx,
-                            );
-                        }
-                    })
-                    .ok();
-            }
+        // The subscriber already holds `this` (the layout is leased for the callback), so the
+        // handler must not re-enter the layout through its own handle: `layout.update(cx, ..)`
+        // here panics with "cannot update AppSidebarLayout while it is already being updated",
+        // which aborts the app on the first row click (SIGABRT in the mouse-up handler).
+        let subscription = cx.subscribe_in(&host, window, |this, _, event, _, cx| {
+            this.on_pull_requests_route_event(event, cx);
         });
         self.pull_requests = Some(PullRequestsRoute {
             host: host_for_sub,
             _subscription: subscription,
         });
         cx.notify();
+    }
+
+    /// `PullRequestsRouteEvent::OpenPanel`: mount the route's detail panel in the right panel.
+    fn on_pull_requests_route_event(
+        &mut self,
+        event: &PullRequestsRouteEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, PullRequestsRouteEvent::OpenPanel) {
+            return;
+        }
+        let Some(panel_view) = self
+            .pull_requests
+            .as_ref()
+            .map(|route| route.host.read(cx).panel_view())
+        else {
+            return;
+        };
+        self.set_right_panel_content(Some(panel_view), cx);
     }
 
     pub fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {

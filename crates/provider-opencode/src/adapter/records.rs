@@ -721,6 +721,49 @@ pub fn root_turn_node(
     }
 }
 
+/// Upstream stamps `runId: turn.runId` on every node, message, item, plan and
+/// subagent the adapter emits (`adapter.ts`). The record builders here do not
+/// know the run, so the session stamps each event on its way out: the run
+/// executor routes a node, message, item or plan to a run only when its
+/// `runId` is that run's, so without this an OpenCode turn completes with
+/// none of its content in the thread. Records that already carry a run keep it.
+pub fn stamp_run(
+    event: &mut turin_provider_core::provider_adapter::ProviderAdapterV2Event,
+    run_id: &turin_contracts::RunId,
+) {
+    use turin_provider_core::provider_adapter::ProviderAdapterV2Event as E;
+    match event {
+        E::NodeUpdated { node, .. } => {
+            node.run_id.get_or_insert_with(|| run_id.clone());
+        }
+        E::MessageUpdated { message, .. } => {
+            message.run_id.get_or_insert_with(|| run_id.clone());
+        }
+        E::SubagentUpdated { subagent, .. } => {
+            subagent.run_id.get_or_insert_with(|| run_id.clone());
+        }
+        E::TurnItemUpdated { turn_item, .. } => {
+            if turin_provider_core::turn_item::turn_item_common(turn_item)
+                .run_id
+                .is_none()
+                && let Ok(mut value) = serde_json::to_value(&*turn_item)
+            {
+                value["runId"] = serde_json::json!(run_id);
+                if let Ok(stamped) = serde_json::from_value(value) {
+                    *turn_item = stamped;
+                }
+            }
+        }
+        E::PlanUpdated { plan, .. } => match plan {
+            OrchestrationV2PlanArtifact::ProposedPlan { run_id: slot, .. }
+            | OrchestrationV2PlanArtifact::TodoList { run_id: slot, .. } => {
+                slot.get_or_insert_with(|| run_id.clone());
+            }
+        },
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -767,48 +810,5 @@ mod tests {
         })]);
         assert_eq!(questions[0].id.as_str(), "question-0");
         assert_eq!(questions[0].header.as_str(), "Question 1");
-    }
-}
-
-/// Upstream stamps `runId: turn.runId` on every node, message, item, plan and
-/// subagent the adapter emits (`adapter.ts`). The record builders here do not
-/// know the run, so the session stamps each event on its way out: the run
-/// executor routes a node, message, item or plan to a run only when its
-/// `runId` is that run's, so without this an OpenCode turn completes with
-/// none of its content in the thread. Records that already carry a run keep it.
-pub fn stamp_run(
-    event: &mut turin_provider_core::provider_adapter::ProviderAdapterV2Event,
-    run_id: &turin_contracts::RunId,
-) {
-    use turin_provider_core::provider_adapter::ProviderAdapterV2Event as E;
-    match event {
-        E::NodeUpdated { node, .. } => {
-            node.run_id.get_or_insert_with(|| run_id.clone());
-        }
-        E::MessageUpdated { message, .. } => {
-            message.run_id.get_or_insert_with(|| run_id.clone());
-        }
-        E::SubagentUpdated { subagent, .. } => {
-            subagent.run_id.get_or_insert_with(|| run_id.clone());
-        }
-        E::TurnItemUpdated { turn_item, .. } => {
-            if turin_provider_core::turn_item::turn_item_common(turn_item)
-                .run_id
-                .is_none()
-                && let Ok(mut value) = serde_json::to_value(&*turn_item)
-            {
-                value["runId"] = serde_json::json!(run_id);
-                if let Ok(stamped) = serde_json::from_value(value) {
-                    *turn_item = stamped;
-                }
-            }
-        }
-        E::PlanUpdated { plan, .. } => match plan {
-            OrchestrationV2PlanArtifact::ProposedPlan { run_id: slot, .. }
-            | OrchestrationV2PlanArtifact::TodoList { run_id: slot, .. } => {
-                slot.get_or_insert_with(|| run_id.clone());
-            }
-        },
-        _ => {}
     }
 }

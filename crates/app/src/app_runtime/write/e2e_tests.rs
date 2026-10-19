@@ -143,6 +143,7 @@ async fn send_message_streams_a_fake_claude_reply_into_the_store() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -337,6 +338,7 @@ async fn stop_interrupts_a_running_turn() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -417,6 +419,7 @@ async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -514,6 +517,7 @@ async fn a_user_input_question_is_answered_from_a_command_and_the_turn_finishes(
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send");
@@ -603,6 +607,7 @@ async fn queued_runs_can_be_reordered_edited_and_cancelled() {
                     model_selection: None,
                     delivery,
                     title_seed: None,
+                    source_plan_id: None,
                 })
                 .await
                 .expect("send")
@@ -734,6 +739,7 @@ async fn staged_uploads_are_claimed_into_the_thread_with_the_message() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: None,
+            source_plan_id: None,
         })
         .await
         .expect("send with attachments");
@@ -782,6 +788,7 @@ async fn the_first_message_gets_a_generated_title() {
             model_selection: None,
             delivery: Delivery::StartImmediately,
             title_seed: Some("Respond with exactly".into()),
+            source_plan_id: None,
         })
         .await
         .expect("send");

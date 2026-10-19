@@ -210,6 +210,13 @@ pub struct BannerItem {
     pub error: Option<String>,
 }
 
+/// The proposed plan a follow-up acts on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanFollowUpPlan {
+    pub plan_id: String,
+    pub markdown: String,
+}
+
 /// A queued run behind the active turn (`QueuedRunsControl`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedRun {
@@ -318,6 +325,8 @@ pub struct ComposerViewModel {
     pub queue: Option<QueueState>,
     pub show_plan_follow_up_prompt: bool,
     pub plan_follow_up_title: Option<String>,
+    /// The plan Implement hands to the agent (`activeProposedPlan`): its id and markdown.
+    pub plan_follow_up_plan: Option<PlanFollowUpPlan>,
     pub pending_answer: Option<PendingAnswer>,
     pub has_pending_approval: bool,
     pub resume_compaction_tokens: Option<f64>,
@@ -378,6 +387,7 @@ impl Default for ComposerViewModel {
             queue: None,
             show_plan_follow_up_prompt: false,
             plan_follow_up_title: None,
+            plan_follow_up_plan: None,
             pending_answer: None,
             has_pending_approval: false,
             resume_compaction_tokens: None,
@@ -427,6 +437,11 @@ pub struct SendRequest {
     pub answering_pending_user_input: bool,
     /// Edits the queued message instead of sending.
     pub editing_queued_run: Option<String>,
+    /// The plan being implemented, sent as the message's source plan.
+    pub source_plan_id: Option<String>,
+    /// What the user typed, which a failed send hands back (the prompt of a
+    /// plan follow-up is not theirs to get back).
+    pub draft_prompt: String,
 }
 
 /// The user's intent, routed to whatever owns the thread.

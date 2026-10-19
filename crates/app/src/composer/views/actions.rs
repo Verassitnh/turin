@@ -478,7 +478,10 @@ use crate::composer::draft_store::PromptStashEntry;
 
 impl ChatComposer {
     fn next_stash_id(&mut self) -> String {
-        format!("stash-{}", crate::composer::draft_store::next_composer_serial())
+        format!(
+            "stash-{}",
+            crate::composer::draft_store::next_composer_serial()
+        )
     }
 
     /// ⌘S: stash the draft; on an empty composer restore the lone entry or

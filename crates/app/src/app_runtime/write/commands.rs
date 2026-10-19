@@ -77,6 +77,8 @@ pub struct SendMessage {
     pub delivery: Delivery,
     /// Seeds a title from the first message.
     pub title_seed: Option<String>,
+    /// The proposed plan this message implements (`sourcePlanRef`).
+    pub source_plan_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +299,12 @@ impl Commands {
         }
         if let Some(seed) = input.title_seed {
             object.insert("titleSeed".into(), json!(seed));
+        }
+        if let Some(plan_id) = input.source_plan_id {
+            object.insert(
+                "sourcePlanRef".into(),
+                json!({"threadId": input.thread_id, "planId": plan_id}),
+            );
         }
         let result = self.dispatch(command).await?;
         Ok(SendReceipt {

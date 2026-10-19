@@ -91,6 +91,7 @@ pub mod draft_hero_transition;
 #[allow(dead_code)]
 pub mod folder_drop;
 pub mod live_chat;
+pub mod live_composer_derive;
 pub mod live_lineage;
 pub mod live_wiring;
 pub mod markdown;

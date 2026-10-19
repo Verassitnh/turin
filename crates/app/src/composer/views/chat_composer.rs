@@ -31,7 +31,7 @@ use crate::composer::dispatch::{
     ComposerDispatchMode, ResolveComposerDispatchModeInput, resolve_composer_dispatch_mode,
 };
 use crate::composer::draft_store::{
-    SharedDraftStore, ComposerFileAttachment, ComposerImageAttachment,
+    ComposerFileAttachment, ComposerImageAttachment, SharedDraftStore,
 };
 use crate::composer::editor_state::EditorSnapshot;
 use crate::composer::logic::{
@@ -200,7 +200,10 @@ impl ChatComposer {
     }
 
     fn next_demo_stash_id(&mut self) -> String {
-        format!("stash-{}", crate::composer::draft_store::next_composer_serial())
+        format!(
+            "stash-{}",
+            crate::composer::draft_store::next_composer_serial()
+        )
     }
 
     /// Debug aid for screenshots: `TURIN_COMPOSER_DEMO=<scenario>` preloads
@@ -507,7 +510,18 @@ impl ChatComposer {
     }
 
     pub(super) fn view_model(&self, cx: &App) -> Arc<ComposerViewModel> {
-        self.store.read(cx).view_model().clone()
+        let vm = self.store.read(cx).view_model().clone();
+        // `hasComposerAttachments`: attachments turn a plan follow-up into an ordinary send.
+        let has_attachments = self
+            .drafts
+            .get_composer_draft(&self.thread_key)
+            .is_some_and(|draft| !draft.images.is_empty() || !draft.files.is_empty());
+        if vm.show_plan_follow_up_prompt && has_attachments {
+            let mut next = (*vm).clone();
+            next.show_plan_follow_up_prompt = false;
+            return Arc::new(next);
+        }
+        vm
     }
 
     pub(super) fn source(&self, cx: &App) -> Option<Arc<dyn ComposerSource>> {
@@ -944,9 +958,35 @@ impl ChatComposer {
         let prompt = self.prompt(cx);
         let images = self.draft_images();
         let files = self.draft_files();
-        if prompt.trim().is_empty() && images.is_empty() && files.is_empty() {
+        // Implement/Refine: a plan is ready and the draft carries no attachments.
+        let plan_follow_up = vm
+            .show_plan_follow_up_prompt
+            .then_some(vm.plan_follow_up_plan.as_ref())
+            .flatten()
+            .filter(|_| images.is_empty() && files.is_empty() && vm.pending_answer.is_none());
+        if prompt.trim().is_empty()
+            && images.is_empty()
+            && files.is_empty()
+            && plan_follow_up.is_none()
+        {
             return;
         }
+        let draft_prompt = prompt.clone();
+        let (prompt, interaction_mode, source_plan_id) = match plan_follow_up {
+            Some(plan) => {
+                let follow_up = crate::composer::proposed_plan::resolve_plan_follow_up_submission(
+                    &prompt,
+                    &plan.markdown,
+                );
+                let implementing = follow_up.interaction_mode == InteractionMode::Default;
+                (
+                    follow_up.text,
+                    follow_up.interaction_mode,
+                    implementing.then(|| plan.plan_id.clone()),
+                )
+            }
+            None => (prompt, vm.interaction_mode, None),
+        };
         let running = vm.phase == crate::composer::view_model::SessionPhase::Running;
         let editing_queued_run = vm
             .queue
@@ -970,12 +1010,14 @@ impl ChatComposer {
             model: vm.selected_model.clone(),
             model_options: (!vm.selected_model_options.is_empty())
                 .then(|| vm.selected_model_options.clone()),
-            interaction_mode: vm.interaction_mode,
+            interaction_mode,
             runtime_mode: vm.runtime_mode,
             dispatch_mode,
             submission_intent: intent,
             answering_pending_user_input: answering,
             editing_queued_run,
+            source_plan_id,
+            draft_prompt,
         };
         let target = if answering {
             SubmissionTarget::PendingUserInput

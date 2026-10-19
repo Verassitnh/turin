@@ -476,7 +476,9 @@ impl SharedDraftStore {
     }
 
     pub fn replace_composer_draft(&self, thread_key: &str, draft: ComposerThreadDraft) {
-        self.0.borrow_mut().replace_composer_draft(thread_key, draft);
+        self.0
+            .borrow_mut()
+            .replace_composer_draft(thread_key, draft);
     }
 
     pub fn set_model_selection(

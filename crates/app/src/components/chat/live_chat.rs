@@ -32,7 +32,7 @@ use super::timeline::source::{PendingInputSession, ThreadTimelineStore, Timeline
 use super::timeline::turn_item::ProviderApprovalDecision;
 use super::timeline::types::TimelineHistoryControls;
 use crate::app_runtime::write::bus::CommandBus;
-use crate::app_runtime::write::commands::{CommandError, Delivery, SendMessage};
+use crate::app_runtime::write::commands::{CommandError, CreateThread, Delivery, SendMessage};
 use crate::composer::command_items::PathKind;
 use crate::composer::dispatch::ComposerDispatchMode;
 use crate::composer::live_catalog::provider_entries;
@@ -309,14 +309,18 @@ fn composer_shortcut_labels() -> std::collections::HashMap<String, String> {
     use crate::components::command_palette::shortcut_labels::default_shortcut_label_for_command;
     let mac = cfg!(target_os = "macos");
     let jump = (1..=9).map(|n| format!("modelPicker.jump.{n}"));
-    ["composer.sendAlternate", "composer.stash", "modelPicker.toggle"]
-        .into_iter()
-        .map(str::to_owned)
-        .chain(jump)
-        .filter_map(|command| {
-            default_shortcut_label_for_command(&command, mac).map(|label| (command, label))
-        })
-        .collect()
+    [
+        "composer.sendAlternate",
+        "composer.stash",
+        "modelPicker.toggle",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(jump)
+    .filter_map(|command| {
+        default_shortcut_label_for_command(&command, mac).map(|label| (command, label))
+    })
+    .collect()
 }
 
 /// Puts an unsent prompt and its attachments back into the thread's draft,
@@ -410,7 +414,46 @@ impl LiveSource {
             )
         });
         let providers = provider_entries(&self.bus.providers().borrow());
+        let interaction_mode =
+            overrides
+                .interaction_mode
+                .unwrap_or(match thread.interaction_mode {
+                    turin_contracts::provider_policy::ProviderInteractionMode::Plan => {
+                        InteractionMode::Plan
+                    }
+                    turin_contracts::provider_policy::ProviderInteractionMode::Default => {
+                        InteractionMode::Default
+                    }
+                });
+        let settings = SavedComposerSettings::current(cx);
+        let pending_user_inputs =
+            detail.map_or(0, |detail| detail.pending_requests.user_inputs.len());
+        let plan_follow_up = super::live_composer_derive::plan_follow_up(
+            projection,
+            interaction_mode == InteractionMode::Plan && settings.plan_mode_enabled,
+            pending_user_inputs,
+        );
+        let selected_reports_context_window = providers
+            .iter()
+            .find(|entry| entry.instance_id == instance_id)
+            .map(|entry| entry.reports_context_window);
         ComposerViewModel {
+            context_window: super::live_composer_derive::context_window(projection),
+            reserve_context_window_meter:
+                crate::composer::context_meter::should_reserve_context_window_meter(
+                    settings.context_window_meter_enabled,
+                    detail.is_none(),
+                    !projection.runs.is_empty(),
+                    selected_reports_context_window,
+                ),
+            show_plan_follow_up_prompt: plan_follow_up.is_some(),
+            plan_follow_up_title: plan_follow_up.as_ref().and_then(|plan| plan.title.clone()),
+            plan_follow_up_plan: plan_follow_up.map(|plan| {
+                crate::composer::view_model::PlanFollowUpPlan {
+                    plan_id: plan.plan_id,
+                    markdown: plan.markdown,
+                }
+            }),
             thread_key: scoped_thread_key(&local_environment_id(), &self.thread_id),
             phase: if running {
                 SessionPhase::Running
@@ -421,16 +464,7 @@ impl LiveSource {
             runtime_mode: overrides
                 .runtime_mode
                 .unwrap_or_else(|| composer_runtime_mode(thread.runtime_mode)),
-            interaction_mode: overrides
-                .interaction_mode
-                .unwrap_or(match thread.interaction_mode {
-                    turin_contracts::provider_policy::ProviderInteractionMode::Plan => {
-                        InteractionMode::Plan
-                    }
-                    turin_contracts::provider_policy::ProviderInteractionMode::Default => {
-                        InteractionMode::Default
-                    }
-                }),
+            interaction_mode,
             providers,
             selected_instance_id: instance_id,
             selected_model: model,
@@ -494,7 +528,7 @@ impl LiveSource {
                     cx,
                 ))
             }),
-            settings: SavedComposerSettings::current(cx),
+            settings,
             shortcut_labels: composer_shortcut_labels(),
             ..ComposerViewModel::default()
         }
@@ -663,8 +697,94 @@ impl ComposerSource for LiveSource {
         self.not_wired("Resume", cx);
     }
 
+    /// `onImplementPlanInNewThread`: a fresh thread in the same project starts
+    /// a default-mode turn that implements the latest proposed plan.
     fn implement_plan_in_new_thread(&self, cx: &mut App) {
-        self.not_wired("Implement plan in a new thread", cx);
+        const TITLE: &str = "Could not start implementation thread";
+        if self.overrides.borrow().sending {
+            return;
+        }
+        let state = self.handle.snapshot();
+        let Some(data) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.state.data.clone())
+        else {
+            return;
+        };
+        let latest_run_id = data
+            .runs
+            .iter()
+            .max_by_key(|run| run.ordinal)
+            .map(|run| run.id.to_string());
+        let Some(plan) =
+            super::live_composer_derive::latest_proposed_plan(&data, latest_run_id.as_deref())
+        else {
+            push_error(cx, TITLE, "There is no proposed plan to implement.");
+            return;
+        };
+        let selection = compact_model_selection(
+            self.overrides.borrow().model.clone(),
+            self.overrides.borrow().model_options.as_deref(),
+            data.thread.model_selection.instance_id.as_ref(),
+            data.thread.model_selection.model.as_ref(),
+        );
+        let project_id = data.thread.project_id.clone();
+        let title: String =
+            crate::composer::proposed_plan::build_plan_implementation_thread_title(&plan.markdown)
+                .chars()
+                .take(60)
+                .collect();
+        self.update_overrides(cx, |overrides| overrides.sending = true);
+        let task = self.bus.task(cx, move |commands| async move {
+            let defaults = commands.new_thread_defaults(&project_id).await?;
+            let thread_id = commands
+                .create_thread(CreateThread {
+                    project_id,
+                    title: title.clone(),
+                    model_selection: selection.clone(),
+                    runtime_mode: defaults.runtime_mode,
+                    interaction_mode: "default".to_owned(),
+                })
+                .await?;
+            let sent = commands
+                .send_message(SendMessage {
+                    thread_id: thread_id.clone(),
+                    text: crate::composer::proposed_plan::build_plan_implementation_prompt(
+                        &plan.markdown,
+                    ),
+                    attachments: Vec::new(),
+                    model_selection: Some(selection),
+                    delivery: Delivery::StartImmediately,
+                    title_seed: Some(title),
+                    source_plan_id: Some(plan.plan_id),
+                })
+                .await;
+            if let Err(error) = sent {
+                // Do not leave an empty implementation thread behind.
+                commands
+                    .thread_command("thread.delete", &thread_id, json!({}))
+                    .await
+                    .ok();
+                return Err(error);
+            }
+            Ok(thread_id)
+        });
+        let source = self.me.clone();
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            cx.update(|cx| {
+                if let Some(source) = source.upgrade() {
+                    source.update_overrides(cx, |overrides| overrides.sending = false);
+                }
+                match outcome {
+                    Ok(thread_id) => {
+                        super::thread_navigation::request_open_thread(thread_id.as_str(), cx)
+                    }
+                    Err(error) => push_error(cx, TITLE, &error.message),
+                }
+            });
+        })
+        .detach();
     }
 
     fn select_model(&self, instance_id: &str, model: &str, cx: &mut App) {
@@ -758,6 +878,7 @@ impl ComposerSource for LiveSource {
                         model_selection: Some(selection),
                         delivery: Delivery::StartImmediately,
                         title_seed: None,
+                        source_plan_id: None,
                     })
                     .await
                     .map(|_| ())
@@ -1061,8 +1182,9 @@ impl LiveSource {
             )
         });
         let title_seed = self.title_seed(&request.prompt);
+        let source_plan_id = request.source_plan_id.clone();
         let restore = (
-            request.prompt.clone(),
+            request.draft_prompt.clone(),
             request.images.clone(),
             request.files.clone(),
         );
@@ -1125,6 +1247,7 @@ impl LiveSource {
                         model_selection: Some(selection),
                         delivery,
                         title_seed,
+                        source_plan_id,
                     })
                     .await
             };

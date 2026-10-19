@@ -17,6 +17,10 @@ mod hooks;
 mod lib_color;
 mod lru_cache;
 mod logical_project;
+// The composer and the settings model pickers call it; the draft-store entry points
+// (`resolve_app_model_selection`, the text-generation state) wait for their callers.
+#[allow(dead_code)]
+mod model_selection;
 mod onboarding;
 mod project_favicon_cache;
 mod project_favicon_images;

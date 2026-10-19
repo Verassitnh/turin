@@ -18,6 +18,8 @@ pub struct ClaudeQueryOptionsInput<'a> {
     pub sdk_settings: Option<Value>,
     pub environment: Option<BTreeMap<String, String>>,
     pub permission_mode: Option<&'a str>,
+    /// `--allow-dangerously-skip-permissions` (upstream sets it with `bypassPermissions`).
+    pub allow_dangerously_skip_permissions: bool,
     pub tools: Option<Vec<String>>,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
@@ -82,6 +84,7 @@ pub fn make_claude_query_options(input: ClaudeQueryOptionsInput<'_>) -> LaunchOp
                 input.permission_mode.unwrap_or("default").into()
             }
         })),
+        allow_dangerously_skip_permissions: input.allow_dangerously_skip_permissions,
         can_use_tool: true,
         include_partial_messages: true,
         resume: input.resume.then(|| input.native_thread_id.to_owned()),
@@ -219,6 +222,7 @@ mod tests {
             sdk_settings: None,
             environment: None,
             permission_mode: None,
+            allow_dangerously_skip_permissions: false,
             tools: None,
             allowed_tools: vec![],
             disallowed_tools: vec![],

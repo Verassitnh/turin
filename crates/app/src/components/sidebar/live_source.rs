@@ -110,6 +110,12 @@ fn snapshot_from(state: &ClientState, ui: &LocalUi) -> SidebarSnapshot {
     snapshot
 }
 
+/// The sidebar's view of `state` with default UI-local state (tests).
+#[cfg(test)]
+pub(crate) fn snapshot_for_tests(state: &ClientState) -> SidebarSnapshot {
+    snapshot_from(state, &LocalUi::default())
+}
+
 /// `handleProjectDragEnd`: the groups' physical project keys, in the order
 /// shown, are the current order; the dragged group moves in front of the target.
 #[allow(dead_code)] // see `SidebarBackend::reorder_projects`

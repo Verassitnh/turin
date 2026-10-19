@@ -2280,3 +2280,104 @@ async fn a_runtime_mode_change_applies_to_the_next_turn() {
     assert_eq!(responses.len(), 2, "{responses:?}");
     assert_eq!(responses[1]["response"]["behavior"], "allow");
 }
+
+// Settle from the sidebar: `thread.settle` is accepted, the projection flips
+// to settled, and the sidebar view-model moves the row into the Settled shelf.
+// Un-settle brings it back to Active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settling_a_thread_moves_it_to_the_settled_shelf_and_back() {
+    use crate::components::sidebar::live_source::snapshot_for_tests;
+    use crate::components::sidebar::runtime::thread_inbox::InboxReturnTracker;
+    use crate::components::sidebar::sidebar_sections::partition_sidebar_threads;
+    use crate::state::models::SettledOverride;
+    use turin_contracts::orchestration_v2::OrchestrationV2SettleOverride;
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let client = start(harness.stores.clone());
+    wait_for(&client, "the shell", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.navigation_threads.len() == 1)
+    })
+    .await;
+    let partition_of = |state: &crate::state::client_state::ClientState| {
+        let snapshot = snapshot_for_tests(state);
+        let now = chrono::Utc::now().to_rfc3339();
+        partition_sidebar_threads(
+            &snapshot,
+            None,
+            None,
+            &mut InboxReturnTracker::default(),
+            &now,
+        )
+    };
+    // A real thread: one completed turn, with its provider session still bound.
+    client.open_thread(thread_id(thread.as_str()));
+    send_text(&harness, &thread, "Say hello", Delivery::StartImmediately).await;
+    wait_for_runs(&client, &thread, "the completed run", |runs| {
+        runs.iter()
+            .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+    })
+    .await;
+
+    harness
+        .commands
+        .thread_command("thread.settle", &thread, json!({}))
+        .await
+        .expect("settle");
+    let shell = harness
+        .stores
+        .projections
+        .get_thread_shell(&thread)
+        .await
+        .expect("read shell")
+        .expect("shell");
+    assert_eq!(
+        shell.settled_override,
+        Some(OrchestrationV2SettleOverride::Settled)
+    );
+    assert!(shell.settled_at.is_some(), "settledAt is stamped");
+    let state = wait_for(&client, "the settled thread", |state| {
+        state.shell_view.as_ref().is_some_and(|view| {
+            view.navigation_threads
+                .iter()
+                .any(|row| row.settled_override == Some(SettledOverride::Settled))
+        })
+    })
+    .await;
+    let partition = partition_of(&state);
+    assert_eq!(partition.settled.len(), 1, "settled shelf has the thread");
+    assert!(partition.active.is_empty(), "active list is empty");
+    assert_eq!(partition.settled[0].id, thread);
+
+    harness
+        .commands
+        .thread_command("thread.unsettle", &thread, json!({"reason": "user"}))
+        .await
+        .expect("unsettle");
+    let shell = harness
+        .stores
+        .projections
+        .get_thread_shell(&thread)
+        .await
+        .expect("read shell")
+        .expect("shell");
+    assert_eq!(
+        shell.settled_override,
+        Some(OrchestrationV2SettleOverride::Active)
+    );
+    assert_eq!(shell.settled_at, None);
+    let state = wait_for(&client, "the un-settled thread", |state| {
+        state.shell_view.as_ref().is_some_and(|view| {
+            view.navigation_threads
+                .iter()
+                .any(|row| row.settled_override == Some(SettledOverride::Active))
+        })
+    })
+    .await;
+    let partition = partition_of(&state);
+    assert!(partition.settled.is_empty(), "settled shelf is empty again");
+    assert_eq!(partition.active.len(), 1, "thread is active again");
+}

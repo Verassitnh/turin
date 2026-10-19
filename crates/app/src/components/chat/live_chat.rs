@@ -979,6 +979,25 @@ impl LiveSource {
     }
 }
 
+/// The delivery a dispatch mode asks for. A steer or restart targets the
+/// thread's active run; when the turn ended between the click and here, the
+/// message starts a fresh one.
+fn delivery_for(mode: ComposerDispatchMode, active_run_id: Option<String>) -> Delivery {
+    match (mode, active_run_id) {
+        (ComposerDispatchMode::Auto, _) => Delivery::StartImmediately,
+        (ComposerDispatchMode::Queue, _) => Delivery::QueueAfterActive,
+        (ComposerDispatchMode::Steer, Some(target_run_id)) => {
+            Delivery::SteerActive { target_run_id }
+        }
+        (ComposerDispatchMode::Restart, Some(target_run_id)) => {
+            Delivery::RestartActive { target_run_id }
+        }
+        (ComposerDispatchMode::Steer | ComposerDispatchMode::Restart, None) => {
+            Delivery::StartImmediately
+        }
+    }
+}
+
 impl ComposerSource for LiveSource {
     fn send(&self, request: SendRequest, cx: &mut App) -> bool {
         if request.answering_pending_user_input {
@@ -987,21 +1006,12 @@ impl ComposerSource for LiveSource {
         if let Some(run_id) = request.editing_queued_run.clone() {
             return self.edit_queued(run_id, request.prompt, cx);
         }
-        let delivery = match request.dispatch_mode {
-            ComposerDispatchMode::Auto => Delivery::StartImmediately,
-            ComposerDispatchMode::Queue => Delivery::QueueAfterActive,
-            ComposerDispatchMode::Steer | ComposerDispatchMode::Restart => {
-                let Some(target_run_id) = self.active_run_id() else {
-                    // The turn ended between the click and here: start a fresh one.
-                    return self.send_with(request, Delivery::StartImmediately, cx);
-                };
-                if request.dispatch_mode == ComposerDispatchMode::Steer {
-                    Delivery::SteerActive { target_run_id }
-                } else {
-                    Delivery::RestartActive { target_run_id }
-                }
-            }
-        };
+        let targets_active_run = matches!(
+            request.dispatch_mode,
+            ComposerDispatchMode::Steer | ComposerDispatchMode::Restart
+        );
+        let active_run_id = targets_active_run.then(|| self.active_run_id()).flatten();
+        let delivery = delivery_for(request.dispatch_mode, active_run_id);
         self.send_with(request, delivery, cx)
     }
 
@@ -1849,6 +1859,38 @@ mod tests {
             }))
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn a_restart_dispatch_targets_the_active_run() {
+        let run = Some("run-1".to_owned());
+        assert_eq!(
+            delivery_for(ComposerDispatchMode::Restart, run.clone()),
+            Delivery::RestartActive {
+                target_run_id: "run-1".into()
+            }
+        );
+        assert_eq!(
+            delivery_for(ComposerDispatchMode::Steer, run.clone()),
+            Delivery::SteerActive {
+                target_run_id: "run-1".into()
+            }
+        );
+        assert_eq!(
+            delivery_for(ComposerDispatchMode::Queue, run.clone()),
+            Delivery::QueueAfterActive
+        );
+        assert_eq!(
+            delivery_for(ComposerDispatchMode::Auto, run),
+            Delivery::StartImmediately
+        );
+    }
+
+    #[test]
+    fn a_restart_after_the_turn_ended_starts_a_fresh_run() {
+        for mode in [ComposerDispatchMode::Restart, ComposerDispatchMode::Steer] {
+            assert_eq!(delivery_for(mode, None), Delivery::StartImmediately);
+        }
     }
 
     #[test]

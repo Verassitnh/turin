@@ -164,12 +164,15 @@ fn bound_pairs(rules: &[ResolvedKeybindingRule], mac: bool) -> BTreeSet<(String,
         .collect()
 }
 
+/// A command and the GPUI keystroke it is bound to.
+type Pair = (String, String);
+
 /// What to change to go from the bindings `applied` to `wanted`: the pairs to
 /// un-bind, then the pairs to bind.
 fn plan(
     applied: &BTreeSet<(String, String)>,
     wanted: &BTreeSet<(String, String)>,
-) -> (Vec<(String, String)>, Vec<(String, String)>) {
+) -> (Vec<Pair>, Vec<Pair>) {
     (
         applied.difference(wanted).cloned().collect(),
         wanted.difference(applied).cloned().collect(),

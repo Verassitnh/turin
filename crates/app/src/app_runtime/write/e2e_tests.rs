@@ -850,6 +850,31 @@ async fn at_completion_finds_workspace_files_and_folders() {
     );
 }
 
+// Settings reports a rejected unarchive / rename / delete as a toast, which only
+// works while the command returns the rejection with a message to show.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn commands_the_settings_page_issues_report_why_they_were_rejected() {
+    use turin_contracts::{ProjectId, ThreadId};
+
+    let harness = harness().await;
+    let missing_thread = ThreadId::new("thread-that-does-not-exist").expect("id");
+    let missing_project = ProjectId::new("project-that-does-not-exist").expect("id");
+    for kind in ["thread.unarchive", "thread.delete"] {
+        let error = harness
+            .commands
+            .thread_command(kind, &missing_thread, json!({}))
+            .await
+            .expect_err(kind);
+        assert!(!error.message.trim().is_empty(), "{kind}");
+    }
+    let error = harness
+        .commands
+        .rename_project(&missing_project, "Renamed")
+        .await
+        .expect_err("rename of a missing project");
+    assert!(!error.message.trim().is_empty());
+}
+
 // The plan card's "Save to workspace": the file lands under the root, parent
 // folders are created, and a path that leaves the root is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

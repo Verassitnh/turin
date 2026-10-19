@@ -339,6 +339,8 @@ pub trait SidebarBackend {
         cx: &mut App,
     ) -> Task<CommandOutcome>;
     fn archive(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome>;
+    /// Undo of an archive.
+    fn unarchive(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome>;
     fn delete(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome>;
     fn discard_draft(&self, draft_id: String, cx: &mut App);
     /// `reorderProjects`: drops the dragged project group in front of the

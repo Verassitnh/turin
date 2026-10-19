@@ -374,6 +374,10 @@ impl SidebarBackend for LiveSidebarBackend {
         self.thread_command(&thread, "thread.archive", json!({}), cx)
     }
 
+    fn unarchive(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome> {
+        self.thread_command(&thread, "thread.unarchive", json!({}), cx)
+    }
+
     fn delete(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome> {
         self.thread_command(&thread, "thread.delete", json!({}), cx)
     }

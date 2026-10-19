@@ -13,7 +13,7 @@ use crate::composer::discard_composer_draft::{
     DiscardableDraftStore, DiscardedDrafts, discard_composer_draft, restore_discarded_draft,
 };
 use crate::composer::draft_store::{ComposerThreadDraft, SharedDraftStore};
-use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoNotices, UndoNotice, UndoPlan};
+use crate::hooks::thread_undo::{ThreadUndo, ThreadUndoNotices, UndoNotice, UndoPlan, UndoRun};
 
 struct NoopReleaser;
 
@@ -93,24 +93,37 @@ impl ComposerDraftHost {
         );
     }
 
-    pub fn undo_latest(&mut self) -> Option<String> {
-        let notice = self.notices.current_notice()?;
-        let ids = notice.ids;
+    /// Takes the newest notice's group. Discarded drafts are restored here; the thread actions
+    /// (unarchive, re-pin, un-settle, wake) are returned for the sidebar, which owns the backend.
+    pub fn undo_latest(&mut self) -> UndoLatest {
+        let Some(notice) = self.notices.current_notice() else {
+            return UndoLatest::default();
+        };
         let releaser = Arc::clone(&self.releaser);
         let discarded = self.discarded.clone();
-        let mut failure: Option<String> = None;
-        for run in self.notices.take_undo(&ids) {
+        let mut outcome = UndoLatest::default();
+        for run in self.notices.take_undo(&notice.ids) {
             let UndoPlan::RestoreDraft { discard_id } = run.plan else {
+                outcome.thread_runs.push(run);
                 continue;
             };
             if let Err(message) =
                 restore_discarded_draft(self, &discarded, releaser.as_ref(), &discard_id)
             {
-                failure = Some(message);
+                outcome.draft_failure = Some(message);
             }
         }
-        failure
+        outcome
     }
+}
+
+/// What [`ComposerDraftHost::undo_latest`] left for its caller.
+#[derive(Default)]
+pub struct UndoLatest {
+    /// A discarded draft that could not be restored.
+    pub draft_failure: Option<String>,
+    /// Thread actions to undo, newest first.
+    pub thread_runs: Vec<UndoRun>,
 }
 
 impl DiscardableDraftStore for ComposerDraftHost {
@@ -174,5 +187,70 @@ impl Global for ComposerDraftHostGlobal {}
 impl ComposerDraftHost {
     pub fn register(entity: Entity<ComposerDraftHost>, cx: &mut App) {
         cx.set_global(ComposerDraftHostGlobal(entity));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::thread_undo::UndoAction;
+    use turin_contracts::environment::ScopedThreadRef;
+    use turin_contracts::{EnvironmentId, ThreadId};
+
+    fn thread() -> ScopedThreadRef {
+        ScopedThreadRef {
+            environment_id: EnvironmentId::new("local").unwrap(),
+            thread_id: ThreadId::new("t1").unwrap(),
+        }
+    }
+
+    #[test]
+    fn cmd_z_hands_the_newest_parked_threads_to_the_sidebar_once() {
+        let mut host = ComposerDraftHost::new();
+        let claim = host.undo.begin("archive", "local:t1");
+        host.notices.show(
+            UndoAction::Archived,
+            claim,
+            UndoPlan::Unarchive {
+                thread: thread(),
+                navigate: true,
+            },
+            "Failed to undo archive",
+        );
+        assert_eq!(host.current_notice().map(|notice| notice.count), Some(1));
+
+        let outcome = host.undo_latest();
+        assert_eq!(outcome.draft_failure, None);
+        assert_eq!(outcome.thread_runs.len(), 1);
+        assert_eq!(
+            outcome.thread_runs[0].plan,
+            UndoPlan::Unarchive {
+                thread: thread(),
+                navigate: true
+            }
+        );
+        assert_eq!(
+            outcome.thread_runs[0].failure_title,
+            "Failed to undo archive"
+        );
+        // The claim was consumed: a repeated Cmd+Z restores nothing twice.
+        assert!(host.undo_latest().thread_runs.is_empty());
+        assert!(host.current_notice().is_none());
+    }
+
+    #[test]
+    fn a_later_action_of_the_same_kind_expires_the_earlier_undo() {
+        let mut host = ComposerDraftHost::new();
+        let first = host.undo.begin("snooze", "local:t1");
+        host.notices.show(
+            UndoAction::Snoozed,
+            first,
+            UndoPlan::Unsnooze { thread: thread() },
+            "Failed to wake thread",
+        );
+        // Waking the thread by hand (`unsnoozeThread`) supersedes the Undo.
+        host.undo.invalidate("snooze", "local:t1");
+        assert!(host.current_notice().is_none());
+        assert!(host.undo_latest().thread_runs.is_empty());
     }
 }

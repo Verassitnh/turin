@@ -705,6 +705,10 @@ impl SidebarBackend for MockSidebarBackend {
         })
     }
 
+    fn unarchive(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome> {
+        self.thread_command(&thread, cx, |shell, _| shell.archived_at = None)
+    }
+
     fn delete(&self, thread: ThreadRef, cx: &mut App) -> Task<CommandOutcome> {
         let mut found = false;
         self.with_snapshot(cx, |snapshot| {

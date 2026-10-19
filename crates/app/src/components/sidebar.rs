@@ -36,6 +36,7 @@ pub mod sidebar_snooze;
 pub mod sidebar_thread_header;
 pub mod sidebar_thread_row;
 pub mod sidebar_thread_undo_notice;
+pub mod sidebar_undo;
 pub mod thread_hover_card;
 pub mod thread_selection;
 pub mod thread_status_indicators;
@@ -195,6 +196,8 @@ pub struct Sidebar {
     pub(crate) optimistic_drop: Option<OptimisticDrop>,
     pub(crate) settling: HashSet<String>,
     pub(crate) snoozing: HashSet<String>,
+    /// The 5 second expiry of the Undo notice, re-armed by every new offer.
+    pub(crate) undo_expiry: Option<Task<()>>,
     pub(crate) drag: Option<DragSession>,
     pub(crate) sweep: Option<SweepSession>,
     pub(crate) motion: SidebarListMotion,
@@ -311,6 +314,7 @@ impl Sidebar {
             optimistic_drop: None,
             settling: HashSet::new(),
             snoozing: HashSet::new(),
+            undo_expiry: None,
             drag: None,
             sweep: None,
             motion: SidebarListMotion::new(),
@@ -730,7 +734,9 @@ impl Render for Sidebar {
                     .fixed_header(SidebarGroup::new().child(header))
                     .child(SidebarGroup::new().with(|this| this.flex_1()).child(body)),
             )
-            .child(sidebar_thread_undo_notice::SidebarThreadUndoNotice)
+            .child(sidebar_thread_undo_notice::SidebarThreadUndoNotice::new(
+                cx.entity().downgrade(),
+            ))
             .child(
                 SidebarChromeFooter::new(cx.entity().downgrade())
                     .provider_update_pill(self.provider_update_pill.clone()),

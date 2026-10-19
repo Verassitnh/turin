@@ -28,6 +28,7 @@ use super::sidebar_logic::{
     should_navigate_after_thread_park,
 };
 use super::sidebar_snooze::resolve_snooze_presets_now;
+use super::sidebar_undo::{kind as undo_kind, scoped};
 use super::thread_selection::get_thread_keys_to_deselect_after_delete;
 use super::view_model::{Shelf, ThreadRef};
 use super::{RenameState, Sidebar, SidebarEvent, SidebarRoute};
@@ -35,6 +36,7 @@ use crate::components::thread_action_menu_logic::{
     ProjectFilterState, ThreadActionMenuState, ThreadActionSupports, build_draft_action_menu_items,
     build_thread_action_menu_items,
 };
+use crate::hooks::thread_undo::{UndoAction, UndoPlan};
 use crate::hooks::use_thread_action_menu::{
     ThreadMenuInput, ThreadMenuPlan, ThreadMenuSurface, plan_thread_action,
 };
@@ -229,6 +231,27 @@ impl Sidebar {
             return;
         }
         let plan = self.plan_forward_navigation(&key, co_settling.as_ref(), cx);
+        // Settling also drops the pin and the snooze server-side, so Undo puts them back.
+        let before = self.thread(&key, cx);
+        let was_pinned = before
+            .as_ref()
+            .is_some_and(|shell| shell.pinned_at.is_some());
+        let pin_order_key = before
+            .as_ref()
+            .filter(|_| was_pinned)
+            .and_then(|shell| shell.pin_order_key.clone());
+        let snoozed_until = before.and_then(|shell| shell.snoozed_until);
+        // An older unpin/snooze Undo would re-pin or re-snooze, and the server treats either as
+        // a promotion that un-settles; settling supersedes them.
+        self.invalidate_undo(undo_kind::PIN, &thread, cx);
+        self.invalidate_undo(undo_kind::SNOOZE, &thread, cx);
+        let claim = self.begin_undo(undo_kind::SETTLE, &thread, cx);
+        let undo_plan = UndoPlan::Settle {
+            thread: scoped(&thread),
+            was_pinned,
+            pin_order_key,
+            snoozed_until,
+        };
         let task = self.backend.settle(thread, cx);
         self.run_command(
             task,
@@ -238,7 +261,16 @@ impl Sidebar {
             move |this, ok, _, cx| {
                 this.settling.remove(&key);
                 if ok {
+                    this.show_undo(
+                        UndoAction::Settled,
+                        claim,
+                        undo_plan,
+                        "Failed to undo settle",
+                        cx,
+                    );
                     this.navigate_after_park(&key, ParkAction::Settle, plan, cx);
+                } else if let Some(claim) = claim {
+                    claim.finish();
                 }
             },
         );
@@ -269,6 +301,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.invalidate_undo(undo_kind::SETTLE, &thread, cx);
         let task = self.backend.unsettle(thread, cx);
         self.run_command(
             task,
@@ -285,6 +318,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.invalidate_undo(undo_kind::SNOOZE, &thread, cx);
         let task = self.backend.unsnooze(thread, cx);
         self.run_command(task, "Failed to wake thread", window, cx, |_, _, _, _| {});
     }
@@ -303,6 +337,10 @@ impl Sidebar {
             return;
         }
         let plan = self.plan_forward_navigation(&key, co_snoozing.as_ref(), cx);
+        let claim = self.begin_undo(undo_kind::SNOOZE, &thread, cx);
+        let undo_plan = UndoPlan::Unsnooze {
+            thread: scoped(&thread),
+        };
         let task = self.backend.snooze(thread, snoozed_until, cx);
         self.run_command(
             task,
@@ -312,7 +350,17 @@ impl Sidebar {
             move |this, ok, _, cx| {
                 this.snoozing.remove(&key);
                 if ok {
+                    // Snooze hides the row, so its confirmation stays in the sidebar.
+                    this.show_undo(
+                        UndoAction::Snoozed,
+                        claim,
+                        undo_plan,
+                        "Failed to wake thread",
+                        cx,
+                    );
                     this.navigate_after_park(&key, ParkAction::Snooze, plan, cx);
+                } else if let Some(claim) = claim {
+                    claim.finish();
                 }
             },
         );
@@ -337,6 +385,7 @@ impl Sidebar {
                 .min();
             super::runtime::thread_sort::pin_order_key_between(None, first)
         };
+        self.invalidate_undo(undo_kind::PIN, &thread, cx);
         let task = self.backend.pin(thread, top_key, cx);
         self.run_command(task, "Failed to pin thread", window, cx, |_, _, _, _| {});
     }
@@ -347,8 +396,34 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let order_key = self
+            .thread(&thread.key(), cx)
+            .and_then(|shell| shell.pin_order_key);
+        let claim = self.begin_undo(undo_kind::PIN, &thread, cx);
+        let undo_plan = UndoPlan::Pin {
+            thread: scoped(&thread),
+            order_key,
+        };
         let task = self.backend.unpin(thread, cx);
-        self.run_command(task, "Failed to unpin thread", window, cx, |_, _, _, _| {});
+        self.run_command(
+            task,
+            "Failed to unpin thread",
+            window,
+            cx,
+            move |this, ok, _, cx| {
+                if ok {
+                    this.show_undo(
+                        UndoAction::Unpinned,
+                        claim,
+                        undo_plan,
+                        "Failed to undo unpin",
+                        cx,
+                    );
+                } else if let Some(claim) = claim {
+                    claim.finish();
+                }
+            },
+        );
     }
 
     /// `useAcknowledgeThreadWoke`: a visit at the wake time clears the pill.
@@ -818,8 +893,15 @@ impl Sidebar {
                 let archived_key = key.to_string();
                 let project_key = thread.project_key();
                 let run = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                    let navigates =
+                        should_navigate_after_archive(this.route_thread_key(), &archived_key);
+                    let claim = this.begin_undo(undo_kind::ARCHIVE, &thread_ref, cx);
+                    // Undo also brings the reader back when archiving moved them away.
+                    let undo_plan = UndoPlan::Unarchive {
+                        thread: scoped(&thread_ref),
+                        navigate: navigates,
+                    };
                     let task = this.backend.archive(thread_ref.clone(), cx);
-                    let key = archived_key.clone();
                     let project_key = project_key.clone();
                     this.run_command(
                         task,
@@ -827,9 +909,20 @@ impl Sidebar {
                         window,
                         cx,
                         move |this, ok, _, cx| {
+                            if ok {
+                                this.show_undo(
+                                    UndoAction::Archived,
+                                    claim,
+                                    undo_plan,
+                                    "Failed to undo archive",
+                                    cx,
+                                );
+                            } else if let Some(claim) = claim {
+                                claim.finish();
+                            }
                             // `archiveThread`: archiving the open thread moves the
                             // reader to a new thread in its project.
-                            if ok && should_navigate_after_archive(this.route_thread_key(), &key) {
+                            if ok && navigates {
                                 cx.emit(SidebarEvent::NewThread {
                                     project_key: Some(project_key),
                                     branch: None,

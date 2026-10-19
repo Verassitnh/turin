@@ -245,7 +245,8 @@ pub struct AppSidebarLayout {
     _activation: Subscription,
     toast_viewport: Entity<crate::ui::toast::ToastViewport>,
     anchored_toast_viewport: Entity<crate::ui::toast::AnchoredToastViewport>,
-    draft_host: Entity<crate::shell::composer_draft_host::ComposerDraftHost>,
+    /// Keeps the draft store and Undo queue alive; reached through its global.
+    _draft_host: Entity<crate::shell::composer_draft_host::ComposerDraftHost>,
     _keybindings_warning: Option<Subscription>,
     /// Launch toast and sidebar pill for provider updates (live shell only).
     provider_updates: Option<Entity<crate::shell::provider_updates::ProviderUpdateHost>>,
@@ -424,7 +425,7 @@ impl AppSidebarLayout {
             _activation: activation,
             toast_viewport,
             anchored_toast_viewport,
-            draft_host,
+            _draft_host: draft_host,
             _keybindings_warning,
             provider_updates,
         }
@@ -433,22 +434,11 @@ impl AppSidebarLayout {
     fn undo_latest_thread_action(
         &mut self,
         _: &UndoLatestThread,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.draft_host.update(cx, |host, cx| {
-            if let Some(message) = host.undo_latest() {
-                crate::ui::toast::toast_manager(cx).update(cx, |store, cx| {
-                    store.add(
-                        crate::ui::toast::ToastOptions::new("Failed to restore draft")
-                            .type_(crate::ui::toast_logic::ToastType::Error)
-                            .description(message),
-                        cx,
-                    );
-                });
-            }
-            cx.notify();
-        });
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.undo_latest(window, cx));
         cx.notify();
     }
 

@@ -2,7 +2,9 @@
 //!
 //! Port of upstream/apps/web/src/components/sidebar/SidebarThreadUndoNotice.tsx.
 
-use gpui_kit::{App, IntoElement, ParentElement, RenderOnce, Styled, Window, div};
+use gpui_kit::{App, IntoElement, ParentElement, RenderOnce, Styled, WeakEntity, Window, div};
+
+use crate::components::sidebar::Sidebar;
 use turin_shared::keybindings::is_mac_platform;
 
 use crate::components::command_palette::shortcut_labels::default_shortcut_label_for_command;
@@ -11,12 +13,18 @@ use crate::hooks::thread_undo::UndoAction;
 use crate::shell::composer_draft_host::ComposerDraftHostGlobal;
 use crate::theme::ActiveAppTheme;
 use crate::theme::tokens::{CONTROL_RADIUS, TEXT_SM};
-use crate::ui::toast::{ToastOptions, toast_manager};
-use crate::ui::toast_logic::ToastType;
 use crate::ui::{Button, ButtonSize, ButtonVariant};
 
 #[derive(IntoElement)]
-pub struct SidebarThreadUndoNotice;
+pub struct SidebarThreadUndoNotice {
+    sidebar: WeakEntity<Sidebar>,
+}
+
+impl SidebarThreadUndoNotice {
+    pub fn new(sidebar: WeakEntity<Sidebar>) -> Self {
+        Self { sidebar }
+    }
+}
 
 impl RenderOnce for SidebarThreadUndoNotice {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -42,7 +50,7 @@ impl RenderOnce for SidebarThreadUndoNotice {
         let label = default_shortcut_label_for_command("thread.undo", mac)
             .map(|label| format!("{label} to undo"))
             .unwrap_or_else(|| "Undo".to_owned());
-        let host = global.0.clone();
+        let sidebar = self.sidebar;
         div()
             .mx_2()
             .mb_2()
@@ -64,20 +72,10 @@ impl RenderOnce for SidebarThreadUndoNotice {
                     .size(ButtonSize::Xs)
                     .variant(ButtonVariant::Ghost)
                     .label(label)
-                    .on_click(move |_, _, cx| {
-                        host.update(cx, |host, cx| {
-                            if let Some(message) = host.undo_latest() {
-                                toast_manager(cx).update(cx, |store, cx| {
-                                    store.add(
-                                        ToastOptions::new("Failed to restore draft")
-                                            .type_(ToastType::Error)
-                                            .description(message),
-                                        cx,
-                                    );
-                                });
-                            }
-                            cx.notify();
-                        });
+                    .on_click(move |_, window, cx| {
+                        sidebar
+                            .update(cx, |sidebar, cx| sidebar.undo_latest(window, cx))
+                            .ok();
                     }),
             )
     }

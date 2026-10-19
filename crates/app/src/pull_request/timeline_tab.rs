@@ -9,6 +9,7 @@
 //! the commit row, the `scrollerRef` handoff to the summary scroll logic and the
 //! `reportFailure: false` toast when a comment edit fails (commands return immediately).
 
+use crate::theme::color::solid_over;
 use std::collections::HashSet;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -918,7 +919,7 @@ impl Render for TimelineTab {
                             .left(px(15.))
                             .top(px(4.))
                             .w(px(1.))
-                            .bg(with_alpha(theme.border, 0.45)),
+                            .bg(solid_over(theme.border, 0.45, theme.background)),
                     );
                     for row in &rows {
                         let element = match row {

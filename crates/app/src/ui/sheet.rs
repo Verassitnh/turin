@@ -19,7 +19,7 @@ use gpui_kit::{
 use super::{Button, ButtonSize, ButtonVariant, IconName};
 use crate::theme::ActiveAppTheme;
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{self, RADIUS_2XL};
+use crate::theme::tokens::{self, RADIUS_2XL, tw};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SheetSide {
@@ -173,7 +173,10 @@ impl RenderOnce for Sheet {
             .left_0()
             .right_0()
             .bottom_0()
-            .bg(with_alpha(theme.background, 0.6))
+            .bg(with_alpha(
+                tw::BLACK,
+                if theme.is_dark() { 0.6 } else { 0.4 },
+            ))
             .occlude()
             .on_mouse_down(MouseButton::Left, move |_, window, cx| dismiss(window, cx));
         if inset {

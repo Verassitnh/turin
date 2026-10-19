@@ -11,6 +11,7 @@
 //!
 //! Port of upstream/apps/web/src/components/ui/dialog-styles.ts.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::component::WindowExt as _;
@@ -22,8 +23,8 @@ use gpui_kit::{
 
 use super::button::{Button, ButtonSize, ButtonVariant};
 use super::icon::{Icon, IconName};
-use crate::theme::color::{MixSpace, color_mix, with_alpha};
-use crate::theme::tokens::{self, RADIUS_2XL, TEXT_SM, TEXT_XL};
+use crate::theme::color::with_alpha;
+use crate::theme::tokens::{self, RADIUS_2XL, TEXT_SM, TEXT_XL, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
 
 /// `max-w-lg`: the default popup width.
@@ -77,11 +78,7 @@ pub fn open_dialog(
 
 /// `border-color: contrast-foreground 10%` (dark: white 8%).
 pub fn dialog_border(theme: &AppTheme) -> gpui_kit::Hsla {
-    if theme.is_dark() {
-        with_alpha(tokens::tw::WHITE, 0.08).into()
-    } else {
-        with_alpha(theme.foreground, 0.10).into()
-    }
+    theme.border
 }
 
 /// The popup interior: a column bounded to the window so the panel can scroll.
@@ -172,7 +169,7 @@ pub fn dialog_footer(theme: &AppTheme, bare: bool) -> Div {
         footer
             .border_t_1()
             .border_color(theme.border)
-            .bg(with_alpha(theme.muted, 0.72))
+            .bg(solid_over(theme.muted, 0.72, theme.background))
             .rounded_b(px(17.))
     }
 }
@@ -214,15 +211,14 @@ pub fn close_icon() -> Icon {
 
 type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// `dialog-backdrop`: `color-mix(in srgb, var(--background) 60%, transparent)`, 64% in dark.
+/// Dialog scrim: a flat dark overlay (no blur, no glass).
 pub fn dialog_backdrop_color(theme: &AppTheme) -> Hsla {
-    with_alpha(theme.background, if theme.is_dark() { 0.64 } else { 0.6 }).into()
+    with_alpha(tw::BLACK, if theme.is_dark() { 0.6 } else { 0.4 }).into()
 }
 
-/// `dialog-glass` without the blur: the popup surface over the backdrop.
+/// The opaque popup surface over the backdrop.
 pub(crate) fn dialog_surface(theme: &AppTheme) -> Hsla {
-    let glass = with_alpha(theme.background, 0.8);
-    color_mix(MixSpace::Srgb, theme.background, 0.8, glass).into()
+    theme.background
 }
 
 /// Full-window overlay with centred popup (pull request link, thread picker, etc.).
@@ -334,6 +330,6 @@ pub fn overlay_dialog_footer(cx: &App) -> Div {
         .py_4()
         .border_t_1()
         .border_color(theme.border)
-        .bg(with_alpha(theme.muted, 0.72))
+        .bg(solid_over(theme.muted, 0.72, theme.background))
         .rounded_b(px(17.))
 }

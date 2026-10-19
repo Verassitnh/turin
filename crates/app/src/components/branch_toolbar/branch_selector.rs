@@ -62,6 +62,8 @@ pub enum BranchDisplayMode {
     #[default]
     Toolbar,
     Panel,
+    /// The chat header's compact ghost trigger (Turin: branch info on top).
+    Header,
 }
 
 /// `BranchToolbarBranchSelectorProps`.
@@ -1088,6 +1090,7 @@ impl Render for BranchToolbarBranchSelector {
         let derived = self.derive(cx);
         let weak = cx.entity().downgrade();
         let panel = self.props.display_mode == BranchDisplayMode::Panel;
+        let header = self.props.display_mode == BranchDisplayMode::Header;
         let remote = derived.resolved_active_branch.as_deref().and_then(|name| {
             derived
                 .page
@@ -1145,13 +1148,13 @@ impl Render for BranchToolbarBranchSelector {
                     MiddleTruncate::new(SharedString::from(trigger_label)),
                     self.props.compact_labels,
                 ))
-                .child(composer_control_chevron(&theme))
+                .children((!header).then(|| composer_control_chevron(&theme)))
                 .into_any_element()
         };
 
         let popover = Popover::new("branch-picker")
             .appearance(false)
-            .anchor(if panel {
+            .anchor(if panel || header {
                 gpui_kit::Anchor::TopLeft
             } else {
                 gpui_kit::Anchor::BottomRight

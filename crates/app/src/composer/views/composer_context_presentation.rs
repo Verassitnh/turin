@@ -14,6 +14,7 @@
 //! text), `PullRequestGlyph` (the pull request icons are lucide glyphs) and
 //! the terminal chip's scrollable `pre` focus ring.
 
+use crate::theme::color::solid_over;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
@@ -419,7 +420,7 @@ fn terminal_details(terminal: &TerminalContextDraft, theme: &AppTheme) -> AnyEle
         .rounded(RADIUS_MD)
         .border_1()
         .border_color(with_alpha(theme.border, 0.7))
-        .bg(with_alpha(theme.background, 0.8))
+        .bg(solid_over(theme.background, 0.8, theme.background))
         .child(
             div()
                 .flex()
@@ -560,7 +561,7 @@ fn review_comment_details(
         .rounded(RADIUS_LG)
         .border_1()
         .border_color(with_alpha(theme.border, 0.7))
-        .bg(with_alpha(theme.background, 0.7))
+        .bg(solid_over(theme.background, 0.7, theme.background))
         .p_3()
         .child(
             div()
@@ -679,7 +680,7 @@ fn preview_annotation_details(
         .rounded(RADIUS_LG)
         .border_1()
         .border_color(with_alpha(theme.border, 0.7))
-        .bg(with_alpha(theme.background, 0.7))
+        .bg(solid_over(theme.background, 0.7, theme.background))
         .child(match crop {
             Some(crop) => img(crop)
                 .w_full()
@@ -690,7 +691,7 @@ fn preview_annotation_details(
             None => div()
                 .border_b_1()
                 .border_color(with_alpha(theme.border, 0.7))
-                .bg(with_alpha(theme.muted, 0.4))
+                .bg(solid_over(theme.muted, 0.4, theme.background))
                 .px_3()
                 .py_2()
                 .text_size(TEXT_XS.size)

@@ -7,6 +7,7 @@
 //!
 //! Port of upstream/apps/web/src/components/settings/SettingsGroup.tsx.
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Div, ElementId, FontWeight, Global, Hsla, InteractiveElement as _,
@@ -71,7 +72,7 @@ pub fn settings_group(children: Vec<AnyElement>, cx: &App) -> Div {
         .rounded(RADIUS_XL)
         .border_1()
         .border_color(with_alpha(theme.border, 0.6))
-        .bg(with_alpha(theme.card, 0.4))
+        .bg(solid_over(theme.card, 0.4, theme.background))
         .shadow(tokens::shadow_xs(0.05))
         .text_color(theme.foreground)
         .children(children.into_iter().enumerate().map(move |(index, child)| {
@@ -457,7 +458,7 @@ pub fn settings_unavailable_group(
         None => div().flex().flex_col().children(children),
         Some(message) => div()
             .py(rems(0.375))
-            .bg(with_alpha(theme.muted, 0.2))
+            .bg(solid_over(theme.muted, 0.2, theme.background))
             .child(
                 div()
                     .flex()

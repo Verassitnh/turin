@@ -9,6 +9,7 @@
 //! boxes and wrapping. Parsed documents are cached by text, highlighted code
 //! by content, so streaming and scrolling never re-parse unchanged messages.
 
+use crate::theme::color::solid_over;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -489,7 +490,7 @@ impl Md<'_> {
                 color: foreground,
                 strikethrough: false,
                 chrome: Some(SpanChrome {
-                    background: with_alpha(accent, 0.11).into(),
+                    background: solid_over(accent, 0.11, theme.background),
                     border: Some(color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into()),
                     radius: size * 0.5,
                     pad_x: size * 0.5,
@@ -1420,7 +1421,7 @@ impl Md<'_> {
                 color: foreground,
                 strikethrough: false,
                 chrome: Some(SpanChrome {
-                    background: with_alpha(accent, 0.11).into(),
+                    background: solid_over(accent, 0.11, theme.background),
                     border: Some(color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into()),
                     radius: size * 0.5,
                     pad_x: size * 0.5,
@@ -1532,7 +1533,7 @@ impl Md<'_> {
                 color: foreground,
                 strikethrough: false,
                 chrome: Some(SpanChrome {
-                    background: with_alpha(accent, 0.11).into(),
+                    background: solid_over(accent, 0.11, theme.background),
                     border: Some(color_mix(MixSpace::Oklab, accent, 0.34, theme.border).into()),
                     radius: size * 0.5,
                     pad_x: size * 0.5,

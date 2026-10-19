@@ -4,6 +4,7 @@
 //! The `transition-opacity` cross-fade is an instant swap here (GPUI style refinements do not
 //! animate).
 
+use crate::theme::color::solid_over;
 use std::time::Duration;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -14,7 +15,6 @@ use gpui_kit::{
 };
 
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::ui::{Tooltip, TooltipVariant};
 
 /// `timeout: 1600`.
@@ -85,7 +85,7 @@ impl RenderOnce for PullRequestCopyableCode {
             .cursor(CursorStyle::PointingHand)
             .hover(|style| {
                 style
-                    .bg(with_alpha(theme.accent, 0.45))
+                    .bg(solid_over(theme.accent, 0.45, theme.background))
                     .text_color(theme.foreground)
             })
             .child(

@@ -12,6 +12,7 @@
 //! `window` listener (an exactly focused page is what "not typing in a field"
 //! means here).
 
+use crate::theme::color::solid_over;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
@@ -856,7 +857,7 @@ fn segmented_group(theme: &AppTheme) -> gpui_kit::Div {
         .flex_shrink_0()
         .gap(px(2.))
         .rounded(RADIUS_LG)
-        .bg(with_alpha(theme.input, 0.4))
+        .bg(solid_over(theme.input, 0.4, theme.background))
         .p(px(2.))
 }
 

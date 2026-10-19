@@ -8,6 +8,7 @@
 //! height transition) and the `max-sm:` responsive rules (the window never
 //! drops below the `sm` breakpoint).
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -342,7 +343,7 @@ pub fn wizard_steps(
                     .border_color(theme.primary)
             })
             .when(view.is_current, |this| {
-                this.bg(with_alpha(theme.primary, 0.1))
+                this.bg(solid_over(theme.primary, 0.1, theme.background))
                     .text_color(theme.primary)
                     .border_color(with_alpha(theme.primary, 0.3))
             })

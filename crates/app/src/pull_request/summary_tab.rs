@@ -13,6 +13,7 @@
 //! thread's in-app browser (always the system browser), and the stale-checks banner (the panel
 //! never marks the detail's checks stale).
 
+use crate::theme::color::solid_over;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::LazyLock;
@@ -1297,7 +1298,7 @@ impl SummaryTab {
                     .items_start()
                     .gap_2()
                     .rounded_t(RADIUS_LG)
-                    .bg(alpha(theme.muted, 0.25))
+                    .bg(solid_over(theme.muted, 0.25, theme.background))
                     .px_3()
                     .py(rems(0.625))
                     .child(

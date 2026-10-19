@@ -8,6 +8,7 @@
 //!
 //! Not ported: the mobile bottom sheet and the enter/exit scale.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::{
@@ -118,7 +119,7 @@ pub fn alert_dialog_footer(variant: AlertDialogFooterVariant, cx: &App) -> Div {
             .py_4()
             .border_t_1()
             .border_color(theme.border)
-            .bg(with_alpha(theme.muted, 0.72))
+            .bg(solid_over(theme.muted, 0.72, theme.background))
             .rounded_b(px(17.)),
         AlertDialogFooterVariant::Bare => footer.pb(rems(1.5)),
     }

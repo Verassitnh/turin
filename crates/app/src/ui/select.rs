@@ -10,6 +10,7 @@
 //! Not ported: the focus ring, the invalid outline, typeahead, and the scroll
 //! arrows. The list caps at 24rem in place of `--available-height`.
 
+use crate::theme::color::solid_over;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
@@ -269,7 +270,7 @@ impl RenderOnce for SelectItem {
                 theme.foreground
             });
         if self.selected {
-            row = row.bg(with_alpha(theme.foreground, 0.08));
+            row = row.bg(solid_over(theme.foreground, 0.08, theme.background));
         }
         if self.highlighted {
             row = row.bg(theme.accent);

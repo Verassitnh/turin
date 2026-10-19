@@ -5,6 +5,7 @@
 //! provider filtering the Limits tab applies before pooling accounts
 //! ([`select_limit_environments`], upstream's `UsageLimitsSection`).
 
+use crate::theme::color::solid_over;
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -29,7 +30,6 @@ use super::backend::{LimitsEnvironment, ResetCreditError, ResetCreditResult, Usa
 use super::usage_providers::{ChartColor, presentation};
 use super::usage_ui::rich_tooltip;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::TEXT_XS;
 use crate::timestamp_format::{
     TimestampFormat, format_time_of_day, parse_timestamp_date, parse_timestamp_ms,
@@ -204,7 +204,7 @@ pub fn window_bar(
                     .w(px(1.))
                     .left(relative((left / 100.) as f32))
                     .ml(px(-0.5))
-                    .bg(with_alpha(theme.foreground, 0.6)),
+                    .bg(solid_over(theme.foreground, 0.6, theme.background)),
             )
         })
         .tooltip(rich_tooltip(rows))

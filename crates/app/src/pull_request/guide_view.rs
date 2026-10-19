@@ -21,6 +21,7 @@
 //! Port of upstream/apps/web/src/components/pullRequest/guide/GuideFileDiff.tsx.
 //! Port of upstream/apps/web/src/components/pullRequest/guide/useGuideDiffFiles.ts (file read in guide_excerpt_expansion.rs).
 
+use crate::theme::color::solid_over;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -585,7 +586,7 @@ fn note_marker(marker: &str, theme: &AppTheme) -> AnyElement {
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(with_alpha(theme.info, 0.16))
+        .bg(solid_over(theme.info, 0.16, theme.background))
         .text_size(TEXT_3XS.size)
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.info_foreground)
@@ -761,7 +762,7 @@ fn rail(
                     this.bg(theme.accent).text_color(theme.accent_foreground)
                 })
                 .when(!active, |this| {
-                    this.hover(move |style| style.bg(with_alpha(accent, 0.5)))
+                    this.hover(move |style| style.bg(solid_over(accent, 0.5, theme.background)))
                 })
                 .on_click(move |_, window, cx| select(index, window, cx))
                 .child(bullet)
@@ -998,13 +999,15 @@ impl GuideTour {
             .items_center()
             .gap_2()
             .px_3()
-            .bg(with_alpha(theme.muted_foreground, 0.08))
+            .bg(solid_over(theme.muted_foreground, 0.08, theme.background))
             .font_family(SharedString::from(theme.fonts.sans.clone()))
             .text_size(px(11.))
             .text_color(theme.muted_foreground)
             .when(!busy, |this| {
                 this.cursor(gpui_kit::CursorStyle::PointingHand)
-                    .hover(|style| style.bg(with_alpha(theme.muted_foreground, 0.16)))
+                    .hover(|style| {
+                        style.bg(solid_over(theme.muted_foreground, 0.16, theme.background))
+                    })
                     .on_click(on_click)
             })
             .child(Icon::new(icon).size(rems(0.75)))
@@ -1411,7 +1414,7 @@ impl GuideTour {
                 .py_2()
                 .text_size(TEXT_XS.size)
                 .cursor_pointer()
-                .hover(move |style| style.bg(with_alpha(accent, 0.5)))
+                .hover(move |style| style.bg(solid_over(accent, 0.5, theme.background)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.open_files.remove(&toggle_path) {
                         this.open_files.insert(toggle_path.clone());

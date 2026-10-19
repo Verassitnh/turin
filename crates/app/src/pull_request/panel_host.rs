@@ -5,6 +5,7 @@
 //! Not ported: tab drag / close menus, the add-surface button and the maximize control (the
 //! shell owns the panel width and layout controls).
 
+use crate::theme::color::solid_over;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, CursorStyle, DispatchPhase, Entity,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
@@ -27,7 +28,6 @@ use super::view_model::{PullRequestStore, pull_request_key};
 use crate::components::drag_region::{DragRegion as _, no_drag};
 use crate::hooks::use_open_panel_pull_request_url::pull_request_link_for_shortcut;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_MD, TEXT_XS, WORKSPACE_TOPBAR_HEIGHT};
 
 struct OpenSurface {
@@ -287,7 +287,7 @@ impl Render for PullRequestPanelHost {
                 } else {
                     tab.text_color(theme.muted_foreground).hover(|style| {
                         style
-                            .bg(with_alpha(theme.accent, 0.6))
+                            .bg(solid_over(theme.accent, 0.6, theme.background))
                             .text_color(theme.foreground)
                     })
                 }

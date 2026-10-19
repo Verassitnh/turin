@@ -5,6 +5,7 @@
 //! (backgrounds are solid or linear), so each tone is a top-down linear fade
 //! of the same mix plus the 145° background wash.
 
+use crate::theme::color::solid_over;
 use gpui_kit::{
     AnyElement, App, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
     Window, div, linear_color_stop, linear_gradient, rems,
@@ -132,7 +133,7 @@ impl RenderOnce for StandalonePage {
                     .rounded(RADIUS_2XL)
                     .border_1()
                     .border_color(with_alpha(theme.border, 0.8))
-                    .bg(with_alpha(theme.card, card_alpha))
+                    .bg(solid_over(theme.card, card_alpha, theme.background))
                     .shadow(tokens::shadow_2xl(0.2))
                     .overflow_hidden()
                     .children(self.masthead)

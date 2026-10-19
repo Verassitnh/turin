@@ -133,7 +133,8 @@ mod tests {
                 Some("grove"),
                 Some("ocean"),
                 Some("ember"),
-                Some("iris")
+                Some("iris"),
+                Some("cursor")
             ]
         );
     }

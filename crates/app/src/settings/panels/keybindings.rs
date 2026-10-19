@@ -7,6 +7,7 @@
 //!
 //! Port of upstream/apps/web/src/components/settings/KeybindingsSettings.tsx.
 
+use crate::theme::color::solid_over;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -136,7 +137,7 @@ fn warning_icon(label: String, cx: &gpui_kit::App) -> AnyElement {
         .justify_center()
         .rounded_sm()
         .text_color(theme.warning)
-        .hover(|style| style.bg(with_alpha(theme.warning, 0.1)))
+        .hover(|style| style.bg(solid_over(theme.warning, 0.1, theme.background)))
         .tooltip({
             let tooltip = Tooltip::new(label);
             move |window, cx| tooltip.clone().build(window, cx)
@@ -1061,7 +1062,7 @@ impl SettingsView {
                 .rounded_md()
                 .border_1()
                 .border_color(with_alpha(theme.border, 0.8))
-                .bg(with_alpha(theme.muted, 0.15))
+                .bg(solid_over(theme.muted, 0.15, theme.background))
                 .p_3()
                 .child(
                     div()
@@ -1099,7 +1100,7 @@ impl SettingsView {
                         .rounded_lg()
                         .border_1()
                         .border_color(with_alpha(theme.destructive, 0.3))
-                        .bg(with_alpha(theme.background, 0.75))
+                        .bg(solid_over(theme.background, 0.75, theme.background))
                         .p_4()
                         .text_center()
                         .text_size(TEXT_XS.size)
@@ -1241,7 +1242,7 @@ impl SettingsView {
                 .rounded_md()
                 .border_1()
                 .border_color(with_alpha(theme.border, 0.7))
-                .bg(with_alpha(theme.background, 0.6))
+                .bg(solid_over(theme.background, 0.6, theme.background))
                 .px_2()
                 .py_2()
                 .child(toggle)
@@ -1658,7 +1659,7 @@ impl SettingsView {
             .child(save)
             .child(cancel);
         div()
-            .bg(with_alpha(theme.muted, 0.15))
+            .bg(solid_over(theme.muted, 0.15, theme.background))
             .child(
                 SettingsRow::new("New keybinding")
                     .description(description)

@@ -17,6 +17,7 @@
 //!
 //! Port of upstream/apps/web/src/hooks/useResizeDrag.ts (drag bookkeeping).
 
+use crate::theme::color::solid_over;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyView, App, Context, CursorStyle, FocusHandle, InteractiveElement as _, IntoElement,
@@ -85,7 +86,6 @@ use crate::state::right_panel_layout::{
 };
 use crate::state::right_panel_store::RightPanelStore;
 use crate::state::store::ClientStoreGlobal;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{WORKSPACE_CONTROLS_INSET, WORKSPACE_TOPBAR_HEIGHT};
 use crate::theme::{self, ActiveAppTheme};
 use crate::ui::Tooltip;
@@ -961,35 +961,59 @@ impl AppSidebarLayout {
 
     /// The routed thread as the git surfaces read it.
     fn routed_git_thread(&self, cx: &App) -> Option<RoutedGitThread> {
-        let Some(SidebarRoute::Thread(key)) = self.sidebar.read(cx).route() else {
-            return None;
-        };
+        let route = self.sidebar.read(cx).route()?;
         let snapshot = self.store.read(cx).snapshot();
-        let thread = snapshot
-            .threads
-            .iter()
-            .find(|thread| &thread.key() == key)?;
-        let project = snapshot.project(&thread.project_key())?;
-        Some(RoutedGitThread {
-            environment_id: thread.environment_id.clone(),
-            thread_id: thread.id.clone(),
-            project_cwd: project.workspace_root.clone(),
-            branch: thread.branch.clone(),
-            worktree_path: thread.worktree_path.clone(),
-            has_session: thread.runtime.is_some(),
-            pull_requests: thread.pull_requests.clone(),
-            project_threads: snapshot
+        let project_threads = |project_key: &str| {
+            snapshot
                 .threads
                 .iter()
-                .filter(|other| other.project_key() == thread.project_key())
+                .filter(|other| other.project_key() == project_key)
                 .map(|other| super::branch_toolbar::backend::ProjectThreadInfo {
                     branch: other.branch.clone(),
                     worktree_path: other.worktree_path.clone(),
                     updated_at: other.updated_at.clone(),
                     archived_at: other.archived_at.clone(),
                 })
-                .collect(),
-        })
+                .collect::<Vec<_>>()
+        };
+        match route {
+            SidebarRoute::Thread(key) => {
+                let thread = snapshot
+                    .threads
+                    .iter()
+                    .find(|thread| &thread.key() == key)?;
+                let project = snapshot.project(&thread.project_key())?;
+                Some(RoutedGitThread {
+                    environment_id: thread.environment_id.clone(),
+                    thread_id: thread.id.clone(),
+                    project_cwd: project.workspace_root.clone(),
+                    branch: thread.branch.clone(),
+                    worktree_path: thread.worktree_path.clone(),
+                    has_session: thread.runtime.is_some(),
+                    is_draft: false,
+                    pull_requests: thread.pull_requests.clone(),
+                    project_threads: project_threads(&thread.project_key()),
+                })
+            }
+            SidebarRoute::Draft(draft_id) => {
+                let draft = snapshot
+                    .drafts
+                    .iter()
+                    .find(|draft| &draft.draft_id == draft_id)?;
+                let project = snapshot.project(&draft.project_key())?;
+                Some(RoutedGitThread {
+                    environment_id: draft.environment_id.clone(),
+                    thread_id: ThreadId::new(draft.draft_id.as_str()).ok()?,
+                    project_cwd: project.workspace_root.clone(),
+                    branch: draft.branch.clone(),
+                    worktree_path: draft.worktree_path.clone(),
+                    has_session: false,
+                    is_draft: true,
+                    pull_requests: Vec::new(),
+                    project_threads: project_threads(&draft.project_key()),
+                })
+            }
+        }
     }
 
     /// `chat.find`: asks the open chat to show its find bar (`requestThreadFindOpen`). The
@@ -1622,7 +1646,7 @@ impl Render for AppSidebarLayout {
                     .left(px(4.))
                     .w(px(1.))
                     .when(dragging_panel, |this| {
-                        this.bg(with_alpha(theme.primary, 0.6))
+                        this.bg(solid_over(theme.primary, 0.6, theme.background))
                     })
                     .when(!dragging_panel, |this| {
                         this.group_hover("right-panel-resize", |style| style.bg(theme.border))

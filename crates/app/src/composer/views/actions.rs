@@ -426,7 +426,7 @@ impl ChatComposer {
                             .justify_center()
                             .rounded(px(6.))
                             .cursor(CursorStyle::PointingHand)
-                            .hover(|style| style.bg(with_alpha(theme.foreground, 0.1)))
+                            .hover(|style| style.bg(theme.accent))
                             .child(
                                 Icon::new(IconName::X)
                                     .size(rems(0.75))

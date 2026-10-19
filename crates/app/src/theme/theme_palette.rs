@@ -30,6 +30,7 @@ const GROVE_THEME_ID: &str = "grove";
 pub const OCEAN_THEME_ID: &str = "ocean";
 const EMBER_THEME_ID: &str = "ember";
 const IRIS_THEME_ID: &str = "iris";
+pub const CURSOR_THEME_ID: &str = "cursor";
 
 const LEGACY_T3_CHAT_DARK_THEME_ID: &str = "t3-chat-dark";
 
@@ -508,10 +509,35 @@ mod tests {
     use crate::theme::color::{parse_color, rgba_to_oklab, to_hex};
     use crate::theme::theme_palettes::{
         EMBER_THEME, GROVE_THEME, IRIS_THEME, OCEAN_THEME, T3_CHAT_THEME, ThemeVariants,
+        get_theme_colors_for_appearance,
     };
 
     fn as_hex(value: &str) -> String {
         to_hex(parse_color(value).expect("theme color"))
+    }
+
+    #[test]
+    fn cursor_theme_resolves_and_is_darker_than_cursors_editor_background() {
+        let theme = get_theme_definition(CURSOR_THEME_ID).expect("cursor theme");
+        assert_eq!(theme.label.as_str(), "Cursor");
+        assert_eq!(
+            get_theme_modes(&theme),
+            vec![ThemeAppearance::Light, ThemeAppearance::Dark]
+        );
+        // Cursor Light / Cursor Dark `editor.background`.
+        for (appearance, original) in [
+            (ThemeAppearance::Light, "#FCFCFC"),
+            (ThemeAppearance::Dark, "#181818"),
+        ] {
+            let colors = get_theme_colors_for_appearance(&theme, appearance).expect("colors");
+            let lightness = |value: &str| rgba_to_oklab(parse_color(value).expect("color")).l;
+            let drop = lightness(original) - lightness(&colors.canvas);
+            assert!((0.02..=0.05).contains(&drop), "{appearance:?} drop {drop}");
+            for (role, value) in colors.entries() {
+                let alpha = parse_color(value).expect("color").a;
+                assert!((alpha - 1.0).abs() < f32::EPSILON, "{role} is translucent");
+            }
+        }
     }
 
     fn expect_theme_colors(colors: &ThemeColors, expected: &[(&str, &str)]) {

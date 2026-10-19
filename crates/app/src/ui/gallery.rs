@@ -6,6 +6,7 @@
 //! is `controls`. Every primitive renders in its main states; `scripts/shot.sh`
 //! captures each page in light and dark.
 
+use crate::theme::color::solid_over;
 use chrono::NaiveDate;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -53,7 +54,6 @@ use super::toast_logic::{ToastActionLayout, ToastType};
 use super::toggle::{Toggle, ToggleSize, ToggleVariant};
 use super::toggle_group::ToggleGroup;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 use crate::theme::tokens::{RADIUS_LG, TEXT_SM, TEXT_XS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -602,7 +602,7 @@ impl UiGallery {
                             .child(
                                 div()
                                     .rounded(RADIUS_LG)
-                                    .bg(with_alpha(theme.primary, 0.12))
+                                    .bg(solid_over(theme.primary, 0.12, theme.background))
                                     .px_2()
                                     .child("Width"),
                             ),

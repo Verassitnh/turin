@@ -346,7 +346,7 @@ impl ChatView {
             }
             let _ = live;
         }
-        let composer_strip = self.git_host.read(cx).composer_strip();
+        let header_strip = self.git_host.read(cx).header_strip();
         // `TURIN_CHAT_DEMO=thread-details` swaps in the lineage demo card.
         // `ChatCanvas` measures its container (ResizeObserver upstream); the
         // size feeds the lane and the details card layout on the next frame.
@@ -464,12 +464,17 @@ impl ChatView {
                     .pl(header_left)
                     .pr(px(20.))
                     .bg(theme.background)
-                    .children(self.thread.clone().map(|(project, title)| ChatHeader {
-                        project,
-                        project_record: header_project.clone(),
-                        title,
-                        right_panel_open: self.right_panel_open,
-                    }))
+                    .when(self.thread.is_some() || header_strip.is_some(), |this| {
+                        let (project, title) = self.thread.clone().unwrap_or_default();
+                        this.child(ChatHeader {
+                            project,
+                            project_record: header_project.clone(),
+                            title,
+                            right_panel_open: self.right_panel_open,
+                            show_breadcrumb: self.thread.is_some(),
+                            trailing: header_strip,
+                        })
+                    })
                     .drag_region(window, cx),
             )
             .child(
@@ -511,10 +516,7 @@ impl ChatView {
                                             // nothing to send: the bar stands in for the composer.
                                             .map(|this| match subagent_bar {
                                                 Some(bar) => this.child(bar),
-                                                None => this
-                                                    .child(composer)
-                                                    // The strip hangs under the composer, joined by the glass seam.
-                                                    .children(composer_strip),
+                                                None => this.child(composer),
                                             }),
                                     )
                                     // Bottom spacer: `h-[calc(env(safe-area-inset-bottom)+1.25rem)]`.

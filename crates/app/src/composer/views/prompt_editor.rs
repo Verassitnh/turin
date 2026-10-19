@@ -213,9 +213,9 @@ impl Default for EditorConfig {
             disabled: false,
             rich_text: true,
             literal_text: false,
-            min_height: 4.875,
+            min_height: 2.75,
             max_height: 13.,
-            font_size: None,
+            font_size: Some(13.),
         }
     }
 }

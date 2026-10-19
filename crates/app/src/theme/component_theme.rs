@@ -81,15 +81,15 @@ pub fn theme_config(theme: &AppTheme) -> Rc<ThemeConfig> {
         info_active = s(hover_90(theme.info)),
         // Outline buttons: `bg-popover`, `hover:bg-accent/50`; dark `bg-input/32`.
         button = s(if dark {
-            alpha(theme.input, 0.32)
+            mix(theme.input, 0.32, theme.background)
         } else {
             theme.popover
         }),
         button_foreground = s(theme.foreground),
         button_hover = s(if dark {
-            alpha(theme.input, 0.64)
+            mix(theme.input, 0.64, theme.background)
         } else {
-            alpha(theme.accent, 0.5)
+            mix(theme.accent, 0.5, theme.background)
         }),
         button_active = s(theme.accent),
         button_primary = s(theme.primary),
@@ -141,7 +141,7 @@ pub fn theme_config(theme: &AppTheme) -> Rc<ThemeConfig> {
         skeleton = s(theme.muted),
         drag_border = s(theme.ring),
         drop_target = s(alpha(theme.theme_accent, 0.12)),
-        overlay = s(alpha(theme.background, if dark { 0.64 } else { 0.60 })),
+        overlay = s(alpha(tw::BLACK.into(), if dark { 0.6 } else { 0.4 })),
         window_border = s(theme.border),
         status_bar = s(theme.app_chrome_background),
         status_bar_border = s(theme.border),

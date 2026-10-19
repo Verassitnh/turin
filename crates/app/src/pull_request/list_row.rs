@@ -13,6 +13,7 @@
 //!
 //! Port of upstream/apps/web/src/components/pullRequest/PullRequestListRow.tsx.
 
+use crate::theme::color::solid_over;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -436,7 +437,7 @@ impl RenderOnce for PullRequestRow {
             .rounded(RADIUS_MD)
             .when(selected, |this| this.bg(theme.accent))
             .when(!selected, |this| {
-                this.hover(|style| style.bg(with_alpha(theme.accent, 0.6)))
+                this.hover(|style| style.bg(solid_over(theme.accent, 0.6, theme.background)))
             })
             .child(
                 div()

@@ -4,13 +4,13 @@
 //! the monogram in bold mono at 8.25px. `projectIconColors.ts` is not ported
 //! yet; callers pass the resolved color.
 
+use crate::theme::color::solid_over;
 use gpui_kit::{
     App, FontWeight, Hsla, IntoElement, ParentElement as _, Rems, RenderOnce, SharedString,
     Styled as _, Window, div, px, rems,
 };
 
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
 
 #[derive(IntoElement)]
 pub struct ProjectMonogram {
@@ -47,7 +47,7 @@ impl RenderOnce for ProjectMonogram {
             .size(self.size)
             .rounded(px(box_px * 0.25))
             .overflow_hidden()
-            .bg(with_alpha(self.color, 0.14))
+            .bg(solid_over(self.color, 0.14, cx.app_theme().background))
             .text_color(self.color)
             .font_family(cx.app_theme().fonts.mono.clone())
             .font_weight(FontWeight::BOLD)

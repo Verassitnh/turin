@@ -242,6 +242,8 @@ pub struct AppSidebarLayout {
     anchored_toast_viewport: Entity<crate::ui::toast::AnchoredToastViewport>,
     draft_host: Entity<crate::shell::composer_draft_host::ComposerDraftHost>,
     _keybindings_warning: Option<Subscription>,
+    /// Launch toast and sidebar pill for provider updates (live shell only).
+    provider_updates: Option<Entity<crate::shell::provider_updates::ProviderUpdateHost>>,
 }
 
 impl AppSidebarLayout {
@@ -339,6 +341,9 @@ impl AppSidebarLayout {
         let _keybindings_warning = live
             .as_ref()
             .map(|live| crate::shell::keybindings_warning::start(live.bus.clone(), cx));
+        let provider_updates = live.as_ref().map(|live| {
+            crate::shell::provider_updates::start(live.clone(), sidebar.downgrade(), cx)
+        });
         Self {
             focus_handle,
             sidebar_open: true,
@@ -382,6 +387,7 @@ impl AppSidebarLayout {
             anchored_toast_viewport,
             draft_host,
             _keybindings_warning,
+            provider_updates,
         }
     }
 
@@ -677,6 +683,16 @@ impl AppSidebarLayout {
                 cx.notify();
             }
             SidebarEvent::OpenUsage => self.open_usage(window, cx),
+            SidebarEvent::OpenProviderSettings => {
+                if let Some(live) = self.live.clone() {
+                    crate::shell::live_settings::open_provider_settings(&live, None, cx);
+                }
+            }
+            SidebarEvent::DismissProviderUpdatePill(key) => {
+                if let Some(host) = self.provider_updates.clone() {
+                    host.update(cx, |host, cx| host.dismiss_pill(key, cx));
+                }
+            }
             SidebarEvent::OpenSettings => self.open_live_settings("general", window, cx),
             SidebarEvent::OpenProjectSettings(_) => {
                 self.open_live_settings("projects", window, cx);

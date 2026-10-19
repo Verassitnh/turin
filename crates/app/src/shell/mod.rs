@@ -12,6 +12,7 @@ pub mod keybindings_warning;
 pub mod live;
 pub mod live_settings;
 pub mod pr_preferences;
+pub mod provider_updates;
 pub mod reopen_closed_view;
 pub mod thread_notifications;
 pub mod thread_routes;

@@ -82,10 +82,7 @@ pub fn settings_window_options(cx: &App) -> WindowOptions {
             titlebar: Some(gpui_kit::TitlebarOptions {
                 title: Some("Settings".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(gpui_kit::point(
-                    gpui_kit::px(16.),
-                    gpui_kit::px(19.),
-                )),
+                traffic_light_position: Some(gpui_kit::point(gpui_kit::px(16.), gpui_kit::px(19.))),
             }),
             app_owns_titlebar_drag: true,
             ..Default::default()
@@ -94,10 +91,14 @@ pub fn settings_window_options(cx: &App) -> WindowOptions {
     )
 }
 
-/// Opens Settings on the Providers page with `instance_id` selected
+/// Opens Settings on the Providers page, with `instance_id` selected when set
 /// (`/settings/providers?instanceId=<id>`). Returns false when the live
 /// services are not ready yet.
-pub fn open_provider_settings(live: &LiveShellHandle, instance_id: &str, cx: &mut App) -> bool {
+pub fn open_provider_settings(
+    live: &LiveShellHandle,
+    instance_id: Option<&str>,
+    cx: &mut App,
+) -> bool {
     let Some(services) = live.try_services(cx) else {
         return false;
     };
@@ -106,7 +107,7 @@ pub fn open_provider_settings(live: &LiveShellHandle, instance_id: &str, cx: &mu
         services,
         live.client.clone(),
         route,
-        Some(instance_id.to_owned()),
+        instance_id.map(str::to_owned),
         settings_window_options(cx),
         cx,
     );

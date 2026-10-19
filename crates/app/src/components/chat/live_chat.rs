@@ -580,7 +580,7 @@ impl ComposerSource for LiveSource {
             self.client.clone(),
             self.bus.clone(),
         );
-        if !crate::shell::live_settings::open_provider_settings(&live, instance_id, cx) {
+        if !crate::shell::live_settings::open_provider_settings(&live, Some(instance_id), cx) {
             push_error(cx, "Provider settings", "Settings are not available yet.");
         }
     }

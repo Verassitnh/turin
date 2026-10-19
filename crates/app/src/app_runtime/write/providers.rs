@@ -60,9 +60,19 @@ impl Providers {
     /// `base_dir` is Turin's data dir (the "T3 home" of R1's host: runtime
     /// state lives in `<base_dir>/userdata`).
     pub async fn build(base_dir: &Path, initial_settings: ServerSettings) -> anyhow::Result<Self> {
-        // No leases yet: the app does not run background probes or refreshes
-        // on its own. Provider status refreshes on demand.
-        let background: ShouldRunBackgroundWork = Arc::new(|_scope| Box::pin(async { false }));
+        // Upstream runs provider-status refreshes while a client holds a
+        // `provider-status` lease. The app window is that client for as long as
+        // the process lives, so the demand is always there: the periodic
+        // refresh (`providerHealthRefreshInterval`) keeps update advisories
+        // current. No other scope has a consumer.
+        let background: ShouldRunBackgroundWork = Arc::new(|scope| {
+            Box::pin(async move {
+                matches!(
+                    scope,
+                    turin_provider_core::background_scope::BackgroundScope::ProviderStatus { .. }
+                )
+            })
+        });
         let live = DesktopProviderHost::new(base_dir, base_dir, initial_settings, background)
             .context("opening the provider host (secret store)")?;
         let settings = live.settings_handle();

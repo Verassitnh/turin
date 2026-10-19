@@ -8270,6 +8270,7 @@ dependencies = [
  "gethostname",
  "indexmap",
  "libc",
+ "memchr",
  "parking_lot",
  "pretty_assertions",
  "reqwest",

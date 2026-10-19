@@ -13,12 +13,12 @@
 //! peak memory on a huge single line is higher. See PORTING.md.
 
 use std::fs::Metadata;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 use turin_provider_core::usage::{TranscriptUsageFormat, UsageRecord};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +66,8 @@ pub struct TranscriptParseResult {
 pub const GUARD_LENGTH: u64 = 64;
 const NEWLINE: u8 = 0x0a;
 const CARRIAGE_RETURN: u8 = 0x0d;
+/// Read buffer for one transcript parse; upstream streams 256 KiB chunks.
+const READ_BUFFER_BYTES: usize = 256 * 1024;
 /// `stat` calls one transcript walk keeps in flight. The libuv pool has 4 threads.
 const STAT_CONCURRENCY: usize = 32;
 
@@ -212,14 +214,14 @@ fn fnv1a(bytes: &[u8]) -> u32 {
     hash
 }
 
-async fn read_window(file: &mut tokio::fs::File, offset: u64, length: u64) -> Option<Vec<u8>> {
-    file.seek(std::io::SeekFrom::Start(offset)).await.ok()?;
+fn read_window(file: &mut std::fs::File, offset: u64, length: u64) -> Option<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset)).ok()?;
     let mut window = vec![0u8; length as usize];
-    file.read_exact(&mut window).await.ok()?;
+    file.read_exact(&mut window).ok()?;
     Some(window)
 }
 
-async fn guard_matches(file: &mut tokio::fs::File, position: &TranscriptParsePosition) -> bool {
+fn guard_matches(file: &mut std::fs::File, position: &TranscriptParsePosition) -> bool {
     if position.guard_length == 0 || position.guard_length > GUARD_LENGTH {
         return false;
     }
@@ -230,9 +232,7 @@ async fn guard_matches(file: &mut tokio::fs::File, position: &TranscriptParsePos
         file,
         position.resume_offset - position.guard_length,
         position.guard_length,
-    )
-    .await
-    {
+    ) {
         Some(window) => fnv1a(&window) == position.guard_hash,
         None => false,
     }
@@ -252,10 +252,7 @@ pub fn transcript_line_gate(markers: &[String]) -> impl Fn(&[u8]) -> bool + '_ {
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty()
-        || haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
+    needle.is_empty() || memchr::memmem::find(haystack, needle).is_some()
 }
 
 /// Deepest container nesting a line may keep. serde_json refuses past 128, and
@@ -273,6 +270,25 @@ fn line_text(line: &[u8]) -> String {
     String::from_utf8_lossy(&cap_nesting(content, MAX_LINE_DEPTH)).into_owned()
 }
 
+/// Inside a string at `i`: index just past the next unescaped quote, which
+/// clears `in_string`, or the end of `bytes`. Tool output makes up most of a
+/// transcript line, so this jumps between quotes and backslashes instead of
+/// stepping every byte.
+fn skip_string_body(bytes: &[u8], mut i: usize, in_string: &mut bool) -> usize {
+    while let Some(offset) = memchr::memchr2(b'"', b'\\', &bytes[i..]) {
+        let at = i + offset;
+        if bytes[at] == b'"' {
+            *in_string = false;
+            return at + 1;
+        }
+        i = at + 2;
+        if i >= bytes.len() {
+            return bytes.len();
+        }
+    }
+    bytes.len()
+}
+
 /// Index just past the container that opens at `start`, or the end of `bytes`
 /// when it never closes.
 fn container_end(bytes: &[u8], start: usize) -> usize {
@@ -280,25 +296,20 @@ fn container_end(bytes: &[u8], start: usize) -> usize {
     let mut in_string = false;
     let mut i = start;
     while i < bytes.len() {
-        let byte = bytes[i];
         if in_string {
-            match byte {
-                b'\\' => i += 1,
-                b'"' => in_string = false,
-                _ => {}
-            }
-        } else {
-            match byte {
-                b'"' => in_string = true,
-                b'[' | b'{' => depth += 1,
-                b']' | b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return i + 1;
-                    }
+            i = skip_string_body(bytes, i, &mut in_string);
+            continue;
+        }
+        match bytes[i] {
+            b'"' => in_string = true,
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
                 }
-                _ => {}
             }
+            _ => {}
         }
         i += 1;
     }
@@ -315,29 +326,24 @@ fn cap_nesting(bytes: &[u8], max_depth: usize) -> std::borrow::Cow<'_, [u8]> {
     let mut in_string = false;
     let mut i = 0;
     while i < bytes.len() {
-        let byte = bytes[i];
         if in_string {
-            match byte {
-                b'\\' => i += 1,
-                b'"' => in_string = false,
-                _ => {}
+            i = skip_string_body(bytes, i, &mut in_string);
+            continue;
+        }
+        match bytes[i] {
+            b'"' => in_string = true,
+            b'[' | b'{' if depth == max_depth => {
+                let end = container_end(bytes, i);
+                out.get_or_insert_with(|| Vec::with_capacity(bytes.len()))
+                    .extend_from_slice(&bytes[emitted..i]);
+                out.get_or_insert_with(Vec::new).extend_from_slice(b"null");
+                emitted = end;
+                i = end;
+                continue;
             }
-        } else {
-            match byte {
-                b'"' => in_string = true,
-                b'[' | b'{' if depth == max_depth => {
-                    let end = container_end(bytes, i);
-                    out.get_or_insert_with(|| Vec::with_capacity(bytes.len()))
-                        .extend_from_slice(&bytes[emitted..i]);
-                    out.get_or_insert_with(Vec::new).extend_from_slice(b"null");
-                    emitted = end;
-                    i = end;
-                    continue;
-                }
-                b'[' | b'{' => depth += 1,
-                b']' | b'}' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
         }
         i += 1;
     }
@@ -369,7 +375,27 @@ pub async fn read_transcript_records(
     format: &TranscriptUsageFormat,
     resume_from: Option<&TranscriptParsePosition>,
 ) -> Option<TranscriptParseResult> {
-    let mut file = tokio::fs::File::open(file_path).await.ok()?;
+    let file_path = file_path.to_path_buf();
+    let format = format.clone();
+    let resume_from = resume_from.cloned();
+    tokio::task::spawn_blocking(move || {
+        read_transcript_records_blocking(&file_path, &format, resume_from.as_ref())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The parse itself, on a blocking thread. Each `tokio::fs` read is a hop to
+/// the blocking pool, and a multi-gigabyte transcript history in 8 KiB reads
+/// spent most of its time on those hops; one blocking task per file reads
+/// through a 256 KiB buffer, upstream's chunk size.
+fn read_transcript_records_blocking(
+    file_path: &Path,
+    format: &TranscriptUsageFormat,
+    resume_from: Option<&TranscriptParsePosition>,
+) -> Option<TranscriptParseResult> {
+    let mut file = std::fs::File::open(file_path).ok()?;
     let mentions_usage = transcript_line_gate(&format.usage_markers);
 
     let mut state = match &format.state {
@@ -391,7 +417,7 @@ pub async fn read_transcript_records(
         && (format.state.is_none() || saved_state.is_some())
         && {
             positioned = true;
-            guard_matches(&mut file, position).await
+            guard_matches(&mut file, position)
         }
     {
         if let Some(saved) = saved_state {
@@ -403,15 +429,15 @@ pub async fn read_transcript_records(
 
     // Seeking a FIFO (or any non-seekable file) fails even at offset 0, so only seek when moving.
     if start > 0 || positioned {
-        file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+        file.seek(SeekFrom::Start(start)).ok()?;
     }
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(READ_BUFFER_BYTES, file);
     let mut records = Vec::new();
     let mut resume_offset = start;
     let mut line = Vec::new();
     loop {
         line.clear();
-        let read = reader.read_until(NEWLINE, &mut line).await.ok()?;
+        let read = reader.read_until(NEWLINE, &mut line).ok()?;
         if read == 0 {
             break;
         }
@@ -426,8 +452,7 @@ pub async fn read_transcript_records(
                 &tail,
                 records,
                 resumed,
-            )
-            .await;
+            );
         }
         if mentions_usage(&line) {
             for record in (format.parse_line)(&line_text(&line[..line.len() - 1]), &mut state) {
@@ -446,13 +471,12 @@ pub async fn read_transcript_records(
         records,
         resumed,
     )
-    .await
 }
 
 /// Finishes a parse: the unfinished tail parses against a copy of the state
 /// saved at `resume_offset`, so the next scan replays the tail from there.
-async fn finish_tail(
-    mut file: tokio::fs::File,
+fn finish_tail(
+    mut file: std::fs::File,
     format: &TranscriptUsageFormat,
     state: Value,
     resume_offset: u64,
@@ -476,7 +500,7 @@ async fn finish_tail(
 
     let guard_length = GUARD_LENGTH.min(resume_offset);
     let guard_hash = if guard_length > 0 {
-        let window = read_window(&mut file, resume_offset - guard_length, guard_length).await?;
+        let window = read_window(&mut file, resume_offset - guard_length, guard_length)?;
         fnv1a(&window)
     } else {
         0

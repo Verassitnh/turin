@@ -818,6 +818,62 @@ async fn the_first_message_gets_a_generated_title() {
     assert_eq!(title, "Fixture title");
 }
 
+// A Claude instance other than the default one has its own binary and
+// environment, and generates text through them (not the driver's stub).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn text_generation_serves_every_claude_instance_from_its_own_settings() {
+    use turin_provider_core::text_generation::{
+        ProviderTextGeneration as _, ThreadTitleGenerationInput,
+    };
+
+    let data = tempfile::tempdir().expect("data dir");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let cli = tempfile::tempdir().expect("cli dir");
+    let binary = fake_claude(cli.path(), "claude_single_turn.ndjson");
+    let mut settings = settings_with_claude(&binary);
+    let work: turin_contracts::provider_instance::ProviderInstanceConfig =
+        serde_json::from_value(json!({
+            "driver": "claudeAgent",
+            "enabled": true,
+            "environment": [{"name": "FAKE_TITLE", "value": "Work instance title"}],
+            "config": {"binaryPath": binary.to_str().expect("utf-8")},
+        }))
+        .expect("instance config");
+    settings.provider_instances.insert(
+        turin_contracts::provider_instance::ProviderInstanceId::new("claude-work").expect("id"),
+        work,
+    );
+    let stores = Arc::new(Stores::open(data.path()).await.expect("stores"));
+    let runtime = WriteRuntime::build(stores, data.path(), settings)
+        .await
+        .expect("write runtime");
+    let generation = super::text_generation::build(
+        runtime.providers.settings.clone(),
+        runtime.providers.instances(),
+    );
+    let title = |instance: &str| {
+        generation.generate_thread_title(ThreadTitleGenerationInput {
+            linked_context: None,
+            cwd: workspace.path().to_str().expect("utf-8").to_owned(),
+            message: "Fix the flaky test".to_owned(),
+            previous_title: None,
+            attachments: Vec::new(),
+            model_selection: serde_json::from_value(
+                json!({"instanceId": instance, "model": "claude-sonnet-4-6"}),
+            )
+            .expect("selection"),
+        })
+    };
+    assert_eq!(
+        title("claude-work").await.expect("work instance").title,
+        "Work instance title"
+    );
+    assert_eq!(
+        title("claudeAgent").await.expect("default instance").title,
+        "Fixture title"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn at_completion_finds_workspace_files_and_folders() {
     let harness = harness().await;

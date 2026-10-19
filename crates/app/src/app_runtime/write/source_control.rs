@@ -313,7 +313,7 @@ impl PullRequestReviewGuideGenerator for LiveGuideGenerator {
         input: ReviewGuideGenerationInput,
     ) -> Result<generation::ReviewGuideGenerationResult, ReviewGuideGenerationError> {
         let generator =
-            super::text_generation::build(&self.settings.settings().await, self.instances.clone());
+            super::text_generation::build(self.settings.clone(), self.instances.clone());
         generator
             .generate_review_guide(generation::ReviewGuideGenerationInput {
                 cwd: input.cwd,

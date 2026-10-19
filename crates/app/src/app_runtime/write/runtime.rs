@@ -408,7 +408,7 @@ impl WriteRuntime {
             projects: projects.clone(),
             settings: host_settings.clone(),
             text_generation: Arc::new(super::text_generation::build(
-                &providers.settings.settings().await,
+                providers.settings.clone(),
                 instances.clone(),
             )),
             rollback: Arc::new(super::rollback::build(super::rollback::RollbackSources {

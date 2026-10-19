@@ -366,7 +366,7 @@ impl AppSidebarLayout {
         });
         crate::shell::composer_draft_host::ComposerDraftHost::register(draft_host.clone(), cx);
         if let Some(live) = live.as_ref() {
-            crate::shell::startup_failure::start(live.bus.clone(), cx);
+            crate::shell::startup_failure::start(live.bus.clone(), window.window_handle(), cx);
         }
         let _keybindings_warning = live
             .as_ref()

@@ -2,8 +2,6 @@
 //!
 //! HSV helpers behind the accent colour pickers (`ColorPicker`,
 //! `ProviderAccentColorPicker`, `ThemeColorPicker`).
-//!
-//! Port of upstream/apps/web/src/components/settings/ThemeColorPicker.tsx.
 
 /// `HsvColor`: hue in degrees `[0, 360)`, saturation and value in `[0, 1]`.
 #[derive(Debug, Clone, Copy, PartialEq)]

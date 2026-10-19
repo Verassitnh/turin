@@ -304,6 +304,21 @@ fn option_json(selection: &OptionSelection) -> Value {
     json!({"id": selection.id, "value": value})
 }
 
+/// The composer's keybinding hints (`shortcutLabelForCommand`).
+fn composer_shortcut_labels() -> std::collections::HashMap<String, String> {
+    use crate::components::command_palette::shortcut_labels::default_shortcut_label_for_command;
+    let mac = cfg!(target_os = "macos");
+    let jump = (1..=9).map(|n| format!("modelPicker.jump.{n}"));
+    ["composer.sendAlternate", "composer.stash", "modelPicker.toggle"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(jump)
+        .filter_map(|command| {
+            default_shortcut_label_for_command(&command, mac).map(|label| (command, label))
+        })
+        .collect()
+}
+
 /// Puts an unsent prompt and its attachments back into the thread's draft,
 /// keeping whatever the user typed since.
 fn restore_failed_send(
@@ -480,6 +495,7 @@ impl LiveSource {
                 ))
             }),
             settings: SavedComposerSettings::current(cx),
+            shortcut_labels: composer_shortcut_labels(),
             ..ComposerViewModel::default()
         }
     }
@@ -1283,6 +1299,13 @@ mod tests {
             }))
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn the_composer_shows_its_keybinding_hints() {
+        let labels = composer_shortcut_labels();
+        assert!(labels.contains_key("composer.sendAlternate"), "{labels:?}");
+        assert!(labels.contains_key("modelPicker.toggle"), "{labels:?}");
     }
 
     #[test]

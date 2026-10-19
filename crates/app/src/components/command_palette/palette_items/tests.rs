@@ -334,3 +334,22 @@ fn the_live_palette_lists_no_command_it_cannot_run() {
     );
     assert!(!ids.contains(&"find-current-thread"), "{ids:?}");
 }
+
+#[test]
+fn new_project_goes_under_the_data_directorys_projects_folder_not_a_fixed_home_path() {
+    use crate::components::command_palette::live_source::with_new_projects_root;
+    let (mut snapshot, _, _) = snapshot();
+    snapshot.new_projects_root = Some("~/Projects/t3".into());
+
+    let with_root = with_new_projects_root(
+        snapshot.clone(),
+        Some(std::path::Path::new("/Users/me/.turin/userdata")),
+    );
+    assert_eq!(
+        with_root.new_projects_root.as_deref(),
+        Some("/Users/me/.turin/projects")
+    );
+    // Without a data folder there is nowhere to put one, so the row is not offered.
+    let without = with_new_projects_root(snapshot, None);
+    assert_eq!(without.new_projects_root, None);
+}

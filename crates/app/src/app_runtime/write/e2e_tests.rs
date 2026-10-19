@@ -1321,3 +1321,62 @@ async fn a_created_pull_request_is_linked_to_its_thread() {
     assert_eq!(links[0].repository.as_str(), "acme/widgets");
     assert_eq!(links[0].source, ThreadPullRequestLinkSource::Created);
 }
+
+// Palette "New project": a named project is a new Git repository under
+// `<baseDir>/projects/<slug>` (upstream's `ManagedProjectFolders`), and a second
+// project of the same name takes `-2` rather than the first one's folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_named_project_is_created_under_the_managed_projects_folder() {
+    use crate::components::command_palette::named_project::create_named_project;
+    use turin_projects::testing::SystemGit;
+
+    let harness = harness().await;
+    let base = tempfile::tempdir().expect("base dir");
+    let global = base.path().join("gitconfig");
+    std::fs::write(&global, "").expect("empty git config");
+    let git: Arc<dyn turin_projects::managed_project_folders::GitCli> =
+        Arc::new(SystemGit::with_identity(&global));
+
+    let first = create_named_project(
+        harness.commands.clone(),
+        base.path().to_path_buf(),
+        git.clone(),
+        "Pinball Stats",
+    )
+    .await
+    .expect("first project");
+    let second = create_named_project(
+        harness.commands.clone(),
+        base.path().to_path_buf(),
+        git,
+        "Pinball Stats",
+    )
+    .await
+    .expect("second project");
+
+    let root = base.path().join("projects");
+    assert_eq!(
+        first.workspace_root,
+        root.join("pinball-stats").to_string_lossy()
+    );
+    assert_eq!(
+        second.workspace_root,
+        root.join("pinball-stats-2").to_string_lossy()
+    );
+    assert!(root.join("pinball-stats/README.md").is_file());
+    assert!(root.join("pinball-stats/.git").exists());
+    assert_eq!(first.commit_error, None);
+
+    let shells = harness
+        .stores
+        .projects
+        .list_shells(None)
+        .await
+        .expect("project shells");
+    let mut titles: Vec<_> = shells
+        .iter()
+        .map(|shell| shell.title.as_str().to_owned())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, ["Pinball Stats", "Pinball Stats"]);
+}

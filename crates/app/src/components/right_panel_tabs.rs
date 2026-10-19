@@ -104,14 +104,43 @@ enum Surface {
     PullRequests,
 }
 
+/// A one-shot request from the shell for the thread's pull requests tab
+/// (`useRightPanelStore.open(threadRef, "pull-requests")`, `openLinkPullRequestDialog`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PullRequestsRequest {
+    /// Also open the "Link pull request" dialog on the tab.
+    pub open_link_dialog: bool,
+}
+
+/// The tab request the palette's "Link pull request to thread" (`open_link_dialog`) and "Show
+/// linked pull requests" make. `None` without a routed thread on a live shell: there is no
+/// thread to attach to, and the caller falls back to the pull request list.
+pub fn thread_pull_requests_request(
+    live: bool,
+    has_routed_thread: bool,
+    open_link_dialog: bool,
+) -> Option<PullRequestsRequest> {
+    (live && has_routed_thread).then_some(PullRequestsRequest { open_link_dialog })
+}
+
 #[derive(IntoElement)]
 pub struct RightPanelTabs {
     pub live: Option<LiveDiffTarget>,
+    request: Option<PullRequestsRequest>,
 }
 
 impl RightPanelTabs {
     pub fn new(live: Option<LiveDiffTarget>) -> Self {
-        Self { live }
+        Self {
+            live,
+            request: None,
+        }
+    }
+
+    /// Switches to the pull requests tab, once, for this render.
+    pub fn request(mut self, request: Option<PullRequestsRequest>) -> Self {
+        self.request = request;
+        self
     }
 }
 
@@ -119,6 +148,13 @@ impl RenderOnce for RightPanelTabs {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.app_theme().clone();
         let surface = window.use_keyed_state("right-panel-surface", cx, |_, _| Surface::Diff);
+        if self.request.is_some() {
+            surface.update(cx, |surface, cx| {
+                *surface = Surface::PullRequests;
+                cx.notify();
+            });
+        }
+        let open_link_dialog = self.request.is_some_and(|request| request.open_link_dialog);
         let active = *surface.read(cx);
         let live_pr_target = match &self.live {
             Some(LiveDiffTarget {
@@ -205,6 +241,9 @@ impl RenderOnce for RightPanelTabs {
                     },
                 );
                 surface.update(cx, |surface, _| surface.set_linking(linking, project));
+                if open_link_dialog {
+                    surface.update(cx, |surface, cx| surface.open_link_dialog(window, cx));
+                }
                 Some(surface)
             }
             _ => None,
@@ -283,4 +322,27 @@ fn empty_state(message: &'static str, cx: &App) -> gpui_kit::Div {
         .text_size(TEXT_XS.size)
         .text_color(theme.muted_foreground)
         .child(message)
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn the_palette_actions_open_the_routed_threads_tab_and_only_link_opens_the_dialog() {
+        assert_eq!(
+            thread_pull_requests_request(true, true, true),
+            Some(PullRequestsRequest {
+                open_link_dialog: true
+            })
+        );
+        assert_eq!(
+            thread_pull_requests_request(true, true, false),
+            Some(PullRequestsRequest {
+                open_link_dialog: false
+            })
+        );
+        assert_eq!(thread_pull_requests_request(true, false, true), None);
+        assert_eq!(thread_pull_requests_request(false, true, false), None);
+    }
 }

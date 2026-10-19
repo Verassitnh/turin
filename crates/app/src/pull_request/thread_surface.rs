@@ -103,7 +103,8 @@ impl ThreadPullRequestsSurface {
         self.project = project;
     }
 
-    fn open_link_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the "Link pull request" dialog over the tab.
+    pub fn open_link_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let commands = LinkCommands {
             linking: self.linking.clone(),
             thread_id: self.thread_id.clone(),

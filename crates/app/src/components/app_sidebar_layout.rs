@@ -45,7 +45,7 @@ use super::no_active_thread_state::NoActiveThreadState;
 use super::preview_panel_shell::{PreviewPanelMode, PreviewPanelShell};
 use super::quit_hold_overlay::QuitHoldOverlay;
 use super::reopen_closed_view_shortcut::try_reopen_closed_view;
-use super::right_panel_tabs::{LiveDiffTarget, RightPanelTabs};
+use super::right_panel_tabs::{LiveDiffTarget, PullRequestsRequest, RightPanelTabs};
 use super::sidebar::mock_source::mock_sidebar;
 use super::sidebar::view_model::SidebarStore;
 use super::sidebar::{self as thread_sidebar, Sidebar, SidebarEvent, SidebarRoute};
@@ -200,6 +200,8 @@ pub struct AppSidebarLayout {
     /// Closed by default (`EMPTY_THREAD_STATE.isOpen: false`).
     right_panel_open: bool,
     right_panel_maximized: bool,
+    /// The shell's one-shot request for the pull requests tab, taken by the next render.
+    right_panel_request: Option<PullRequestsRequest>,
     right_panel_width: f32,
     resizing: Option<ResizeDrag>,
     /// The last drag moved past [`RESIZE_CLICK_SLOP`]; the rail's
@@ -388,6 +390,7 @@ impl AppSidebarLayout {
             sidebar_width: resolve_initial_thread_sidebar_width(None, viewport_width),
             right_panel_open: false,
             right_panel_maximized: false,
+            right_panel_request: None,
             right_panel_width: PREVIEW_PANEL_DEFAULT_WIDTH,
             resizing: None,
             last_drag_moved: false,
@@ -664,9 +667,11 @@ impl AppSidebarLayout {
             CommandPaletteEvent::FindInCurrentThread => {
                 crate::components::chat::thread_find_action_bus::request_thread_find_open(cx)
             }
-            CommandPaletteEvent::LinkPullRequest => self.open_pull_requests(window, cx),
+            CommandPaletteEvent::LinkPullRequest => {
+                self.show_thread_pull_requests(true, window, cx)
+            }
             CommandPaletteEvent::ShowLinkedPullRequests => {
-                self.open_pull_requests(window, cx);
+                self.show_thread_pull_requests(false, window, cx)
             }
             CommandPaletteEvent::OpenPullRequests => self.open_pull_requests(window, cx),
             CommandPaletteEvent::OpenUsage => self.open_usage(window, cx),
@@ -701,6 +706,30 @@ impl AppSidebarLayout {
                 self.open_live_settings("appearance", window, cx);
             }
         }
+    }
+
+    /// "Link pull request to thread" (`openLinkPullRequestDialog(threadRef)`, `link_dialog`) and
+    /// "Show linked pull requests" (`useRightPanelStore.open(threadRef, "pull-requests")`):
+    /// the right panel opens on the routed thread's pull requests tab.
+    fn show_thread_pull_requests(
+        &mut self,
+        open_link_dialog: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = super::right_panel_tabs::thread_pull_requests_request(
+            self.live.is_some(),
+            self.routed_thread_id(cx).is_some(),
+            open_link_dialog,
+        ) else {
+            // No thread to attach to: the global pull request list is the closest surface.
+            self.open_pull_requests(window, cx);
+            return;
+        };
+        self.right_panel_content = None;
+        self.right_panel_open = true;
+        self.right_panel_request = Some(request);
+        cx.notify();
     }
 
     /// `openCommandPalette(detail)` for the rest of the app.
@@ -1569,6 +1598,7 @@ impl Render for AppSidebarLayout {
         let right_panel_sheet = panel_presentation == ThreadPanelPresentation::Popover;
         let maximized = right_panel_open && self.right_panel_maximized;
         let right_panel_content = self.right_panel_content.clone();
+        let right_panel_request = self.right_panel_request.take();
         let right_panel_diff = self.live.as_ref().map(|live| LiveDiffTarget {
             client: live.client.clone(),
             bus: live.bus.clone(),
@@ -1802,6 +1832,7 @@ impl Render for AppSidebarLayout {
                                 let body = match right_panel_content.clone() {
                                     Some(content) => content.into_any_element(),
                                     None => RightPanelTabs::new(right_panel_diff.clone())
+                                        .request(right_panel_request)
                                         .into_any_element(),
                                 };
                                 this.child(
@@ -1824,7 +1855,9 @@ impl Render for AppSidebarLayout {
             .when(right_panel_open && right_panel_sheet, |this| {
                 let body = match right_panel_content {
                     Some(content) => content.into_any_element(),
-                    None => RightPanelTabs::new(right_panel_diff.clone()).into_any_element(),
+                    None => RightPanelTabs::new(right_panel_diff.clone())
+                        .request(right_panel_request)
+                        .into_any_element(),
                 };
                 this.child(
                     div().absolute().inset_0().flex().justify_end().child(

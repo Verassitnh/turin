@@ -240,10 +240,58 @@ fn trim_non_empty(value: Option<&str>) -> Option<String> {
     }
 }
 
-/// Upstream reads `NodeOS.userInfo().shell` (passwd entry). Without a libc
-/// dependency this reads `$SHELL`, which login sessions set from that entry.
+/// The current user's passwd entry (`NodeOS.userInfo()`): login shell and home
+/// directory, each `None` when empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserInfo {
+    pub shell: Option<String>,
+    pub homedir: Option<String>,
+}
+
+/// `NodeOS.userInfo()` from `getpwuid_r(getuid())`. A Finder-launched app has
+/// no `$SHELL`, so the passwd entry is the only record of the user's shell.
+pub fn read_user_info() -> UserInfo {
+    use std::ffi::CStr;
+    let mut buffer = vec![0u8; 4096];
+    loop {
+        // SAFETY: `passwd` is plain data and is overwritten by `getpwuid_r`.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: the buffer and `entry` outlive the call and `result` is a valid out pointer.
+        let status = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut entry,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < (1 << 20) {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            return UserInfo::default();
+        }
+        let read = |pointer: *const libc::c_char| {
+            if pointer.is_null() {
+                return None;
+            }
+            // SAFETY: a non-null passwd string points into `buffer`, NUL-terminated.
+            let text = unsafe { CStr::from_ptr(pointer) }.to_string_lossy();
+            trim_non_empty(Some(&text))
+        };
+        return UserInfo {
+            shell: read(entry.pw_shell),
+            homedir: read(entry.pw_dir),
+        };
+    }
+}
+
+/// `readUserLoginShell`: the passwd entry's shell.
 pub fn read_user_login_shell() -> Option<String> {
-    trim_non_empty(std::env::var("SHELL").ok().as_deref())
+    read_user_info().shell
 }
 
 /// The shells to probe for a login environment: the configured shell, the

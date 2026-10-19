@@ -50,6 +50,7 @@ pub mod orchestration_v2_bounded_snapshot;
 pub mod orchestration_v2_pending_background_work;
 pub mod orchestration_v2_thread_error;
 pub mod orchestration_v2_timeline;
+pub mod os_jank;
 pub mod path;
 pub mod project_favicon;
 pub mod project_scripts;

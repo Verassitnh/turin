@@ -363,6 +363,11 @@ fn install_window_lifecycle(command_bus: app_runtime::write::bus::CommandBus, cx
 
 fn main() {
     tracing_subscriber::fmt::init();
+    // A Finder/Dock launch inherits launchd's `/usr/bin:/bin:...`, so `claude`,
+    // `codex`, `gh` and `git` helpers would not be found. Merge the login
+    // shell's PATH into the process before the runtime, the providers or any
+    // spawn exists (upstream `fixPath`, os-jank.ts). Single-threaded here.
+    turin_shared::os_jank::fix_process_path();
     // The view-model reducers and the read path run on tokio, off the UI thread.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

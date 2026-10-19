@@ -1086,6 +1086,117 @@ fn git_repo(dir: &Path) {
     git(dir, &["commit", "-q", "-m", "init"]);
 }
 
+// After a run the workspace listing and the git status are read again
+// (`RunFinalizationObserver.refresh`), so the UI does not show the state from before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_run_end_refresh_reads_the_branch_and_new_files_again() {
+    use crate::app_runtime::write::adapters::AppWorkspaceRefresher;
+    use turin_orchestration::core::run_finalization_service::WorkspaceRefresher as _;
+
+    let harness = harness().await;
+    git_repo(&harness.workspace);
+    let cwd = harness.workspace.to_str().expect("utf-8");
+    let runtime = harness.commands.runtime();
+    let refresher = AppWorkspaceRefresher {
+        entries: runtime.workspace_entries.clone(),
+        git_manager: runtime.git_manager.clone(),
+        git_workflow: runtime.git_workflow.clone(),
+    };
+
+    let before = refresher.refresh_local_status(cwd).await.expect("status");
+    assert_eq!(before.ref_name.as_deref(), Some("main"));
+    assert!(before.is_default_ref);
+    git(&harness.workspace, &["checkout", "-q", "-b", "feature/x"]);
+    let after = refresher.refresh_local_status(cwd).await.expect("status");
+    assert_eq!(after.ref_name.as_deref(), Some("feature/x"));
+    assert!(!after.is_default_ref);
+
+    // The listing is indexed on the first search; a file the agent wrote
+    // afterwards shows at once, not once the listing has aged.
+    harness
+        .commands
+        .search_paths(cwd, "a", 5)
+        .await
+        .expect("first search");
+    std::fs::write(harness.workspace.join("written-by-the-agent.md"), "").expect("file");
+    refresher.refresh_entries(cwd).await.expect("entries");
+    let found = harness
+        .commands
+        .search_paths(cwd, "written-by", 5)
+        .await
+        .expect("search");
+    assert!(
+        found.iter().any(|(path, _)| path == "written-by-the-agent.md"),
+        "{found:?}"
+    );
+
+    // A folder that is not a repository has no branch and is not an error.
+    let plain = tempfile::tempdir().expect("plain dir");
+    let status = refresher
+        .refresh_local_status(plain.path().to_str().expect("utf-8"))
+        .await
+        .expect("status of a plain folder");
+    assert!(status.ref_name.is_none());
+}
+
+// A thread whose worktree folder is gone gets it back before the next turn
+// starts, instead of the agent running in a missing directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missing_worktree_is_recreated_when_the_next_turn_starts() {
+    let harness = harness().await;
+    git_repo(&harness.workspace);
+    git(&harness.workspace, &["branch", "feature/gone"]);
+    let parent = tempfile::tempdir().expect("worktree parent");
+    let worktree = parent.path().join("wt-gone");
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let thread = harness
+        .commands
+        .create_thread(CreateThread {
+            project_id,
+            title: "Worktree thread".into(),
+            model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+            runtime_mode: "auto".into(),
+            interaction_mode: "default".into(),
+            branch: Some("feature/gone".into()),
+            worktree_path: Some(worktree.to_str().expect("utf-8").into()),
+        })
+        .await
+        .expect("create thread");
+    assert!(!worktree.exists());
+    let client = open_client(&harness, &thread).await;
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "a finished run", |state| {
+            state
+                .thread(&thread_id(thread.as_str()))
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed))
+        }),
+    )
+    .await
+    .expect("the run finishes in time");
+    assert!(worktree.join(".git").exists(), "the worktree is back");
+}
+
 // The live git control: commit, pull, init, create/switch ref and the thread
 // branch update all run through the runtime instead of reporting "not wired".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

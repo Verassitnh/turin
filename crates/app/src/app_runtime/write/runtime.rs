@@ -44,8 +44,8 @@ use turin_orchestration::core::provider_turn_start_service::{
 use turin_orchestration::core::restart_continuation_service::{
     LateRestartThreads, RestartContinuationService,
 };
-use turin_orchestration::core::run_execution_service::{NoAfterTurnRefresh, RunExecutionService};
-use turin_orchestration::core::run_finalization_service::RunFinalizationService;
+use turin_orchestration::core::run_execution_service::RunExecutionService;
+use turin_orchestration::core::run_finalization_service::{RunFinalizationService, WorkspaceRunObserver};
 use turin_orchestration::core::runtime_request_service::RuntimeRequestService;
 use turin_orchestration::core::session_sink::EventSessionSink;
 use turin_orchestration::pipeline::attachment_claims::AttachmentClaims;
@@ -68,7 +68,8 @@ use turin_provider_core::provider_adapter_registry::ProviderAdapterRegistry;
 use turin_provider_core::provider_continuation_requests::ProviderContinuationRequests;
 
 use super::adapters::{
-    HostSettings, IntakeThreads, ManagerSessions, NoWorkspaceRefresh, ServiceCheckpointScopes,
+    AppWorkspaceRefresher, HostSettings, IntakeThreads, ManagerSessions, PullRequestsAfterTurn,
+    ServiceCheckpointScopes,
     StoredProjects, ThreadsForContinuations,
 };
 use super::effects::TurinEffectExecutor;
@@ -104,6 +105,7 @@ pub struct WriteRuntime {
     /// Reads checkpoint refs for the diff panel.
     pub checkpoint_store: Arc<turin_git::checkpointing::checkpoint_store::CheckpointStore>,
     pub git_manager: Arc<turin_git::git_manager::GitManager>,
+    pub git_workflow: Arc<turin_git::git_workflow_service::GitWorkflowService>,
     pub pull_requests: Arc<turin_source_control::pull_request::service::PullRequestService>,
     pub review_guides: Arc<
         turin_source_control::pull_request::review_guide_service::PullRequestReviewGuideService,
@@ -192,6 +194,7 @@ impl WriteRuntime {
                 }
             }))
         };
+        let workspace_entries = super::path_search::workspace_entries();
         let source_control = super::source_control::SourceControlServices::build(
             &stores,
             data_dir,
@@ -276,7 +279,7 @@ impl WriteRuntime {
             sink.clone(),
             ingestor.clone(),
             host_settings.clone(),
-            Arc::new(NoAfterTurnRefresh),
+            Arc::new(PullRequestsAfterTurn(source_control.pull_requests.clone())),
         ));
         let turn_start = Arc::new(ProviderTurnStartService::new(
             sink.clone(),
@@ -286,7 +289,10 @@ impl WriteRuntime {
             run_execution,
             Arc::new(ProjectRootsRuntimePolicy::new(projects.clone())),
             Arc::new(NoPromptCommands),
-            Arc::new(LocalTurnStartWorkspace::new(projects.clone(), None)),
+            Arc::new(LocalTurnStartWorkspace::new(
+                projects.clone(),
+                Some(source_control.git_workflow.clone()),
+            )),
         ));
         let turn_control = Arc::new(ProviderTurnControlService::new(
             projection.clone(),
@@ -299,7 +305,14 @@ impl WriteRuntime {
         let finalization = Arc::new(RunFinalizationService::new(
             capture,
             projection.clone(),
-            Arc::new(NoWorkspaceRefresh),
+            Arc::new(WorkspaceRunObserver::new(
+                Arc::new(AppWorkspaceRefresher {
+                    entries: workspace_entries.clone(),
+                    git_manager: source_control.git_manager.clone(),
+                    git_workflow: source_control.git_workflow.clone(),
+                }),
+                projection.clone(),
+            )),
         ));
 
         // Restart continuation: the orchestrator needs the service at
@@ -440,6 +453,7 @@ impl WriteRuntime {
             source_control_discovery: source_control.discovery,
             git: source_control.git,
             git_manager: source_control.git_manager,
+            git_workflow: source_control.git_workflow,
             pull_requests: source_control.pull_requests,
             review_guides: source_control.review_guides,
             usage,
@@ -455,7 +469,7 @@ impl WriteRuntime {
             threads,
             intake,
             attachments_dir,
-            workspace_entries: super::path_search::workspace_entries(),
+            workspace_entries,
             managed_folders,
             checkpoint_store,
             sessions,

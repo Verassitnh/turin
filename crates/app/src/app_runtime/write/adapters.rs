@@ -11,15 +11,13 @@ use turin_contracts::orchestration_v2::{
 };
 use turin_contracts::provider_instance::ProviderInstanceId;
 use turin_contracts::settings::ServerSettings;
-use turin_contracts::{MessageId, ProjectId, ProviderSessionId, RunId, ThreadId};
+use turin_contracts::{MessageId, ProjectId, ProviderSessionId, ThreadId};
 use turin_orchestration::core::orchestrator::services::{
     CheckpointScopes, PrepareRootRunScope, ProjectRoots, ProviderInstanceSettings,
 };
 use turin_orchestration::core::provider_continuation_service::ContinuationThreads;
 use turin_orchestration::core::provider_session_manager::ProviderSessionManager;
-use turin_orchestration::core::run_finalization_service::{
-    RunFinalizationObserver, RunFinalizationRefreshError,
-};
+use turin_orchestration::core::run_finalization_service::{LocalVcsStatus, WorkspaceRefresher};
 use turin_orchestration::pipeline::orchestrator_port::BoxError;
 use turin_orchestration::pipeline::orchestrator_port::DispatchResult;
 use turin_orchestration::pipeline::seams::{
@@ -153,19 +151,63 @@ impl ProviderInstanceSettings for HostSettings {
     }
 }
 
-/// The workspace refresh after a checkpoint (file tree and VCS status for the
-/// UI). The app does not keep a workspace index yet, so there is nothing to
-/// refresh.
-pub struct NoWorkspaceRefresh;
+/// `layerObserver`'s refreshes over the app's services: the workspace file
+/// listing, the git status caches, and the pull request status of the branch
+/// a run finished on.
+pub struct AppWorkspaceRefresher {
+    pub entries: Arc<turin_git::workspace::workspace_entries::WorkspaceEntries>,
+    pub git_manager: Arc<turin_git::git_manager::GitManager>,
+    pub git_workflow: Arc<turin_git::git_workflow_service::GitWorkflowService>,
+}
 
 #[async_trait]
-impl RunFinalizationObserver for NoWorkspaceRefresh {
-    async fn refresh(
-        &self,
-        _cwd: &str,
-        _thread_id: &ThreadId,
-        _run_id: &RunId,
-    ) -> Result<(), RunFinalizationRefreshError> {
+impl WorkspaceRefresher for AppWorkspaceRefresher {
+    async fn refresh_entries(&self, cwd: &str) -> Result<(), BoxError> {
+        self.entries.refresh(cwd).await;
+        Ok(())
+    }
+
+    async fn refresh_local_status(&self, cwd: &str) -> Result<LocalVcsStatus, BoxError> {
+        self.git_manager.invalidate_local_status(cwd);
+        let input = status_input(cwd)?;
+        let local = self.git_workflow.local_status(&input).await?;
+        Ok(LocalVcsStatus {
+            ref_name: local.ref_name.map(|name| name.as_str().to_owned()),
+            is_default_ref: local.is_default_ref,
+        })
+    }
+
+    async fn refresh_pull_request_status(&self, cwd: &str) -> Result<(), BoxError> {
+        let input = status_input(cwd)?;
+        self.git_workflow
+            .remote_status(
+                &input,
+                turin_git::git_manager::GitManagerRemoteStatusOptions {
+                    refresh_upstream: Some(false),
+                    refresh_missing_pull_request: true,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+fn status_input(cwd: &str) -> Result<turin_contracts::git::VcsStatusInput, BoxError> {
+    Ok(turin_contracts::git::VcsStatusInput {
+        cwd: turin_contracts::TrimmedNonEmptyString::new(cwd).map_err(|error| error.to_string())?,
+    })
+}
+
+/// `RunFinalizationObserver.refreshAfterTurn`: the project's pull requests are
+/// read again once a run ended, so a branch's badge and checks are not stale.
+pub struct PullRequestsAfterTurn(
+    pub Arc<turin_source_control::pull_request::service::PullRequestService>,
+);
+
+#[async_trait]
+impl turin_orchestration::core::run_execution_service::AfterTurnRefresh for PullRequestsAfterTurn {
+    async fn refresh_after_turn(&self, project_id: &ProjectId) -> Result<(), BoxError> {
+        self.0.refresh_after_turn(project_id).await;
         Ok(())
     }
 }

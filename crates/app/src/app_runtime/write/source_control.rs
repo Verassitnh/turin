@@ -48,6 +48,8 @@ pub struct SourceControlServices {
     pub discovery: Arc<SourceControlDiscovery>,
     pub git: Arc<GitVcsDriverCore>,
     pub git_manager: Arc<GitManager>,
+    /// Detects repositories, prunes and creates worktrees (`GitWorkflowService`).
+    pub git_workflow: Arc<turin_git::git_workflow_service::GitWorkflowService>,
     /// Bound to the runtime once it exists (`WriteRuntime::build`).
     pub created_pr_linker: Arc<LateCreatedPullRequestLinker>,
     pub pull_requests: Arc<PullRequestService>,
@@ -155,12 +157,21 @@ impl SourceControlServices {
         );
         git_manager.set_linker(created_pr_linker.clone());
         let git_manager = Arc::new(git_manager);
+        let git_workflow = Arc::new(turin_git::git_workflow_service::GitWorkflowService::new(
+            Arc::new(VcsDriverRegistry::new(
+                Arc::new(VcsProjectConfig::new()),
+                Arc::new(GitVcsDriver::new(VcsProcess::new(ProcessRunner))),
+            )),
+            git.clone(),
+            git_manager.clone(),
+        ));
         Self {
             host,
             providers: source_control,
             discovery,
             git,
             git_manager,
+            git_workflow,
             created_pr_linker,
             pull_requests,
             review_guides,

@@ -22,8 +22,8 @@ use gpui_kit::{
     Styled as _, Window, div, px, relative, rems,
 };
 
-use super::file_link_open::open_markdown_file_link;
 use super::code_highlight::{cached_highlight, highlight_code, plain_highlight};
+use super::file_link_open::open_markdown_file_link;
 use super::inline_flow::{
     FindMatchProbe, FlowHighlight, FlowSpan, FlowSpanStyle, FlowText, InlineFlow, SpanChrome,
     WhiteSpace,

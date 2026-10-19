@@ -108,7 +108,10 @@ mod tests {
 
     #[test]
     fn external_urls_are_not_file_links() {
-        assert_eq!(file_link_target("https://example.com/a.rs", Some(ROOT)), None);
+        assert_eq!(
+            file_link_target("https://example.com/a.rs", Some(ROOT)),
+            None
+        );
         assert_eq!(file_link_target("mailto:me@example.com", Some(ROOT)), None);
     }
 

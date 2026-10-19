@@ -556,7 +556,10 @@ fn restore_into_drafts(
 }
 
 /// `activeWorkspaceRoot`: the thread's worktree, else its project's checkout.
-pub(crate) fn thread_workspace_root(state: &ClientState, thread: &ThreadProjection) -> Option<String> {
+pub(crate) fn thread_workspace_root(
+    state: &ClientState,
+    thread: &ThreadProjection,
+) -> Option<String> {
     thread
         .thread
         .worktree_path
@@ -985,10 +988,9 @@ impl LiveSource {
                 }
                 match outcome {
                     Ok(()) => {
-                        let prompt =
-                            crate::composer::prompt_history::recallable_composer_prompt(
-                                &message_text,
-                            );
+                        let prompt = crate::composer::prompt_history::recallable_composer_prompt(
+                            &message_text,
+                        );
                         match source {
                             // The open composer takes the prompt through its
                             // editor; writing only the draft store would leave
@@ -1735,8 +1737,11 @@ impl TimelineSource for LiveSource {
         on_done: super::timeline::source::WriteDone,
         cx: &mut App,
     ) {
-        let (cwd, relative_path, contents) =
-            (cwd.to_owned(), relative_path.to_owned(), contents.to_owned());
+        let (cwd, relative_path, contents) = (
+            cwd.to_owned(),
+            relative_path.to_owned(),
+            contents.to_owned(),
+        );
         let task = self.bus.task(cx, move |commands| async move {
             commands
                 .write_project_file(&cwd, &relative_path, &contents)

@@ -45,7 +45,9 @@ use turin_orchestration::core::restart_continuation_service::{
     LateRestartThreads, RestartContinuationService,
 };
 use turin_orchestration::core::run_execution_service::RunExecutionService;
-use turin_orchestration::core::run_finalization_service::{RunFinalizationService, WorkspaceRunObserver};
+use turin_orchestration::core::run_finalization_service::{
+    RunFinalizationService, WorkspaceRunObserver,
+};
 use turin_orchestration::core::runtime_request_service::RuntimeRequestService;
 use turin_orchestration::core::session_sink::EventSessionSink;
 use turin_orchestration::pipeline::attachment_claims::AttachmentClaims;
@@ -69,8 +71,7 @@ use turin_provider_core::provider_continuation_requests::ProviderContinuationReq
 
 use super::adapters::{
     AppWorkspaceRefresher, HostSettings, IntakeThreads, ManagerSessions, PullRequestsAfterTurn,
-    ServiceCheckpointScopes,
-    StoredProjects, ThreadsForContinuations,
+    ServiceCheckpointScopes, StoredProjects, ThreadsForContinuations,
 };
 use super::effects::TurinEffectExecutor;
 use super::providers::Providers;

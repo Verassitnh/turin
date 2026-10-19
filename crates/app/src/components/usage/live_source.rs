@@ -12,9 +12,7 @@ use turin_contracts::base_schemas::TrimmedNonEmptyString;
 use turin_contracts::provider_usage_limits::ProviderConsumeResetCreditInput;
 use turin_contracts::settings::ServerSettingsPatch;
 use turin_contracts::usage::{UsageSourceAction, UsageSummary, UsageSummaryInput};
-use turin_shared::keybindings::{
-    ResolvedKeybindingRule, compile_resolved_keybindings_config, default_keybinding_rules,
-};
+use turin_shared::keybindings::ResolvedKeybindingRule;
 
 use super::backend::{
     LimitsEnvironment, LimitsProvider, ResetCreditError, ResetCreditResult, UsageBackend,
@@ -47,7 +45,6 @@ struct WindowCache {
 struct State {
     environments: Vec<EnvironmentRow>,
     windows: HashMap<String, WindowCache>,
-    keybindings: Vec<ResolvedKeybindingRule>,
 }
 
 fn limits_provider_from_snapshot(provider: &ServerProvider) -> LimitsProvider {
@@ -120,7 +117,6 @@ impl LiveUsageBackend {
                     label: "This device".to_owned(),
                 }],
                 windows: HashMap::new(),
-                keybindings: compile_resolved_keybindings_config(&default_keybinding_rules()),
             })),
             limits_refresher: UsageLimitsRefresher::new(|| chrono::Utc::now().timestamp_millis())
                 .with_runtime(runtime),
@@ -382,7 +378,7 @@ impl UsageBackend for LiveUsageBackend {
     }
 
     fn keybindings(&self) -> Vec<ResolvedKeybindingRule> {
-        self.state.borrow().keybindings.clone()
+        crate::shell::user_keybindings::active_rules()
     }
 
     fn timestamp_format(&self) -> TimestampFormat {

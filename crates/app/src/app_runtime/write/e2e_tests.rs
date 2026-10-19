@@ -932,7 +932,9 @@ async fn a_worktree_thread_searches_and_saves_in_its_worktree() {
         .await
         .expect("search");
     assert!(
-        found.iter().any(|(path, _)| path == "only-on-the-branch.rs"),
+        found
+            .iter()
+            .any(|(path, _)| path == "only-on-the-branch.rs"),
         "{found:?}"
     );
 }
@@ -1126,7 +1128,9 @@ async fn the_run_end_refresh_reads_the_branch_and_new_files_again() {
         .await
         .expect("search");
     assert!(
-        found.iter().any(|(path, _)| path == "written-by-the-agent.md"),
+        found
+            .iter()
+            .any(|(path, _)| path == "written-by-the-agent.md"),
         "{found:?}"
     );
 
@@ -1187,9 +1191,11 @@ async fn a_missing_worktree_is_recreated_when_the_next_turn_starts() {
             state
                 .thread(&thread_id(thread.as_str()))
                 .and_then(|entry| entry.state.data.as_ref())
-                .is_some_and(|data| data.runs
+                .is_some_and(|data| {
+                    data.runs
                         .iter()
-                        .any(|run| run.status == OrchestrationV2RunStatus::Completed))
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+                })
         }),
     )
     .await

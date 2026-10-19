@@ -2,10 +2,10 @@
 //! context-window meter (`activeContextWindow`) and the plan follow-up prompt
 //! (`activeProposedPlan` / `showPlanFollowUpPrompt`) in upstream's ChatView.
 
+use std::sync::Arc;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus, OrchestrationV2TurnItem,
 };
-use std::sync::Arc;
 
 use turin_shared::proposed_plan_text::proposed_plan_title;
 
@@ -17,12 +17,12 @@ use super::timeline::live_projection::active_run;
 use crate::composer::command_items::PullRequestMeta;
 use crate::composer::view_model::{ContextWindowSnapshot, ThreadRef};
 use crate::state::client_state::ClientState;
-use crate::state::models::EnvironmentThreadShell;
 use crate::state::helpers::composer_thread_items::{
     ComposerThreadCandidate, composer_thread_candidates,
 };
-use crate::state::thread_projection::ThreadProjection;
+use crate::state::models::EnvironmentThreadShell;
 use crate::state::models::PullRequestState;
+use crate::state::thread_projection::ThreadProjection;
 use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
 
 /// The threads `@` may mention from this composer (`environmentThreadShells` through
@@ -404,7 +404,10 @@ mod tests {
             link(14, Some("Dismissed"), true),
         ];
         let mut sibling = shell("sibling", "p1", "Sibling", "2026-01-02");
-        sibling.pull_requests = vec![link(12, Some("Fix login"), false), link(20, Some("Docs"), false)];
+        sibling.pull_requests = vec![
+            link(12, Some("Fix login"), false),
+            link(20, Some("Docs"), false),
+        ];
         let mut elsewhere = shell("other", "p2", "Other", "2026-01-03");
         elsewhere.pull_requests = vec![link(30, Some("Elsewhere"), false)];
         let shells: Vec<Arc<EnvironmentThreadShell>> =

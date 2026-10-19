@@ -97,7 +97,9 @@ fn keybindings_vm(state: &KeybindingsConfigState, config_path: String) -> Keybin
 
 /// Converts a runtime rule to the shared shape. A rule that does not re-parse is
 /// skipped rather than crashing the Settings window.
-fn resolved_keybinding_rule(rule: &ResolvedKeybinding) -> Option<ResolvedKeybindingRule> {
+pub(crate) fn resolved_keybinding_rule(
+    rule: &ResolvedKeybinding,
+) -> Option<ResolvedKeybindingRule> {
     let expression = runtime_shortcut_expression(&rule.shortcut);
     let shortcut = turin_shared::keybindings::parse_keybinding_shortcut(&expression)?;
     Some(ResolvedKeybindingRule {

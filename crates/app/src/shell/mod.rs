@@ -18,5 +18,6 @@ pub mod startup_failure;
 pub mod thread_notifications;
 pub mod thread_routes;
 pub mod usage_commands;
+pub mod user_keybindings;
 
 pub use chat_route_shortcuts::bind_chat_route_keys;

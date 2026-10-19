@@ -432,6 +432,7 @@ fn main() {
             command_bus.clone(),
         ));
         app_sidebar_layout::bind_keys(cx);
+        shell::user_keybindings::install(command_bus.clone(), cx);
         composer::views::prompt_editor::bind_keys(cx);
         desktop::bind_menu_keys(cx);
         desktop::install_native_menus(cx);

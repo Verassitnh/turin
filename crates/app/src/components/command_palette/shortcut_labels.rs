@@ -6,9 +6,7 @@
 //!
 //! Port of upstream/apps/web/src/keybindings.ts (the slice the palette reads).
 
-use turin_shared::keybindings::{
-    ParsedShortcut, default_keybinding_rules, parse_keybinding_shortcut,
-};
+use turin_shared::keybindings::{ParsedShortcut, ResolvedKeybindingRule};
 
 /// `formatShortcutKeyLabel`.
 pub fn format_shortcut_key_label(key: &str) -> String {
@@ -70,15 +68,28 @@ pub fn format_shortcut_label(shortcut: &ParsedShortcut, mac: bool) -> String {
     parts.join("+")
 }
 
-/// `shortcutLabelForCommand` over the default keybindings: the last rule for
-/// the command wins, as upstream's effective-shortcut lookup does.
-pub fn default_shortcut_label_for_command(command: &str, mac: bool) -> Option<String> {
-    default_keybinding_rules()
+/// `shortcutLabelForCommand` over `rules`: the last rule for the command wins,
+/// as upstream's effective-shortcut lookup does.
+pub fn shortcut_label_for_command_in(
+    rules: &[ResolvedKeybindingRule],
+    command: &str,
+    mac: bool,
+) -> Option<String> {
+    rules
         .iter()
         .rev()
         .find(|rule| rule.command.as_str() == command)
-        .and_then(|rule| parse_keybinding_shortcut(rule.key.as_str()))
-        .map(|shortcut| format_shortcut_label(&shortcut, mac))
+        .map(|rule| format_shortcut_label(&rule.shortcut, mac))
+}
+
+/// The label of the shortcut in force for `command`: the keybindings config's
+/// (Settings > Keybindings), the defaults before it has been read.
+pub fn default_shortcut_label_for_command(command: &str, mac: bool) -> Option<String> {
+    shortcut_label_for_command_in(
+        &crate::shell::user_keybindings::active_rules(),
+        command,
+        mac,
+    )
 }
 
 #[cfg(test)]

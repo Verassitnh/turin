@@ -126,6 +126,13 @@ impl OpenCodeAdapter {
         self
     }
 
+    /// Shares the instance's one OpenCode 2 server with the snapshot and text generation
+    /// (upstream builds `OpenCode2Server.make` once per instance and hands it to all three).
+    pub fn with_v2_server(self, server: Arc<OpenCode2Server>) -> Self {
+        *self.v2_server.lock() = Some(server);
+        self
+    }
+
     /// Tests and the gated smoke talk to a server that is already listening.
     pub fn connecting(
         instance_id: ProviderInstanceId,

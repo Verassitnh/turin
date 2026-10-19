@@ -5,7 +5,7 @@
 //! `hydration.registry` (`ProviderAdapterLookup`). The status
 //! [`ProviderRegistry`] is the list the settings and composer views read.
 //! The Codex and OpenCode slots are filled here (T22c): Codex with
-//! `CodexDriver::with_managed_host`, OpenCode with the app's own minimal
+//! `CodexDriver::with_managed_host`, OpenCode with the app's own
 //! [`OpenCodeDriver`] (the provider crate has an adapter but no driver).
 
 use std::path::Path;
@@ -88,7 +88,7 @@ impl Providers {
             Arc::clone(&host),
             BuiltInDriverSlots {
                 codex: Some(Box::new(move |_host| codex)),
-                opencode: Some(Box::new(|_host| Arc::new(OpenCodeDriver::new()))),
+                opencode: Some(Box::new(|host| Arc::new(OpenCodeDriver::new(host)))),
             },
         );
         let defaults: Vec<_> = drivers

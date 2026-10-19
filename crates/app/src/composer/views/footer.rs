@@ -32,7 +32,7 @@ use crate::composer::views::chrome::{
 };
 use crate::composer::views::provider_model_picker::provider_model_trigger_children;
 use crate::theme::ActiveAppTheme;
-use crate::theme::color::with_alpha;
+use crate::theme::color::solid_over;
 use crate::theme::tokens::{TEXT_XS, tw};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
@@ -371,7 +371,7 @@ impl ChatComposer {
             .justify_center()
             .size(size)
             .rounded_full()
-            .bg(with_alpha(theme.destructive, 0.9))
+            .bg(solid_over(theme.destructive, 0.9, theme.background))
             .text_color(tw::WHITE)
             .cursor(CursorStyle::PointingHand)
             .hover(|style| style.bg(theme.destructive))

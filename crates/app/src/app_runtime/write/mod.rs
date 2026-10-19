@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod bus;
 pub mod commands;
+pub mod created_pr_linker;
 #[cfg(test)]
 mod e2e_tests;
 pub mod effects;

@@ -714,8 +714,9 @@ impl ChatComposer {
 
     fn install_key_handler(&mut self, cx: &mut Context<Self>) {
         let paste_weak = cx.weak_entity();
+        let paste_as_text = self.editor.read(cx).paste_as_text_shortcut();
         self.editor.update(cx, |editor, _| {
-            editor.set_paste_handler(Some(std::rc::Rc::new(move |_state, item, window, cx| {
+            editor.set_paste_handler(Some(std::rc::Rc::new(move |state, item, window, cx| {
                 use crate::composer::attachment_files::{
                     PickedFile, should_handle_composer_attachment_paste,
                 };
@@ -754,6 +755,40 @@ impl ChatComposer {
                         }
                         ClipboardEntry::String(string) => plain.push_str(string.text()),
                     }
+                }
+                // Large text becomes a `pasted-text.txt` attachment (`foldPastedText`).
+                if loaded.is_empty() && errors.is_empty() && !plain.is_empty() {
+                    let bypass = paste_as_text.take(std::time::Instant::now());
+                    let snapshot = state.snapshot();
+                    let facts = paste_weak.read_with(cx, |this, cx| this.paste_fold_facts(cx));
+                    let Ok(facts) = facts else {
+                        return false;
+                    };
+                    let fold = crate::composer::pasted_text::fold_pasted_text(
+                        &crate::composer::pasted_text::PasteFoldInput {
+                            text: &plain,
+                            bypass_auto_attachment: bypass,
+                            is_literal: state.is_literal(),
+                            value_length: turin_shared::js_string::utf16_len(&snapshot.value),
+                            selection: (snapshot.selection_start, snapshot.selection_end),
+                            reserved_attachments: facts.reserved_attachments,
+                            staging_limit: facts.staging_limit,
+                            existing_file_names: &facts.file_names,
+                        },
+                    );
+                    return match fold {
+                        crate::composer::pasted_text::PasteFold::Inline => false,
+                        fold => {
+                            let weak = paste_weak.clone();
+                            window.defer(cx, move |window, cx| {
+                                weak.update(cx, |this, cx| {
+                                    this.apply_paste_fold(fold, plain, window, cx)
+                                })
+                                .ok();
+                            });
+                            true
+                        }
+                    };
                 }
                 let files: Vec<PickedFile> = loaded.iter().map(|(file, _)| file.clone()).collect();
                 // Files that could not be read still get their error shown.

@@ -36,6 +36,27 @@ pub struct MatchComposerThreadItemsInput<'a> {
     pub query: &'a str,
 }
 
+/// Threads the `@` picker may offer: this environment's unarchived threads other than the
+/// composer's own, newest first. The caller narrows them by the typed query.
+pub fn composer_thread_candidates<'a>(
+    shells: &'a [ComposerThreadCandidate],
+    environment_id: &EnvironmentId,
+    exclude_thread_id: Option<&ThreadId>,
+) -> Vec<&'a ComposerThreadCandidate> {
+    let mut candidates: Vec<&ComposerThreadCandidate> = shells
+        .iter()
+        .filter(|shell| {
+            shell.environment_id == *environment_id
+                && exclude_thread_id != Some(&shell.id)
+                && shell.archived_at.is_none()
+        })
+        .collect();
+    // `right.updatedAt.localeCompare(left.updatedAt)`: ISO timestamps, newest first. The sort is
+    // stable, like JS's.
+    candidates.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    candidates
+}
+
 /// Threads the `@` picker offers next to file paths. The agent can only read threads on its
 /// own server, so candidates stay within the composer's environment. A query is required:
 /// bare `@` stays a file picker.
@@ -46,21 +67,9 @@ pub fn match_composer_thread_items(
     if query.is_empty() {
         return Vec::new();
     }
-    let mut matches: Vec<&ComposerThreadCandidate> = input
-        .shells
-        .iter()
-        .filter(|shell| {
-            shell.environment_id == *input.environment_id
-                && input.exclude_thread_id != Some(&shell.id)
-                && shell.archived_at.is_none()
-                && shell.title.to_lowercase().contains(&query)
-        })
-        .collect();
-    // `right.updatedAt.localeCompare(left.updatedAt)`: ISO timestamps, newest first. The sort is
-    // stable, like JS's.
-    matches.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    matches
+    composer_thread_candidates(input.shells, input.environment_id, input.exclude_thread_id)
         .into_iter()
+        .filter(|shell| shell.title.to_lowercase().contains(&query))
         .take(COMPOSER_THREAD_RESULT_LIMIT)
         .map(|shell| ComposerThreadItem {
             id: format!("thread:{}:{}", shell.environment_id, shell.id),

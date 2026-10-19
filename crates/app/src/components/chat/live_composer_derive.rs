@@ -5,6 +5,8 @@
 use turin_contracts::orchestration_v2::{
     OrchestrationV2PlanArtifact, OrchestrationV2PlanArtifactStatus, OrchestrationV2TurnItem,
 };
+use std::sync::Arc;
+
 use turin_shared::proposed_plan_text::proposed_plan_title;
 
 use super::context_window::{
@@ -12,8 +14,96 @@ use super::context_window::{
     latest_provider_turn_token_usage,
 };
 use super::timeline::live_projection::active_run;
-use crate::composer::view_model::ContextWindowSnapshot;
+use crate::composer::command_items::PullRequestMeta;
+use crate::composer::view_model::{ContextWindowSnapshot, ThreadRef};
+use crate::state::client_state::ClientState;
+use crate::state::models::EnvironmentThreadShell;
+use crate::state::helpers::composer_thread_items::{
+    ComposerThreadCandidate, composer_thread_candidates,
+};
 use crate::state::thread_projection::ThreadProjection;
+use crate::state::models::PullRequestState;
+use turin_contracts::{EnvironmentId, ProjectId, ThreadId};
+
+/// The threads `@` may mention from this composer (`environmentThreadShells` through
+/// `matchComposerThreadItems`): the environment's unarchived threads but its own, newest first.
+pub fn mentionable_threads(
+    state: &ClientState,
+    environment_id: &EnvironmentId,
+    thread_id: &ThreadId,
+) -> Vec<ThreadRef> {
+    let Some(view) = state.shell_view.as_ref() else {
+        return Vec::new();
+    };
+    threads_to_mention(&view.threads, environment_id, thread_id)
+}
+
+fn threads_to_mention(
+    shells: &[Arc<EnvironmentThreadShell>],
+    environment_id: &EnvironmentId,
+    thread_id: &ThreadId,
+) -> Vec<ThreadRef> {
+    let candidates: Vec<ComposerThreadCandidate> = shells
+        .iter()
+        .map(|shell| ComposerThreadCandidate {
+            environment_id: shell.environment_id.clone(),
+            id: shell.id.clone(),
+            title: shell.title.clone(),
+            updated_at: shell.updated_at.clone(),
+            archived_at: shell.archived_at.clone(),
+        })
+        .collect();
+    composer_thread_candidates(&candidates, environment_id, Some(thread_id))
+        .into_iter()
+        .map(|shell| ThreadRef {
+            thread_id: shell.id.to_string(),
+            title: shell.title.clone(),
+        })
+        .collect()
+}
+
+/// The pull requests `#` may link (`composerPullRequestsFromLinks`): the ones this thread links,
+/// then the ones its project's other threads link, each once and only when its title is known.
+pub fn mentionable_pull_requests(
+    state: &ClientState,
+    project_id: &ProjectId,
+    thread_id: &ThreadId,
+) -> Vec<PullRequestMeta> {
+    let Some(view) = state.shell_view.as_ref() else {
+        return Vec::new();
+    };
+    pull_requests_to_mention(&view.threads, project_id, thread_id)
+}
+
+fn pull_requests_to_mention(
+    shells: &[Arc<EnvironmentThreadShell>],
+    project_id: &ProjectId,
+    thread_id: &ThreadId,
+) -> Vec<PullRequestMeta> {
+    let own = shells.iter().filter(|shell| &shell.id == thread_id);
+    let others = shells
+        .iter()
+        .filter(|shell| &shell.id != thread_id && &shell.project_id == project_id);
+    let mut seen = std::collections::HashSet::new();
+    own.chain(others)
+        .flat_map(|shell| shell.pull_requests.iter())
+        .filter(|link| !link.dismissed)
+        .filter_map(|link| {
+            let title = link.title.clone()?;
+            seen.insert((link.repository.to_lowercase(), link.number))
+                .then(|| PullRequestMeta {
+                    number: link.number,
+                    title,
+                    state: match link.state {
+                        Some(PullRequestState::Closed) => "closed",
+                        Some(PullRequestState::Merged) => "merged",
+                        _ => "open",
+                    }
+                    .to_owned(),
+                })
+        })
+        .collect()
+}
 
 /// The newest context usage the thread reports, as the meter shows it.
 pub fn context_window(projection: &ThreadProjection) -> Option<ContextWindowSnapshot> {
@@ -255,5 +345,78 @@ mod tests {
     fn a_thread_without_usage_has_no_meter() {
         let projection = projection("completed", Vec::new());
         assert!(context_window(&projection).is_none());
+    }
+
+    fn shell(id: &str, project: &str, title: &str, updated: &str) -> EnvironmentThreadShell {
+        let mut shell = EnvironmentThreadShell::new(
+            crate::state::local_environment_id(),
+            ThreadId::new(id).unwrap(),
+            ProjectId::new(project).unwrap(),
+            title,
+            updated,
+        );
+        shell.updated_at = updated.to_owned();
+        shell
+    }
+
+    fn link(
+        number: u64,
+        title: Option<&str>,
+        dismissed: bool,
+    ) -> crate::state::models::ThreadPullRequestLink {
+        crate::state::models::ThreadPullRequestLink {
+            repository: "acme/widgets".to_owned(),
+            number,
+            url: format!("https://github.com/acme/widgets/pull/{number}"),
+            title: title.map(str::to_owned),
+            state: Some(PullRequestState::Open),
+            is_draft: false,
+            dismissed,
+        }
+    }
+
+    #[test]
+    fn at_offers_the_other_unarchived_threads_newest_first() {
+        let mut archived = shell("gone", "p1", "Archived", "2026-03-01");
+        archived.archived_at = Some("2026-03-02".to_owned());
+        let shells: Vec<Arc<EnvironmentThreadShell>> = vec![
+            Arc::new(shell("self", "p1", "This one", "2026-04-01")),
+            Arc::new(shell("old", "p1", "Older", "2026-01-01")),
+            Arc::new(shell("new", "p2", "Newer", "2026-02-01")),
+            Arc::new(archived),
+        ];
+        let offered = threads_to_mention(
+            &shells,
+            &crate::state::local_environment_id(),
+            &ThreadId::new("self").unwrap(),
+        );
+        let ids: Vec<&str> = offered.iter().map(|t| t.thread_id.as_str()).collect();
+        assert_eq!(ids, ["new", "old"]);
+        assert_eq!(offered[0].title, "Newer");
+    }
+
+    #[test]
+    fn hash_offers_the_threads_linked_pull_requests_then_the_projects() {
+        let mut mine = shell("self", "p1", "Mine", "2026-01-01");
+        mine.pull_requests = vec![
+            link(12, Some("Fix login"), false),
+            link(13, None, false),
+            link(14, Some("Dismissed"), true),
+        ];
+        let mut sibling = shell("sibling", "p1", "Sibling", "2026-01-02");
+        sibling.pull_requests = vec![link(12, Some("Fix login"), false), link(20, Some("Docs"), false)];
+        let mut elsewhere = shell("other", "p2", "Other", "2026-01-03");
+        elsewhere.pull_requests = vec![link(30, Some("Elsewhere"), false)];
+        let shells: Vec<Arc<EnvironmentThreadShell>> =
+            vec![Arc::new(sibling), Arc::new(elsewhere), Arc::new(mine)];
+        let offered = pull_requests_to_mention(
+            &shells,
+            &ProjectId::new("p1").unwrap(),
+            &ThreadId::new("self").unwrap(),
+        );
+        let numbers: Vec<u64> = offered.iter().map(|pr| pr.number).collect();
+        assert_eq!(numbers, [12, 20]);
+        assert_eq!(offered[0].title, "Fix login");
+        assert_eq!(offered[0].state, "open");
     }
 }

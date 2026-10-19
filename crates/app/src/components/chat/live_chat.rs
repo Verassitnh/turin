@@ -623,6 +623,7 @@ impl LiveSource {
         cx: &App,
     ) -> ComposerViewModel {
         let overrides = self.overrides.borrow();
+        let client_state = self.handle.snapshot();
         let thread = &projection.thread;
         let running = active_run(&projection.runs).is_some();
         let (instance_id, model) = overrides.model.clone().unwrap_or_else(|| {
@@ -767,6 +768,16 @@ impl LiveSource {
             }),
             settings,
             shortcut_labels: composer_shortcut_labels(),
+            threads: super::live_composer_derive::mentionable_threads(
+                &client_state,
+                &local_environment_id(),
+                &self.thread_id,
+            ),
+            pull_requests: super::live_composer_derive::mentionable_pull_requests(
+                &client_state,
+                &projection.thread.project_id,
+                &self.thread_id,
+            ),
             ..ComposerViewModel::default()
         }
     }

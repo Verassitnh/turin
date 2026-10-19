@@ -33,7 +33,11 @@ def wait_response(request_id):
     # The CLI blocks a turn on a permission callback until the host answers.
     for line in sys.stdin:
         if line.strip() and json.loads(line).get("type") == "control_response":
-            if json.loads(line)["response"].get("request_id") == request_id:
+            response = json.loads(line)["response"]
+            if response.get("request_id") == request_id:
+                # Tests read how the host answered (allow/deny) from this log.
+                with open(ARGV + ".responses", "a") as log:
+                    log.write(json.dumps(response) + "\n")
                 return
 
 def drain():

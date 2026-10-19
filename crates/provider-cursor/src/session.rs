@@ -68,6 +68,9 @@ use crate::extensions::{self, AskDisposition, PlanDisposition};
 use crate::models::config_updates;
 use crate::permissions;
 use crate::settings::CursorSettings;
+use turin_acp::client_policy::{
+    AcpPermissionDisposition, AcpRuntimePolicy, PermissionToolCall, acp_permission_disposition,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CursorThread {
@@ -160,6 +163,9 @@ struct SessionInner {
     published: OnceLock<OrchestrationV2ProviderSession>,
     /// Latest context-window usage from the agent. Kept so a thread bound later still has it.
     context_usage: Mutex<Option<ThreadTokenUsageSnapshot>>,
+    /// The runtime policy of the turn in flight (upstream `context.input.runtimePolicy`):
+    /// permission requests are answered by `acp_permission_disposition` before a card opens.
+    runtime_policy: Mutex<Option<AcpRuntimePolicy>>,
 }
 
 impl Drop for SessionInner {
@@ -298,6 +304,7 @@ impl CursorSession {
             provider_session,
             published: OnceLock::new(),
             context_usage: Mutex::new(None),
+            runtime_policy: Mutex::new(None),
         });
         register_handlers(&client, &inner);
         Self {
@@ -1417,6 +1424,12 @@ impl ProviderSessionRuntime for CursorSession {
         self.apply_interaction_mode(input.runtime_policy.interaction_mode)
             .await
             .map_err(|error| map_error(kind.clone(), error))?;
+        *self.inner.runtime_policy.lock().expect("runtime policy") = Some(AcpRuntimePolicy {
+            runtime_mode: input.runtime_policy.runtime_mode,
+            cwd: input.runtime_policy.cwd.clone(),
+            approval_policy: input.runtime_policy.approval_policy.clone(),
+            sandbox_policy: input.runtime_policy.sandbox_policy.clone(),
+        });
         let native = native_session_id(&input.provider_thread).unwrap_or_default();
         let context = TurnContext {
             scope: Scope {
@@ -1606,6 +1619,42 @@ async fn handle_permission(
             return Ok(permissions::permission_result(
                 &permissions::answer_for_decision(&request, ProviderApprovalDecision::Accept),
             ));
+        }
+        // Upstream AcpAdapterV2: the thread's runtime policy answers first.
+        // Full access allows, approval-required denies what the sandbox forbids,
+        // and only an `ask` disposition opens a card.
+        // A question posed through the permission fallback is always shown.
+        let question = permissions::is_ask_question_fallback(&request);
+        let disposition = inner
+            .runtime_policy
+            .lock()
+            .expect("runtime policy")
+            .as_ref()
+            .filter(|_| !question)
+            .map(|policy| {
+                let tool_call: PermissionToolCall = params
+                    .get("toolCall")
+                    .cloned()
+                    .and_then(|tool_call| serde_json::from_value(tool_call).ok())
+                    .unwrap_or(PermissionToolCall {
+                        kind: None,
+                        locations: None,
+                    });
+                acp_permission_disposition(policy, &tool_call)
+            })
+            .unwrap_or(AcpPermissionDisposition::Ask);
+        match disposition {
+            AcpPermissionDisposition::Allow => {
+                return Ok(permissions::permission_result(
+                    &permissions::answer_for_decision(&request, ProviderApprovalDecision::Accept),
+                ));
+            }
+            AcpPermissionDisposition::Deny => {
+                return Ok(permissions::permission_result(
+                    &permissions::answer_for_decision(&request, ProviderApprovalDecision::Decline),
+                ));
+            }
+            AcpPermissionDisposition::Ask => {}
         }
         if permissions::is_ask_question_fallback(&request) {
             tracing::debug!(tool_call_id = ?request.tool_call_id, "cursor ask_question fallback permission");

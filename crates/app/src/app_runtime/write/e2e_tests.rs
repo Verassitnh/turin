@@ -16,6 +16,7 @@ use std::time::Duration;
 use serde_json::json;
 use turin_contracts::orchestration_v2::{
     OrchestrationV2ConversationMessageRole, OrchestrationV2DomainEvent, OrchestrationV2RunStatus,
+    OrchestrationV2RuntimeRequestKind,
 };
 use turin_contracts::settings::ServerSettings;
 use turin_orchestration::pipeline::event_sink::StreamOptions;
@@ -448,6 +449,18 @@ async fn an_approval_is_raised_answered_from_a_command_and_the_turn_finishes() {
                         continue;
                     };
                     answered = true;
+                    // Upstream refuses to settle a thread with a pending approval.
+                    let blocked = harness
+                        .commands
+                        .thread_command("thread.settle", &thread, json!({}))
+                        .await
+                        .expect_err("settle is blocked by the approval");
+                    assert!(
+                        blocked
+                            .message
+                            .contains("is waiting on an approval or question"),
+                        "{blocked}"
+                    );
                     harness
                         .commands
                         .respond_to_request(&thread, request.id.as_str(), Some("accept"), None)
@@ -2042,4 +2055,228 @@ async fn a_restart_dispatch_is_refused_by_a_provider_that_cannot_restart_a_turn(
     assert_eq!(projection.runs.len(), 1);
     assert_eq!(projection.runs[0].status, OrchestrationV2RunStatus::Running);
     harness.commands.stop_thread(&thread).await.expect("stop");
+}
+
+/// One line per permission callback the fake CLI saw answered.
+fn permission_responses(harness: &Harness) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(harness.cli.join("argv.log.responses"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("response json"))
+        .collect()
+}
+
+/// The argv of every session launch of the fake CLI, oldest first.
+fn session_launch_args(harness: &Harness) -> Vec<Vec<String>> {
+    std::fs::read_to_string(harness.cli.join("argv.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<Vec<String>>(line).expect("argv json"))
+        .filter(|argv| {
+            argv.iter()
+                .any(|arg| arg.starts_with("--session-id") || arg.starts_with("--resume"))
+        })
+        .collect()
+}
+
+fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    argv.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| argv.get(index + 1))
+        .map(String::as_str)
+}
+
+/// Runs one turn that triggers the fixture's `can_use_tool` request and
+/// returns the final run status plus whether an approval request surfaced.
+async fn run_pwd_turn(
+    harness: &Harness,
+    thread: &turin_contracts::ThreadId,
+    answer_approvals: bool,
+) -> (OrchestrationV2RunStatus, bool) {
+    use turin_contracts::orchestration_v2::OrchestrationV2RuntimeRequestStatus;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+    let after = harness
+        .stores
+        .sink
+        .latest_sequence(Some(thread.clone()))
+        .await
+        .expect("sequence");
+    let mut events = harness
+        .stores
+        .sink
+        .stream(StreamOptions {
+            thread_id: Some(thread.clone()),
+            after_sequence: Some(after),
+            event_type: None,
+        })
+        .await
+        .expect("stream");
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Run pwd".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    let orchestrator = harness.commands.runtime().orchestrator.clone();
+    let mut approval_raised = false;
+    let status = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(item) = events.next().await {
+            match item.expect("event").event {
+                OrchestrationV2DomainEvent::RuntimeRequestUpdated { payload, .. }
+                    if payload.kind != OrchestrationV2RuntimeRequestKind::UserInput =>
+                {
+                    approval_raised = true;
+                    if !answer_approvals {
+                        continue;
+                    }
+                    let records = orchestrator
+                        .get_thread_records(
+                            thread,
+                            &[RecordField::RuntimeRequests],
+                            &RecordFilter::default(),
+                        )
+                        .await
+                        .expect("records");
+                    if let Some(request) = records.runtime_requests.iter().find(|request| {
+                        request.status == OrchestrationV2RuntimeRequestStatus::Pending
+                    }) {
+                        harness
+                            .commands
+                            .respond_to_request(thread, request.id.as_str(), Some("accept"), None)
+                            .await
+                            .expect("respond");
+                    }
+                }
+                OrchestrationV2DomainEvent::RunUpdated { payload, .. } => match payload.status {
+                    OrchestrationV2RunStatus::Completed
+                    | OrchestrationV2RunStatus::Failed
+                    | OrchestrationV2RunStatus::Interrupted
+                    | OrchestrationV2RunStatus::Cancelled => return payload.status,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        panic!("event stream ended before the run settled");
+    })
+    .await
+    .expect("run settled in time");
+    (status, approval_raised)
+}
+
+// A thread in "Full access" never shows "Command approval": the CLI launches
+// with `bypassPermissions` and the host's permission callback allows the tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_access_launches_with_bypass_permissions_and_raises_no_approval() {
+    let harness = harness_with("claude_approval.ndjson").await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let thread = harness
+        .commands
+        .create_thread(CreateThread {
+            project_id,
+            title: "No approvals".into(),
+            model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+            runtime_mode: "full-access".into(),
+            interaction_mode: "default".into(),
+        })
+        .await
+        .expect("create thread");
+
+    let (status, approval_raised) = run_pwd_turn(&harness, &thread, false).await;
+    assert_eq!(status, OrchestrationV2RunStatus::Completed);
+    assert!(!approval_raised, "full access must not raise an approval");
+
+    let launches = session_launch_args(&harness);
+    assert_eq!(launches.len(), 1, "{launches:?}");
+    assert_eq!(
+        flag_value(&launches[0], "--permission-mode"),
+        Some("bypassPermissions")
+    );
+    assert!(
+        launches[0]
+            .iter()
+            .any(|arg| arg == "--allow-dangerously-skip-permissions"),
+        "{:?}",
+        launches[0]
+    );
+    let responses = permission_responses(&harness);
+    assert_eq!(responses.len(), 1, "{responses:?}");
+    assert_eq!(responses[0]["response"]["behavior"], "allow");
+}
+
+// Switching the composer to "Full access" mid-thread applies to the next
+// turn: Claude cannot switch mode in a live session, so the session restarts
+// with the new permission mode and stops asking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_runtime_mode_change_applies_to_the_next_turn() {
+    let harness = harness_with("claude_approval.ndjson").await;
+    let project_id = harness
+        .commands
+        .create_project("Fixture", harness.workspace.to_str().expect("utf-8"))
+        .await
+        .expect("create project");
+    let thread = harness
+        .commands
+        .create_thread(CreateThread {
+            project_id,
+            title: "Mode change".into(),
+            model_selection: json!({"instanceId": "claudeAgent", "model": "claude-sonnet-4-6"}),
+            runtime_mode: "approval-required".into(),
+            interaction_mode: "default".into(),
+        })
+        .await
+        .expect("create thread");
+
+    let (status, approval_raised) = run_pwd_turn(&harness, &thread, true).await;
+    assert_eq!(status, OrchestrationV2RunStatus::Completed);
+    assert!(approval_raised, "approval-required asks");
+    let first = session_launch_args(&harness);
+    assert_eq!(flag_value(&first[0], "--permission-mode"), Some("default"));
+
+    harness
+        .commands
+        .thread_command(
+            "thread.runtime-mode.set",
+            &thread,
+            json!({"runtimeMode": "full-access"}),
+        )
+        .await
+        .expect("set runtime mode");
+    let shell = harness
+        .stores
+        .projections
+        .get_thread_shell(&thread)
+        .await
+        .expect("read shell")
+        .expect("shell");
+    assert_eq!(
+        shell.runtime_mode,
+        turin_contracts::provider_policy::RuntimeMode::FullAccess
+    );
+
+    let (status, approval_raised) = run_pwd_turn(&harness, &thread, false).await;
+    assert_eq!(status, OrchestrationV2RunStatus::Completed);
+    assert!(!approval_raised, "full access must not raise an approval");
+    let launches = session_launch_args(&harness);
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    assert_eq!(
+        flag_value(&launches[1], "--permission-mode"),
+        Some("bypassPermissions")
+    );
+    let responses = permission_responses(&harness);
+    assert_eq!(responses.len(), 2, "{responses:?}");
+    assert_eq!(responses[1]["response"]["behavior"], "allow");
 }

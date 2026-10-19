@@ -23,6 +23,7 @@ use crate::{
         PlanBody, PlanState, apply_task_tool, project_plan, task_steps, todo_steps,
     },
     claude_query_options::{ClaudeQueryOptionsInput, make_claude_query_options},
+    claude_runtime_policy::claude_runtime_query_policy,
     claude_subagents::{SubagentRegistry, SubagentScope},
     claude_turn_items::{
         ItemOrdinals, RequestBody, ToolCall, TurnScope, assistant_artifacts, compaction_item,
@@ -68,7 +69,7 @@ use turin_contracts::{
         OrchestrationV2RuntimeRequestKind, OrchestrationV2RuntimeRequestStatus,
     },
     provider_instance::{ProviderDriverKind, ProviderInstanceId},
-    provider_policy::{ProviderApprovalDecision, ProviderInteractionMode},
+    provider_policy::ProviderApprovalDecision,
     provider_runtime::RuntimeTurnState,
     settings::ClaudeSettings,
 };
@@ -417,6 +418,7 @@ impl ProviderAdapterV2 for ClaudeProviderAdapter {
             home_directory: self.home_directory.clone(),
             usage_limit_hooks: self.usage_limit_hooks.clone(),
             selection: input.model_selection,
+            policy_key: None,
             claude: None,
             host_requests: None,
             active: None,
@@ -790,6 +792,8 @@ struct ClaudeActor {
     home_directory: String,
     usage_limit_hooks: Option<ClaudeUsageLimitHooks>,
     selection: ModelSelection,
+    /// Upstream `queryPolicyKey`: the live process serves one runtime policy.
+    policy_key: Option<String>,
     claude: Option<ClaudeAdapterV2>,
     host_requests: Option<mpsc::UnboundedReceiver<ClaudeHostRequest>>,
     active: Option<ActiveTurn>,
@@ -921,10 +925,15 @@ impl ClaudeActor {
             return Err(protocol_error("Claude provider turn is still active"));
         }
         let native = native_id(&input.provider_thread)?.to_owned();
+        // Upstream `claudeRuntimeQueryPolicyForRuntimePolicy`: the thread's
+        // runtime mode picks the permission mode and whether the host asks.
+        let query_policy = claude_runtime_query_policy(&input.runtime_policy);
+        let policy_key = query_policy.key();
         let replace = self
             .claude
             .as_ref()
-            .is_none_or(|claude| claude.session_id() != Some(native.as_str()));
+            .is_none_or(|claude| claude.session_id() != Some(native.as_str()))
+            || self.policy_key.as_deref() != Some(policy_key.as_str());
         if replace {
             if let Some(mut prior) = self.claude.take() {
                 prior
@@ -950,25 +959,22 @@ impl ClaudeActor {
                 settings: Some(&self.settings),
                 sdk_settings: None,
                 environment: self.environment.clone(),
-                permission_mode: Some(
-                    if input.runtime_policy.interaction_mode == ProviderInteractionMode::Plan {
-                        "plan"
-                    } else {
-                        "default"
-                    },
-                ),
-                tools: None,
-                allowed_tools: vec![],
+                permission_mode: Some(query_policy.permission_mode),
+                allow_dangerously_skip_permissions: query_policy.allow_dangerously_skip_permissions,
+                tools: query_policy.tools.clone(),
+                allowed_tools: query_policy.allowed_tools.clone().unwrap_or_default(),
                 disallowed_tools: vec![],
                 runtime_instructions: &self.runtime_instructions,
             });
             // The subagents running now belong to the process being replaced.
             self.subagents.begin_query_process();
-            let mut claude = ClaudeAdapterV2::open(options, true)
-                .await
-                .map_err(|e| protocol_error(e.to_string()))?;
+            let mut claude =
+                ClaudeAdapterV2::open(options, query_policy.install_permission_callback)
+                    .await
+                    .map_err(|e| protocol_error(e.to_string()))?;
             self.host_requests = claude.take_requests();
             self.claude = Some(claude);
+            self.policy_key = Some(policy_key);
             // The echo mode is per live query.
             self.echo_mode = PromptEchoMode::Unknown;
             self.selection = input.model_selection.clone();

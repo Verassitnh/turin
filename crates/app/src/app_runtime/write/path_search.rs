@@ -6,7 +6,8 @@
 //! Content search (grep) is not supported and says so.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use turin_git::process::ProcessRunner;
@@ -43,8 +44,25 @@ impl FileFinderFactory for ListedFinderFactory {
         &self,
         options: &FileFinderCreateOptions,
     ) -> Result<FinderResult<Arc<dyn FileFinderEngine>>, String> {
-        let root = PathBuf::from(&options.base_path);
-        let files = list_files(&root);
+        Ok(FinderResult::Ok(Arc::new(ListedFinder::new(
+            PathBuf::from(&options.base_path),
+        ))))
+    }
+}
+
+/// A listing is re-read once it is this old and a search arrives, so files
+/// created by the agent or outside the app turn up while the user types.
+const LISTING_STALE_AFTER: Duration = Duration::from_secs(2);
+
+struct Listing {
+    files: Vec<String>,
+    directories: Vec<String>,
+    listed_at: Instant,
+}
+
+impl Listing {
+    fn scan(root: &Path) -> Self {
+        let files = list_files(root);
         let mut directories: Vec<String> = files
             .iter()
             .flat_map(|file| {
@@ -59,10 +77,11 @@ impl FileFinderFactory for ListedFinderFactory {
             .collect();
         directories.sort();
         directories.dedup();
-        Ok(FinderResult::Ok(Arc::new(ListedFinder {
+        Self {
             files,
             directories,
-        })))
+            listed_at: Instant::now(),
+        }
     }
 }
 
@@ -122,8 +141,33 @@ fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
 }
 
 struct ListedFinder {
-    files: Vec<String>,
-    directories: Vec<String>,
+    root: PathBuf,
+    listing: Mutex<Arc<Listing>>,
+    stale_after: Duration,
+}
+
+impl ListedFinder {
+    fn new(root: PathBuf) -> Self {
+        Self::with_stale_after(root, LISTING_STALE_AFTER)
+    }
+
+    fn with_stale_after(root: PathBuf, stale_after: Duration) -> Self {
+        let listing = Mutex::new(Arc::new(Listing::scan(&root)));
+        Self {
+            root,
+            listing,
+            stale_after,
+        }
+    }
+
+    /// The listing to search, re-read first when it has gone stale.
+    fn current(&self) -> Arc<Listing> {
+        let mut listing = self.listing.lock().expect("listing lock");
+        if listing.listed_at.elapsed() >= self.stale_after {
+            *listing = Arc::new(Listing::scan(&self.root));
+        }
+        listing.clone()
+    }
 }
 
 /// Lower is better; `None` when the query is not a subsequence of the path.
@@ -182,6 +226,7 @@ impl FileFinderEngine for ListedFinder {
     }
 
     fn scan_files(&self) -> Result<FinderResult<()>, String> {
+        *self.listing.lock().expect("listing lock") = Arc::new(Listing::scan(&self.root));
         Ok(FinderResult::Ok(()))
     }
 
@@ -191,8 +236,9 @@ impl FileFinderEngine for ListedFinder {
         page_size: u64,
     ) -> Result<FinderResult<MixedSearchResult>, String> {
         let limit = page_size as usize;
-        let (files, file_total) = ranked(&self.files, query, limit);
-        let (directories, directory_total) = ranked(&self.directories, query, limit);
+        let listing = self.current();
+        let (files, file_total) = ranked(&listing.files, query, limit);
+        let (directories, directory_total) = ranked(&listing.directories, query, limit);
         let mut items: Vec<(u8, usize, MixedItem)> = files
             .into_iter()
             .map(|path| {
@@ -229,7 +275,8 @@ impl FileFinderEngine for ListedFinder {
         query: &str,
         page_size: u64,
     ) -> Result<FinderResult<FileSearchResult>, String> {
-        let (files, total_matched) = ranked(&self.files, query, page_size as usize);
+        let listing = self.current();
+        let (files, total_matched) = ranked(&listing.files, query, page_size as usize);
         Ok(FinderResult::Ok(FileSearchResult {
             items: files
                 .into_iter()
@@ -246,7 +293,8 @@ impl FileFinderEngine for ListedFinder {
         query: &str,
         page_size: u64,
     ) -> Result<FinderResult<DirSearchResult>, String> {
-        let (directories, total_matched) = ranked(&self.directories, query, page_size as usize);
+        let listing = self.current();
+        let (directories, total_matched) = ranked(&listing.directories, query, page_size as usize);
         Ok(FinderResult::Ok(DirSearchResult {
             items: directories
                 .into_iter()
@@ -278,6 +326,42 @@ mod tests {
         assert!(rank("src/main.rs", "main") < rank("src/domain/x.rs", "main"));
         assert!(rank("src/domain/x.rs", "main") < rank("src/m/a/i/n.rs", "main"));
         assert!(rank("README.md", "xyz").is_none());
+    }
+
+    fn searched_paths(finder: &ListedFinder, query: &str) -> Vec<String> {
+        let Ok(FinderResult::Ok(result)) = finder.mixed_search(query, 50) else {
+            panic!("search failed");
+        };
+        result
+            .items
+            .into_iter()
+            .map(|item| match item {
+                MixedItem::File(file) => file.relative_path,
+                MixedItem::Directory(dir) => dir.relative_path,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn files_created_after_the_first_search_are_found() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::write(dir.path().join("old.rs"), "").expect("file");
+        // Every search sees a stale listing, as one after the 2s window.
+        let finder = ListedFinder::with_stale_after(dir.path().to_path_buf(), Duration::ZERO);
+        assert_eq!(searched_paths(&finder, "new"), Vec::<String>::new());
+        std::fs::write(dir.path().join("newfile.rs"), "").expect("file");
+        assert_eq!(searched_paths(&finder, "newfile"), vec!["newfile.rs"]);
+    }
+
+    #[test]
+    fn a_fresh_listing_is_not_re_read_until_asked_to_scan() {
+        let dir = tempfile::tempdir().expect("dir");
+        let finder =
+            ListedFinder::with_stale_after(dir.path().to_path_buf(), Duration::from_secs(3600));
+        std::fs::write(dir.path().join("late.rs"), "").expect("file");
+        assert!(searched_paths(&finder, "late").is_empty());
+        finder.scan_files().expect("scan");
+        assert_eq!(searched_paths(&finder, "late"), vec!["late.rs"]);
     }
 
     #[test]

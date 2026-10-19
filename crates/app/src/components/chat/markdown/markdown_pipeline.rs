@@ -919,6 +919,14 @@ mod tests {
     }
 
     #[test]
+    fn keeps_thread_links_as_links_for_the_thread_link_chip() {
+        let doc = parse_chat_markdown("see [Auth work](t3-thread://v1/thread-1) now", false);
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "see Auth work now");
+        assert_eq!(inlines.links, vec!["t3-thread://v1/thread-1".to_string()]);
+    }
+
+    #[test]
     fn marks_inline_code_and_links() {
         let doc = parse_chat_markdown("see `a  b` and [docs](https://x.dev)", false);
         let inlines = para(&doc);

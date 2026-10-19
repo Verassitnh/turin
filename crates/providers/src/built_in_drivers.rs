@@ -53,7 +53,7 @@ pub fn built_in_drivers(
     let mut drivers: Vec<Arc<dyn ProviderDriver>> = Vec::new();
     drivers.extend(build_slot(slots.codex, "codex", &host));
     drivers.push(Arc::new(ClaudeDriver::new(Arc::clone(&host))));
-    drivers.push(Arc::new(CursorDriver::new()));
+    drivers.push(Arc::new(CursorDriver::with_host(Arc::clone(&host))));
     drivers.extend(build_slot(slots.opencode, "opencode", &host));
     drivers
 }
@@ -209,6 +209,24 @@ mod tests {
         assert_eq!(
             kinds(&built_in_usage_drivers(&drivers)),
             ["claudeAgent", "codex", "opencode", "cursor"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_built_in_claude_and_cursor_drivers_expose_a_usage_reader() {
+        // The usage page reads `driver.usage()`; a `None` here leaves the provider out of it.
+        let dir = tempfile::tempdir().unwrap();
+        let drivers = built_in_drivers(host(dir.path()), BuiltInDriverSlots::default());
+        let readers: Vec<(String, bool)> = drivers
+            .iter()
+            .map(|driver| (driver.driver_kind().to_string(), driver.usage().is_some()))
+            .collect();
+        assert_eq!(
+            readers,
+            [
+                ("claudeAgent".to_owned(), true),
+                ("cursor".to_owned(), true)
+            ]
         );
     }
 

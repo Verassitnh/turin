@@ -239,6 +239,51 @@ fn push_run_ranges<'a>(
     }
 }
 
+/// One occurrence of the query inside one rendered text flow, as byte offsets into that
+/// flow's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowFindRange {
+    pub range: std::ops::Range<usize>,
+    /// Zero-based occurrence within the message (`ThreadFindRange::occurrence`).
+    pub occurrence: u64,
+}
+
+/// The occurrences of `query` in one text flow (a paragraph, a heading, a table cell, a
+/// code block), numbered from `first_occurrence`. The DOM painter walks text nodes; a
+/// native flow is already one run of rendered text, so the same
+/// `find_thread_search_occurrences` scan gives the ranges, and the caller carries the
+/// running count across the message's flows in document order. `query` is the trimmed
+/// query upstream searches with.
+pub fn plan_flow_find_ranges(text: &str, query: &str, first_occurrence: u64) -> Vec<FlowFindRange> {
+    if text.is_empty() || query.is_empty() {
+        return Vec::new();
+    }
+    let query_len = utf16_len(query);
+    let offsets = find_thread_search_occurrences(text, query);
+    let mut ranges = Vec::with_capacity(offsets.len());
+    // Offsets ascend, so one forward walk maps every UTF-16 offset to its byte offset.
+    let mut chars = text.char_indices().peekable();
+    let (mut byte, mut utf16) = (0usize, 0usize);
+    let mut to_byte = |target: usize| -> Option<usize> {
+        while utf16 < target {
+            let (index, ch) = chars.next()?;
+            byte = index + ch.len_utf8();
+            utf16 += ch.len_utf16();
+        }
+        (utf16 == target).then_some(byte)
+    };
+    for (position, offset) in offsets.into_iter().enumerate() {
+        let (Some(start), Some(end)) = (to_byte(offset), to_byte(offset + query_len)) else {
+            continue;
+        };
+        ranges.push(FlowFindRange {
+            range: start..end,
+            occurrence: first_occurrence + position as u64,
+        });
+    }
+    ranges
+}
+
 /// One ancestor that folds text: `hidden` (the `hidden` attribute) or
 /// `[data-thread-find-fold]` (clipped body). Innermost first.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -439,5 +484,76 @@ mod tests {
         // Past the clip bottom: both hide it, innermost first.
         assert_eq!(folds_hiding(150.0, &ancestors), vec![0, 1]);
         assert!(folds_hiding(50.0, &ancestors[..1]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod flow_range_tests {
+    use super::*;
+
+    fn ranges(text: &str, query: &str, first: u64) -> Vec<(std::ops::Range<usize>, u64)> {
+        plan_flow_find_ranges(text, query, first)
+            .into_iter()
+            .map(|found| (found.range, found.occurrence))
+            .collect()
+    }
+
+    #[test]
+    fn numbers_each_case_insensitive_occurrence_from_the_running_count() {
+        assert_eq!(
+            ranges("Foo foo FOO", "foo", 0),
+            vec![(0..3, 0), (4..7, 1), (8..11, 2)]
+        );
+        // The second flow of a message continues the first one's count.
+        assert_eq!(ranges("a foo", "foo", 3), vec![(2..5, 3)]);
+    }
+
+    #[test]
+    fn matches_do_not_overlap() {
+        assert_eq!(ranges("aaaa", "aa", 0), vec![(0..2, 0), (2..4, 1)]);
+    }
+
+    #[test]
+    fn maps_utf16_offsets_to_bytes_across_multibyte_text() {
+        // "é" is 2 bytes and 1 UTF-16 unit; "😀" is 4 bytes and 2 units.
+        let text = "é😀 needle é needle";
+        let found = ranges(text, "needle", 0);
+        assert_eq!(found.len(), 2);
+        for (range, _) in &found {
+            assert_eq!(&text[range.clone()], "needle");
+        }
+        assert_eq!(found[0].0, 7..13);
+    }
+
+    #[test]
+    fn an_empty_query_or_text_finds_nothing() {
+        assert!(plan_flow_find_ranges("text", "", 0).is_empty());
+        assert!(plan_flow_find_ranges("", "text", 0).is_empty());
+        assert!(plan_flow_find_ranges("text", "absent", 0).is_empty());
+    }
+
+    #[test]
+    fn matches_the_dom_painters_occurrence_numbering_for_one_run() {
+        // `collect_thread_find_ranges` over one text node and the flow plan agree on count.
+        let root = FindNode::Element {
+            tag: "p".to_owned(),
+            ignored: false,
+            children: vec![FindNode::Text("one two one".to_owned())],
+        };
+        let dom = collect_thread_find_ranges(
+            &[FindScope {
+                row_id: "row".to_owned(),
+                root,
+            }],
+            "one",
+        );
+        let flow = plan_flow_find_ranges("one two one", "one", 0);
+        assert_eq!(dom.len(), flow.len());
+        assert_eq!(
+            dom.iter().map(|range| range.occurrence).collect::<Vec<_>>(),
+            flow.iter()
+                .map(|range| range.occurrence)
+                .collect::<Vec<_>>()
+        );
     }
 }

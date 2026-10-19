@@ -473,6 +473,26 @@ impl Commands {
             .map_err(|error| CommandError::from_error(&error))
     }
 
+    /// `searchThreadStream`: the frames of one find-in-thread search. An initial search
+    /// yields an early frame (`complete: false`) before the final one; the caller shows
+    /// each as it arrives.
+    pub async fn search_thread_stream(
+        &self,
+        input: turin_contracts::orchestration_v2::OrchestrationV2SearchThreadInput,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            turin_contracts::orchestration_v2::OrchestrationV2SearchThreadResult,
+        >,
+        CommandError,
+    > {
+        self.runtime
+            .orchestrator
+            .search_thread_stream(&input)
+            .await
+            .map_err(|error| CommandError::from_error(&error))
+    }
+
     /// Any thread command that is just `{type, commandId, threadId, ..extra}`
     /// (archive, delete, pin, ...).
     pub async fn thread_command(

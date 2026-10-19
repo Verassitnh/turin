@@ -22,11 +22,13 @@ use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, WeakEntity};
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use turin_contracts::ThreadId;
+use turin_contracts::settings::UnifiedSettings;
 
 use super::composer_pending_bridge::{
     PendingSubmitPlan, apply_composer_prompt_to_session, message_mode_pending_input,
     pending_answer_for_message_input, sync_pending_input_session,
 };
+use super::markdown_thread_link::{ThreadLinkLookup, install_thread_link_lookup};
 use super::timeline::live_projection::{decision_wire, snapshot_from_projection};
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
@@ -41,6 +43,8 @@ use crate::composer::view_model::{
     ComposerSource, ComposerStore, ComposerViewModel, DraftRestore, InteractionMode, PathEntry,
     QueueState, QueuedRun, RuntimeMode, SendRequest, SessionPhase,
 };
+use crate::model_selection::apply_app_model_options;
+use crate::settings_logic::use_settings::{get_client_settings, merge_environment_settings};
 use crate::state::client_state::ClientState;
 use crate::state::local_environment_id;
 use crate::state::models::scoped_thread_key;
@@ -90,6 +94,9 @@ struct LiveSource {
     timeline: WeakEntity<ThreadTimelineStore>,
     composer: WeakEntity<ComposerStore>,
     overrides: RefCell<Overrides>,
+    /// The merged settings the model options read (`modelSelection.ts`); `None`
+    /// until the first read answers, when the catalogue shows as the registry reports it.
+    settings: RefCell<Option<UnifiedSettings>>,
     me: std::sync::Weak<LiveSource>,
 }
 
@@ -119,6 +126,10 @@ impl LiveChat {
     ) -> Self {
         let handle = client.read(cx).handle().clone();
         handle.open_thread(thread_id.clone());
+        // `MarkdownThreadLink` reads the shell index through this.
+        if !cx.has_global::<ThreadLinkLookup>() {
+            install_thread_link_lookup(client.clone(), cx);
+        }
         let timeline = cx.new(|_| ThreadTimelineStore::new(Default::default()));
         let composer = cx.new(|_| ComposerStore::new(ComposerViewModel::default()));
         // `ComposerSource` / `TimelineSource` are `Arc<dyn _>` seams used on the
@@ -132,6 +143,7 @@ impl LiveChat {
             timeline: timeline.downgrade(),
             composer: composer.downgrade(),
             overrides: RefCell::default(),
+            settings: RefCell::default(),
         });
         timeline.update(cx, |store, _| store.set_source(source.clone()));
         composer.update(cx, |store, _| store.set_source(source.clone()));
@@ -142,12 +154,36 @@ impl LiveChat {
         });
         let state = client.read(cx).state().clone();
         source.refresh(&state, cx);
-        // The provider catalogue changes when the registry refreshes.
+        // The provider catalogue changes when the registry refreshes; a settings
+        // change (hidden models, custom models) re-syncs the registry, so the same
+        // signal re-reads the settings the model options depend on.
         let mut providers = source.bus.providers();
         let weak = source.me.clone();
         let client = client.clone();
         cx.spawn(async move |_, cx| {
-            while providers.changed().await.is_ok() {
+            loop {
+                let Some(read) = cx.update(|cx| {
+                    let source = weak.upgrade()?;
+                    Some(source.bus.task(
+                        cx,
+                        |commands| async move { commands.server_settings().await },
+                    ))
+                }) else {
+                    break;
+                };
+                if let Ok(server) = read.await {
+                    cx.update(|cx| {
+                        if let Some(source) = weak.upgrade() {
+                            *source.settings.borrow_mut() =
+                                Some(merge_environment_settings(server, get_client_settings()));
+                            let state = client.read(cx).state().clone();
+                            source.refresh(&state, cx);
+                        }
+                    });
+                }
+                if providers.changed().await.is_err() {
+                    break;
+                }
                 let alive = cx.update(|cx| {
                     let Some(source) = weak.upgrade() else {
                         return false;
@@ -269,7 +305,13 @@ impl LiveSource {
                 thread.model_selection.model.to_string(),
             )
         });
-        let providers = provider_entries(&self.bus.providers().borrow());
+        let mut providers = provider_entries(&self.bus.providers().borrow());
+        if let Some(settings) = self.settings.borrow().as_ref() {
+            for entry in &mut providers {
+                let selected = (entry.instance_id == instance_id).then_some(model.as_str());
+                apply_app_model_options(settings, entry, selected);
+            }
+        }
         ComposerViewModel {
             thread_key: scoped_thread_key(&local_environment_id(), &self.thread_id),
             phase: if running {

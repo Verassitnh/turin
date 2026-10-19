@@ -200,10 +200,13 @@ impl PaletteBackend for LivePaletteBackend {
         })
     }
 
-    /// Needs `ProviderSessionManager::close` behind a command; not wired.
-    fn restart_agent_session(&self, _thread: ThreadRef, _cx: &mut App) -> Task<Result<(), String>> {
-        Task::ready(Err(
-            "Restarting the agent session is not wired yet.".to_owned()
-        ))
+    /// `CommandPalette.tsx` "Restart agent session": stops the thread's provider
+    /// sessions, then rescans its workspace so skills and slash commands reload.
+    fn restart_agent_session(&self, thread: ThreadRef, cx: &mut App) -> Task<Result<(), String>> {
+        let thread_id = thread.thread_id;
+        let task = self.bus.task(cx, move |commands| async move {
+            commands.restart_agent_session(&thread_id).await
+        });
+        cx.spawn(async move |_| task.await.map_err(|error| error.message))
     }
 }

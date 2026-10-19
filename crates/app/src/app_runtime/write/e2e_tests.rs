@@ -1843,3 +1843,115 @@ async fn a_named_project_is_created_under_the_managed_projects_folder() {
     titles.sort();
     assert_eq!(titles, ["Pinball Stats", "Pinball Stats"]);
 }
+
+/// How many agent sessions the fake CLI served (each launch appends to `argv.log`; version and
+/// capability probes are not sessions).
+fn cli_launches(harness: &Harness) -> usize {
+    std::fs::read_to_string(harness._dirs[2].path().join("argv.log"))
+        .map(|log| {
+            log.lines()
+                .filter(|line| line.contains("--permission-prompt-tool"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restarting_the_agent_session_stops_the_process_and_the_next_message_starts_a_fresh_one() {
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let client = open_client(&harness, &thread).await;
+    let target = thread_id(thread.as_str());
+    let send = |text: &str| SendMessage {
+        thread_id: thread.clone(),
+        text: text.into(),
+        attachments: vec![],
+        model_selection: None,
+        delivery: Delivery::StartImmediately,
+        title_seed: None,
+        source_plan_id: None,
+    };
+
+    harness
+        .commands
+        .send_message(send("Respond with exactly: first fixture turn complete"))
+        .await
+        .expect("first send");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the first turn", |state| {
+            state.thread(&target).is_some_and(|entry| {
+                entry.state.data.as_ref().is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+                })
+            })
+        }),
+    )
+    .await
+    .expect("the first turn completes in time");
+    assert_eq!(cli_launches(&harness), 1);
+    assert!(
+        !projection_of(&client.snapshot(), &thread)
+            .provider_sessions
+            .is_empty()
+    );
+
+    // The palette's "Restart agent session".
+    harness
+        .commands
+        .restart_agent_session(&thread)
+        .await
+        .expect("restart");
+    let state = tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the session to detach", |state| {
+            state.thread(&target).is_some_and(|entry| {
+                entry
+                    .state
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.provider_sessions.is_empty())
+            })
+        }),
+    )
+    .await
+    .expect("the session detaches in time");
+    // The conversation survives the restart.
+    assert!(projection_of(&state, &thread).messages.len() >= 2);
+
+    harness
+        .commands
+        .send_message(send("Respond with exactly: second fixture turn complete"))
+        .await
+        .expect("second send");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the second turn", |state| {
+            state.thread(&target).is_some_and(|entry| {
+                entry.state.data.as_ref().is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .filter(|run| run.status == OrchestrationV2RunStatus::Completed)
+                        .count()
+                        == 2
+                })
+            })
+        }),
+    )
+    .await
+    .expect("the second turn completes in time");
+    assert_eq!(
+        cli_launches(&harness),
+        2,
+        "the next message spawned a fresh CLI"
+    );
+
+    // A thread that does not exist is reported, not swallowed.
+    let missing = harness
+        .commands
+        .restart_agent_session(&turin_contracts::ThreadId::new("no-such-thread").expect("id"))
+        .await;
+    assert!(missing.is_err());
+}

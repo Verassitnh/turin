@@ -570,6 +570,49 @@ impl Commands {
         Ok(())
     }
 
+    /// The palette's "Restart agent session" (`CommandPalette.tsx`): stops the
+    /// thread's provider sessions (the conversation is kept; the next message
+    /// spawns a fresh process that resumes it), then rescans the thread's
+    /// workspace with `fresh: true` so skills and slash commands reload.
+    pub async fn restart_agent_session(&self, thread_id: &ThreadId) -> Result<(), CommandError> {
+        let shell = self
+            .runtime
+            .stores
+            .projections
+            .get_thread_shell(thread_id)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?
+            .ok_or_else(|| CommandError::new(format!("Thread {thread_id} does not exist.")))?;
+        self.detach_thread_sessions(thread_id).await?;
+        let project = self
+            .runtime
+            .stores
+            .projects
+            .get(shell.project_id.clone(), false)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let cwd = shell
+            .worktree_path
+            .as_ref()
+            .map(|path| path.as_str().to_owned())
+            .or_else(|| project.map(|row| row.workspace_root));
+        let Some(cwd) = cwd else {
+            return Ok(());
+        };
+        self.runtime
+            .providers
+            .registry
+            .refresh_workspace_snapshot(
+                turin_providers::provider_registry::RefreshWorkspaceSnapshotInput {
+                    instance_id: shell.provider_instance_id.clone(),
+                    cwd,
+                    fresh: true,
+                },
+            )
+            .await;
+        Ok(())
+    }
+
     /// The lineage panel's per-row stop (`interruptTurn`): a provider-native
     /// child stops through `subagent.stop` on the parent; an app-owned child
     /// is its own thread, so its active run is interrupted.

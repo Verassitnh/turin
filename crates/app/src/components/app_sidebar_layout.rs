@@ -218,6 +218,8 @@ pub struct AppSidebarLayout {
     pull_requests: Option<PullRequestsRoute>,
     pr_preferences: crate::hooks::use_local_storage::SharedLocalStorage,
     notifications: ThreadNotificationCoordinator,
+    /// Whether this window is the active one (the dock badge hides while it is).
+    window_active: bool,
     quit_handler: QuitShortcutHandler,
     quit_clock_start: std::time::Instant,
     quit_clock_generation: u64,
@@ -341,10 +343,11 @@ impl AppSidebarLayout {
             });
         }
         let store_watch = cx.observe_global::<ClientStoreGlobal>(|this, cx| {
-            this.sync_notifications(cx);
+            this.sync_notifications(this.window_active, cx);
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            this.window_active = window.is_window_active();
+            if this.window_active {
                 clear_notification_badge_on_focus();
                 this.notifications.clear();
                 this.reload_client_settings(cx);
@@ -356,6 +359,9 @@ impl AppSidebarLayout {
         let anchored_toast_viewport = crate::ui::toast::anchored_toasts(cx);
         let draft_host = cx.new(|_| crate::shell::composer_draft_host::ComposerDraftHost::new());
         crate::shell::composer_draft_host::ComposerDraftHost::register(draft_host.clone(), cx);
+        if let Some(live) = live.as_ref() {
+            crate::shell::startup_failure::start(live.bus.clone(), cx);
+        }
         let _keybindings_warning = live
             .as_ref()
             .map(|live| crate::shell::keybindings_warning::start(live.bus.clone(), cx));
@@ -384,6 +390,7 @@ impl AppSidebarLayout {
             pull_requests: None,
             pr_preferences: MemoryLocalStorage::shared(),
             notifications: ThreadNotificationCoordinator::new(),
+            window_active: window.is_window_active(),
             quit_handler: QuitShortcutHandler::new(cfg!(target_os = "macos")),
             quit_clock_start: std::time::Instant::now(),
             quit_clock_generation: 0,
@@ -436,7 +443,12 @@ impl AppSidebarLayout {
         crate::shell::live_settings::settings_window_options(cx)
     }
 
-    fn open_live_settings(&mut self, page: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_live_settings(
+        &mut self,
+        page: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(live) = self.live.clone() else {
             window.push_notification(Notification::info("Settings is not available yet."), cx);
             return;
@@ -1018,7 +1030,7 @@ impl AppSidebarLayout {
         }
     }
 
-    fn sync_notifications(&mut self, cx: &App) {
+    fn sync_notifications(&mut self, focused: bool, cx: &App) {
         let environment_ids = vec![crate::state::local_environment_id()];
         let snapshot = cx.global::<ClientStoreGlobal>().0.read(cx).state().clone();
         poll_environment_notifications(
@@ -1026,6 +1038,7 @@ impl AppSidebarLayout {
             &environment_ids,
             Some(snapshot.as_ref()),
             &self.client_settings,
+            focused,
         );
     }
 
@@ -1301,7 +1314,7 @@ impl AppSidebarLayout {
         // Saved contrast and fonts, at boot and when the file changes.
         crate::settings::mock_source::apply_client_appearance(&settings, cx);
         self.client_settings = settings;
-        self.sync_notifications(cx);
+        self.sync_notifications(self.window_active, cx);
         cx.notify();
     }
 

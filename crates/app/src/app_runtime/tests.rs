@@ -77,6 +77,40 @@ async fn seeded_database_fills_the_sidebar() {
 }
 
 #[tokio::test]
+async fn a_find_match_in_older_history_pages_through_its_entry() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let stores = Arc::new(Stores::open(dir.path()).await.expect("open"));
+    dev_seed::seed(&stores.sink).await.expect("seed");
+    let handle = start(stores);
+    wait_for(&handle, "the shell", |state| state.shell_view.is_some()).await;
+    handle.open_thread(thread_id(ATLAS_LOGIN));
+    wait_for(&handle, "the windowed thread", |state| {
+        visible_items(state, ATLAS_LOGIN) == Some(22)
+    })
+    .await;
+
+    // The first turn's user message is older than the window.
+    handle.load_earlier_through(
+        thread_id(ATLAS_LOGIN),
+        format!("message-{ATLAS_LOGIN}-1"),
+    );
+    let state = wait_for(&handle, "the page through the match", |state| {
+        visible_items(state, ATLAS_LOGIN) == Some(26)
+    })
+    .await;
+    let data = state
+        .thread(&thread_id(ATLAS_LOGIN))
+        .and_then(|entry| entry.state.data.clone())
+        .expect("thread");
+    assert!(
+        data.visible_turn_items
+            .iter()
+            .any(|row| format!("{row:?}").contains(&format!("message-{ATLAS_LOGIN}-1"))),
+        "the match's entry is loaded"
+    );
+}
+
+#[tokio::test]
 async fn opening_a_thread_shows_its_bounded_window_and_pages_older_history() {
     let dir = tempfile::tempdir().expect("temp dir");
     let stores = Arc::new(Stores::open(dir.path()).await.expect("open"));

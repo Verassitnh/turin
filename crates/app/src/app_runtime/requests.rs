@@ -42,12 +42,17 @@ pub fn handle(
                 feed.abort();
             }
         }
-        ClientStateRequest::LoadEarlier { thread_id, cursor } => {
+        ClientStateRequest::LoadEarlier {
+            thread_id,
+            cursor,
+            through_entry_id,
+        } => {
             tasks.spawn(load_earlier(
                 Arc::clone(stores),
                 sender.clone(),
                 thread_id,
                 cursor,
+                through_entry_id,
             ));
         }
     }
@@ -59,10 +64,11 @@ async fn load_earlier(
     sender: ClientStateSender,
     thread_id: ThreadId,
     cursor: String,
+    through_entry_id: Option<String>,
 ) {
     match stores
         .projections
-        .get_thread_history_page(&thread_id, &cursor, None, false)
+        .get_thread_history_page(&thread_id, &cursor, through_entry_id.as_deref(), false)
         .await
     {
         Ok(page) => sender.send(ClientStateEvent::ThreadHistoryPage {

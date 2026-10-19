@@ -1758,6 +1758,11 @@ impl TimelineSource for LiveSource {
         self.handle.load_earlier(self.thread_id.clone());
     }
 
+    fn load_earlier_history_through(&self, entry_id: &str, _cx: &mut App) {
+        self.handle
+            .load_earlier_through(self.thread_id.clone(), entry_id.to_owned());
+    }
+
     fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, cx: &mut App) {
         crate::diff::request_open_turn_diff(run_id, file_path, cx);
     }

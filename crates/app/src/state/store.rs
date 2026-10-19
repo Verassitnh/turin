@@ -34,7 +34,7 @@ enum Input {
     Event(ClientStateEvent),
     OpenThread(ThreadId),
     CloseThread(ThreadId),
-    LoadEarlier(ThreadId),
+    LoadEarlier(ThreadId, Option<String>),
     /// A closed thread's idle TTL elapsed (generation guards against a reopen).
     Expire(ThreadId, u64),
 }
@@ -64,7 +64,15 @@ impl ClientStateHandle {
 
     /// The timeline's "load earlier" control.
     pub fn load_earlier(&self, thread_id: ThreadId) {
-        let _ = self.inputs.send(Input::LoadEarlier(thread_id));
+        let _ = self.inputs.send(Input::LoadEarlier(thread_id, None));
+    }
+
+    /// The thread find's paging (`onLoadEarlier(throughEntryId)`): the page that
+    /// reaches `entry_id`, a match in older history.
+    pub fn load_earlier_through(&self, thread_id: ThreadId, entry_id: String) {
+        let _ = self
+            .inputs
+            .send(Input::LoadEarlier(thread_id, Some(entry_id)));
     }
 
     /// For tests and glue: feed an event as the orchestrator would.
@@ -155,11 +163,16 @@ impl Reducer {
                     status: FeedStatus::Disconnected,
                 })
             }
-            Input::LoadEarlier(thread_id) => match self.core.begin_load_earlier(&thread_id) {
+            Input::LoadEarlier(thread_id, through_entry_id) => match self
+                .core
+                .begin_load_earlier(&thread_id)
+            {
                 Some(cursor) => {
-                    let _ = self
-                        .requests
-                        .send(ClientStateRequest::LoadEarlier { thread_id, cursor });
+                    let _ = self.requests.send(ClientStateRequest::LoadEarlier {
+                        thread_id,
+                        cursor,
+                        through_entry_id,
+                    });
                     true
                 }
                 None => false,

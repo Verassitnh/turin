@@ -34,7 +34,8 @@ use super::assistant_citation_target::{
 use super::markdown::chat_markdown::MarkdownFind;
 use super::markdown::inline_flow::FindMatchProbe;
 use super::thread_find_navigation::{
-    find_match_key, is_visible_delta, reveal_margin, vertical_reveal_delta,
+    EarlierHistoryControls, EarlierHistoryRequests, find_match_key, is_visible_delta,
+    plan_earlier_history_request, reveal_margin, vertical_reveal_delta,
 };
 use super::timeline::assistant_citations::AssistantCitation;
 use super::timeline::messages_timeline_logic::{
@@ -43,7 +44,9 @@ use super::timeline::messages_timeline_logic::{
     compute_stable_messages_timeline_rows, derive_messages_timeline_rows_with_state,
 };
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
-use super::timeline::types::{ThreadTimelineSnapshot, TimelineHistoryControls};
+use super::timeline::types::{
+    ThreadTimelineSnapshot, TimelineEntryKind, TimelineHistoryControls,
+};
 use super::timeline_message_rows::{
     assistant_meta_row, assistant_row, proposed_plan_row, user_row,
 };
@@ -191,6 +194,10 @@ pub struct MessagesTimeline {
     find_revealed_key: Option<String>,
     /// Frames spent settling the active match into the readable band; `None` once settled.
     find_reveal_frames: Option<u32>,
+    /// The active match's row is not loaded yet: earlier history is being paged for it.
+    find_reveal_pending: bool,
+    /// History pages already asked for the active match.
+    find_history_requests: EarlierHistoryRequests,
     _observe: Subscription,
 }
 
@@ -219,6 +226,8 @@ impl MessagesTimeline {
             find_probe: FindMatchProbe::default(),
             find_revealed_key: None,
             find_reveal_frames: None,
+            find_reveal_pending: false,
+            find_history_requests: EarlierHistoryRequests::default(),
             _observe: observe,
         };
         this.recompute(cx);
@@ -418,6 +427,7 @@ impl MessagesTimeline {
             None => {
                 self.find_revealed_key = None;
                 self.find_reveal_frames = None;
+                self.find_reveal_pending = false;
             }
         }
         cx.notify();
@@ -481,6 +491,7 @@ impl MessagesTimeline {
     /// Opens the turn fold, the collapsed message or the collapsed plan that hides the
     /// match, then scrolls its row to the top of the list.
     fn reveal_find_row(&mut self, active: &TimelineFindMatch, cx: &mut Context<Self>) {
+        self.find_reveal_pending = false;
         // A match inside a folded turn has no row until the turn opens; nested folds
         // need a pass each.
         for _ in 0..3 {
@@ -501,6 +512,10 @@ impl MessagesTimeline {
         }
         let Some(index) = self.find_row_index(&active.entry_id) else {
             self.find_reveal_frames = None;
+            // The match may be in history that is not loaded: page it in, and
+            // reveal the row when it arrives (`recompute`).
+            self.find_reveal_pending = true;
+            self.page_history_for_find(active, cx);
             return;
         };
         // A collapsed body clips the match; open it so the whole text is there.
@@ -525,6 +540,47 @@ impl MessagesTimeline {
         });
         self.find_probe.set(None);
         self.find_reveal_frames = Some(0);
+    }
+
+    /// `useThreadFindNavigation`'s history effect: a match whose entry is not loaded
+    /// asks the server for earlier turns through that entry, once per cursor.
+    fn page_history_for_find(&mut self, active: &TimelineFindMatch, cx: &mut Context<Self>) {
+        let key = find_match_key(
+            self.find.navigation_id,
+            &self.find.query,
+            &active.entry_id,
+            active.occurrence,
+        );
+        let snapshot = self.store.read(cx).snapshot().clone();
+        let entry_loaded = snapshot.timeline_entries.iter().any(|entry| {
+            entry.id == active.entry_id
+                || match &entry.kind {
+                    TimelineEntryKind::Message { message, .. } => message.id == active.entry_id,
+                    TimelineEntryKind::ProposedPlan { proposed_plan } => {
+                        proposed_plan.id == active.entry_id
+                    }
+                    _ => false,
+                }
+        });
+        let controls = self.history.as_ref().map(|history| EarlierHistoryControls {
+            has_more_history: history.has_more_history,
+            loading: history.loading,
+            error: history.error.is_some(),
+        });
+        let first_entry_id = snapshot.timeline_entries.first().map(|entry| entry.id.as_str());
+        let row_loaded = self.find_row_index(&active.entry_id).is_some();
+        let ask = plan_earlier_history_request(
+            &mut self.find_history_requests,
+            &key,
+            first_entry_id,
+            !self.rows.is_empty(),
+            row_loaded,
+            entry_loaded,
+            controls,
+        );
+        if ask && let Some(source) = self.store.read(cx).source() {
+            source.load_earlier_history_through(&active.entry_id, cx);
+        }
     }
 
     /// One frame of settling the active match into view, run after the frame painted it.
@@ -629,6 +685,12 @@ impl MessagesTimeline {
             "timeline rows derived"
         );
         self.update_ticker(snapshot.is_working, cx);
+        // A page of earlier history may have brought the active match's row.
+        if self.find_reveal_pending
+            && let Some(active) = self.find.active.clone()
+        {
+            self.reveal_find_row(&active, cx);
+        }
     }
 
     /// `WorkingTimer` ticks once a second; only while the thread works.

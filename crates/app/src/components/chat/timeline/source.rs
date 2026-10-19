@@ -80,6 +80,11 @@ pub trait TimelineSource: 'static {
     fn open_thread(&self, thread_id: &str, cx: &mut App);
     /// `historyControls.onLoadEarlier`: fetch the next older page of turns.
     fn load_earlier_history(&self, _cx: &mut App) {}
+    /// `onLoadEarlier(throughEntryId)`: the thread find pages history until the
+    /// entry holding its match is loaded.
+    fn load_earlier_history_through(&self, _entry_id: &str, cx: &mut App) {
+        self.load_earlier_history(cx);
+    }
     /// `AuthFilesystemWriteScope` for the thread's environment: whether the plan card may
     /// save into the workspace.
     fn can_write_workspace_files(&self) -> bool {

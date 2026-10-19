@@ -41,12 +41,15 @@ impl LivePaletteBackend {
     }
 }
 
-/// The mock snapshot advertises every capability. "New thread without a project" has no
-/// live implementation (see PORTING.md, "Palette: New thread without a project"), so it is
-/// left out rather than listed as a dead row. "Find in current thread" stays: the chat view
-/// mounts the find bar (`thread_find_provider`).
-pub(crate) fn hide_unported_commands(mut snapshot: PaletteSnapshot) -> PaletteSnapshot {
-    snapshot.scratch_thread_available = false;
+/// The mock snapshot advertises every capability. "New thread without a project" needs the
+/// environment's Scratch folder (`scratchWorkspaceRoot`), which is absent when the data dir is
+/// inside a checkout, so it is listed only when the folder is known. "Find in current thread"
+/// stays: the chat view mounts the find bar (`thread_find_provider`).
+pub(crate) fn live_capabilities(
+    mut snapshot: PaletteSnapshot,
+    scratch_workspace_root: Option<&str>,
+) -> PaletteSnapshot {
+    snapshot.scratch_thread_available = scratch_workspace_root.is_some();
     snapshot
 }
 
@@ -98,7 +101,10 @@ fn list_directories(directory: &str, show_hidden: bool) -> Result<FilesystemBrow
 
 impl PaletteBackend for LivePaletteBackend {
     fn snapshot(&self, cx: &App) -> PaletteSnapshot {
-        hide_unported_commands(self.inner.snapshot(cx))
+        let scratch_root = cx
+            .try_global::<crate::state::store::ClientStoreGlobal>()
+            .and_then(|store| store.0.read(cx).state().scratch_workspace_root.clone());
+        live_capabilities(self.inner.snapshot(cx), scratch_root.as_deref())
     }
 
     fn search_messages(&self, query: String, cx: &mut App) -> Task<Vec<ThreadSearchMatch>> {

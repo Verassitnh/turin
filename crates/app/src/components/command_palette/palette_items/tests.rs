@@ -314,24 +314,34 @@ fn project_search_items_describe_grouped_projects_by_their_environments() {
 }
 
 #[test]
-fn the_live_palette_lists_no_command_it_cannot_run() {
+fn the_live_palette_offers_threads_without_a_project_only_with_a_scratch_folder() {
+    use crate::components::command_palette::live_source::live_capabilities;
     let (mut snapshot, _, _) = snapshot();
     // What the mock backend (and so the live one, before the filter) advertises.
     snapshot.scratch_thread_available = true;
     snapshot.supports_thread_find = true;
-    let snapshot =
-        crate::components::command_palette::live_source::hide_unported_commands(snapshot);
     let context = PaletteContext {
         active_thread_key: Some("local:t1".to_owned()),
         active_draft_project_key: None,
     };
-    let model = PaletteModel::new(&snapshot, &context, true);
-    let items = build_action_items(&model);
-    let ids = values(&items);
+    let ids_for = |scratch_root: Option<&str>| {
+        let snapshot = live_capabilities(snapshot.clone(), scratch_root);
+        let model = PaletteModel::new(&snapshot, &context, true);
+        values(&build_action_items(&model))
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let without = ids_for(None);
     assert!(
-        !ids.contains(&"action:new-thread-without-project"),
-        "{ids:?}"
+        !without.contains(&"action:new-thread-without-project".to_owned()),
+        "{without:?}"
     );
-    // The find bar is live, so the palette keeps its row.
-    assert!(ids.contains(&"find-current-thread"), "{ids:?}");
+    let with = ids_for(Some("/data/scratch"));
+    assert!(
+        with.contains(&"action:new-thread-without-project".to_owned()),
+        "{with:?}"
+    );
+    // The find bar is live either way, so the palette keeps its row.
+    assert!(without.contains(&"find-current-thread".to_owned()), "{without:?}");
 }

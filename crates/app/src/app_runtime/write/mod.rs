@@ -4,6 +4,7 @@ pub mod commands;
 #[cfg(test)]
 mod e2e_tests;
 pub mod effects;
+pub mod managed_folders;
 pub mod new_thread_defaults;
 pub mod opencode_driver;
 pub mod path_search;

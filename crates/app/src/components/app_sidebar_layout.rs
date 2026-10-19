@@ -657,6 +657,9 @@ impl AppSidebarLayout {
             }
             CommandPaletteEvent::NewThreadInProject { .. }
             | CommandPaletteEvent::NewThreadFromContext => unavailable("New thread", window, cx),
+            CommandPaletteEvent::NewThreadWithoutProject if self.live.is_some() => {
+                self.create_scratch_thread(window, cx)
+            }
             CommandPaletteEvent::NewThreadWithoutProject => {
                 unavailable("New thread without a project", window, cx)
             }
@@ -861,6 +864,40 @@ impl AppSidebarLayout {
                 })
                 .await
         });
+        self.open_created_thread(task, window, cx);
+    }
+
+    /// `openScratch` then a new thread: finds or creates the Scratch project
+    /// ("No project") and starts a thread in it, in a folder of its own.
+    fn create_scratch_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.clone() else {
+            return;
+        };
+        let task = live.bus.task(cx, move |commands| async move {
+            let project_id = commands.ensure_scratch_project().await?;
+            let defaults = commands.new_thread_defaults(&project_id).await?;
+            commands
+                .create_thread(CreateThread {
+                    project_id,
+                    title: "New thread".into(),
+                    model_selection: defaults.model_selection,
+                    runtime_mode: defaults.runtime_mode,
+                    interaction_mode: "default".into(),
+                })
+                .await
+        });
+        self.open_created_thread(task, window, cx);
+    }
+
+    /// Opens the thread a creation task made, or says why it could not be made.
+    fn open_created_thread(
+        &mut self,
+        task: gpui_kit::Task<
+            Result<turin_contracts::ThreadId, crate::app_runtime::write::commands::CommandError>,
+        >,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn_in(window, async move |this, cx| {
             let outcome = task.await;
             this.update_in(cx, |this, window, cx| match outcome {

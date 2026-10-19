@@ -1574,3 +1574,115 @@ async fn reverting_to_a_turn_rewinds_the_thread() {
         .expect_err("no checkpoint for turn 7");
     assert!(error.message.contains("turn 7"), "{}", error.message);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scratch_thread_is_created_without_a_project_and_works_in_its_own_folder() {
+    let harness = harness().await;
+    let commands = &harness.commands;
+
+    let root = commands
+        .scratch_root()
+        .await
+        .expect("the data dir is outside a checkout, so Scratch is offered");
+    assert!(root.ends_with("scratch"), "{root}");
+
+    // "New thread without a project": the Scratch project is found or created once.
+    let project = commands.ensure_scratch_project().await.expect("ensure");
+    assert_eq!(
+        commands.ensure_scratch_project().await.expect("ensure again"),
+        project
+    );
+    let row = harness
+        .stores
+        .projects
+        .get(project.clone(), false)
+        .await
+        .expect("read")
+        .expect("the Scratch project exists");
+    assert_eq!(row.title, "No project");
+    assert_eq!(row.workspace_root, root);
+    assert!(row.project_icon.is_some(), "Scratch has its own icon");
+
+    let defaults = commands.new_thread_defaults(&project).await.expect("defaults");
+    let create = |title: &str| CreateThread {
+        project_id: project.clone(),
+        title: title.into(),
+        model_selection: defaults.model_selection.clone(),
+        runtime_mode: defaults.runtime_mode.clone(),
+        interaction_mode: "default".into(),
+    };
+    let first = commands.create_thread(create("New thread")).await.expect("first");
+    let second = commands.create_thread(create("New thread")).await.expect("second");
+
+    let client = start(harness.stores.clone());
+    wait_for(&client, "the shell", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.threads.len() == 2)
+    })
+    .await;
+    let state = client.snapshot();
+    let folder_of = |thread: &turin_contracts::ThreadId| {
+        state
+            .shell_view
+            .as_ref()
+            .and_then(|view| view.thread(&thread_id(thread.as_str())).cloned())
+            .and_then(|shell| shell.worktree_path.clone())
+            .expect("a Scratch thread has a folder")
+    };
+    let (one, two) = (folder_of(&first), folder_of(&second));
+    // Each thread has its own folder, inside Scratch.
+    assert_ne!(one, two);
+    for folder in [&one, &two] {
+        assert!(Path::new(folder).starts_with(&root), "{folder} in {root}");
+        assert!(Path::new(folder).is_dir(), "{folder} exists");
+    }
+
+    // The thread runs its turns in that folder.
+    client.open_thread(thread_id(first.as_str()));
+    commands
+        .send_message(SendMessage {
+            thread_id: first.clone(),
+            text: "Respond with exactly: first fixture turn complete".into(),
+            attachments: vec![],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send");
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        wait_for(&client, "the Scratch thread's reply", |state| {
+            state
+                .thread(&thread_id(first.as_str()))
+                .and_then(|entry| entry.state.data.as_ref())
+                .is_some_and(|data| {
+                    data.runs
+                        .iter()
+                        .any(|run| run.status == OrchestrationV2RunStatus::Completed)
+                })
+        }),
+    )
+    .await
+    .expect("the turn completes in time");
+
+    // A thread in an ordinary project keeps the project root.
+    let ordinary = project_and_thread(&harness).await;
+    wait_for(&client, "the ordinary thread", |state| {
+        state
+            .shell_view
+            .as_ref()
+            .is_some_and(|view| view.thread(&thread_id(ordinary.as_str())).is_some())
+    })
+    .await;
+    let state = client.snapshot();
+    let shell = state
+        .shell_view
+        .as_ref()
+        .and_then(|view| view.thread(&thread_id(ordinary.as_str())).cloned())
+        .expect("shell thread");
+    assert_eq!(shell.worktree_path, None);
+}

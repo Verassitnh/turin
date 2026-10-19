@@ -86,6 +86,8 @@ pub struct WriteRuntime {
     pub attachments_dir: std::path::PathBuf,
     /// `@` path completion over a workspace.
     pub workspace_entries: Arc<turin_git::workspace::workspace_entries::WorkspaceEntries>,
+    /// The Scratch project ("No project") and its per-thread folders.
+    pub managed_folders: Arc<turin_projects::managed_project_folders::ManagedProjectFolders>,
     pub sessions: Arc<ProviderSessionManager>,
     pub provider_auth: Arc<turin_providers::provider_auth_service::ProviderAuthService>,
     pub provider_installation: Arc<turin_providers::provider_installation::ProviderInstallation>,
@@ -422,6 +424,8 @@ impl WriteRuntime {
             Err(error) => tracing::warn!(%error, "failed to resume queued runs"),
         }
 
+        let managed_folders = super::managed_folders::build(Arc::clone(&stores), data_dir);
+
         Ok(Arc::new(Self {
             storage_cleanup,
             config,
@@ -452,6 +456,7 @@ impl WriteRuntime {
             intake,
             attachments_dir,
             workspace_entries: super::path_search::workspace_entries(),
+            managed_folders,
             checkpoint_store,
             sessions,
             effects,

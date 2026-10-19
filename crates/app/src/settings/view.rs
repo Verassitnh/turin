@@ -4,6 +4,8 @@
 //!
 //! One view owns the UI state of every page (open menus, text inputs,
 //! search) and renders the active page from the [`SettingsViewModel`].
+//!
+//! Port of upstream/apps/web/src/routes/settings.tsx.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -143,12 +145,16 @@ pub struct SettingsView {
     /// Toasts queued by actions that have no window at hand (`toastManager.add`);
     /// the next render pushes them.
     toasts: std::cell::RefCell<Vec<SettingsToast>>,
+    /// `ThemeEditorHost`: the floating theme editor the Appearance page opens.
+    theme_editor_host: Entity<super::theme_ui::theme_editor_host::ThemeEditorHost>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SettingsView {
     pub fn new(store: Entity<SettingsStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let nav_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let theme_editor_host =
+            cx.new(|cx| super::theme_ui::theme_editor_host::ThemeEditorHost::new(window, cx));
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe_in(
@@ -184,6 +190,7 @@ impl SettingsView {
             slider_drag: None,
             capture_focus: cx.focus_handle(),
             toasts: std::cell::RefCell::new(Vec::new()),
+            theme_editor_host,
             _subscriptions: subscriptions,
         }
     }
@@ -782,6 +789,8 @@ impl Render for SettingsView {
             )
             .child(sidebar_toggle)
             .children(self.render_dialog(window, cx))
+            // Over everything, like upstream's host above the router (z-110).
+            .child(self.theme_editor_host.clone())
     }
 }
 

@@ -3,7 +3,9 @@
 //! selection or search, the legacy-models section, provider navigation and the
 //! setup affordances. The view in `views/model_picker.rs` renders
 //! [`ModelPickerList`].
-//! Also ports upstream/apps/web/src/modelOrdering.ts.
+//! Also: Port of upstream/apps/web/src/modelOrdering.ts.
+//!
+//! Port of upstream/apps/web/src/components/chat/ModelPickerContent.tsx (logic half; view in views/model_picker_view.rs).
 
 use std::collections::HashSet;
 

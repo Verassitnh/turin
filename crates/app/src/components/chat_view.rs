@@ -41,6 +41,8 @@ use super::chat::thread_error_banner::{
     dismiss_thread_error_banner_for_session, get_thread_error_banner_key,
     is_thread_error_banner_dismissed_for_session, should_show_thread_error_banner,
 };
+use super::chat::thread_find_bar::THREAD_FIND_BAR_RESERVED_HEIGHT;
+use super::chat::thread_find_provider::{CloseHandler, ThreadFind};
 use super::chat::thread_relationships_panel::ThreadRelationshipsPanel;
 use super::chat::timeline::session_logic::{derive_pending_approvals, derive_pending_user_inputs};
 use super::chat::timeline::source::MockTimelineSource;
@@ -159,7 +161,7 @@ impl ChatView {
         // `.chat-composer-lane` / timeline `padding-inline: 3rem` at ≥640px.
         let lane_inset = rems(3.);
         let live_target = self.live.clone();
-        let (timeline, composer, page_scroll) = match &self.live {
+        let (timeline, composer, page_scroll, thread_find) = match &self.live {
             Some(LiveChatTarget { thread: None, .. }) => {
                 return self
                     .render_empty_state(header_left, window, cx)
@@ -210,7 +212,28 @@ impl ChatView {
                     },
                 );
                 let _ = scroll_for_timeline;
-                (timeline, composer, Some(page_scroll))
+                // The find bar and its search live and die with the routed thread.
+                let thread_find = {
+                    let timeline = timeline.clone();
+                    let store = chat.read(cx).timeline.clone();
+                    let composer = composer.clone();
+                    let bus = bus.clone();
+                    let thread_id = thread_id.clone();
+                    window.use_keyed_state(
+                        SharedString::from(format!("thread-find-{thread_id}")),
+                        cx,
+                        move |window, cx| {
+                            // `onClose: focusComposer`.
+                            let on_close: CloseHandler =
+                                Rc::new(move |window, cx| {
+                                    let focus = composer.read(cx).focus_handle(cx);
+                                    window.focus(&focus, cx);
+                                });
+                            ThreadFind::new(thread_id, bus, timeline, store, on_close, window, cx)
+                        },
+                    )
+                };
+                (timeline, composer, Some(page_scroll), Some(thread_find))
             }
             None => {
                 let timeline = window.use_keyed_state("messages-timeline", cx, |window, cx| {
@@ -221,8 +244,17 @@ impl ChatView {
                     let store = MockComposerSource::start(cx);
                     ChatComposer::new(store, window, cx)
                 });
-                (timeline, composer, None)
+                (timeline, composer, None, None)
             }
+        };
+        // `isThreadFindActive`: the details card starts below the open bar.
+        let find_open = thread_find
+            .as_ref()
+            .is_some_and(|find| find.read(cx).is_open());
+        let find_top_inset = if find_open {
+            THREAD_FIND_BAR_RESERVED_HEIGHT
+        } else {
+            0.0
         };
         // The composer's top drawer: the oldest pending approval, else the
         // oldest pending question (ChatComposer.tsx `showComposerTopDrawer`).
@@ -354,7 +386,7 @@ impl ChatView {
                     padding: 48.0,
                     min_chat_width: 640.0,
                 },
-                top_inset: 0.0,
+                top_inset: find_top_inset,
             })?;
             self.thread_details_open.then_some(ChatCanvasDetailsCard {
                 left: layout.x,
@@ -483,6 +515,8 @@ impl ChatView {
                     ))
                     // `ThreadDetailsCard` (inline): top right of the canvas.
                     .children(details_card)
+                    // `ThreadFind`: over the card's corner, fading in as it slides out.
+                    .children(thread_find)
                     .child(chat_media_layer(timeline.clone(), window, cx))
                     .children(selection_toolbar),
             )

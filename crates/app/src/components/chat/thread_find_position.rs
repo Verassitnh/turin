@@ -5,6 +5,8 @@
 //! passes the same numbers as plain values, so the rule can be tested without a DOM.
 //! The caller collects a row's match bottoms only for rows it will read (upstream
 //! does the same, after the row has an entry id).
+//!
+//! Port of upstream/apps/web/src/components/chat/threadFindPosition.ts (geometry rule).
 
 use turin_contracts::base_schemas::TrimmedNonEmptyString;
 

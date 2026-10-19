@@ -1,6 +1,8 @@
 //! Port of upstream/apps/web/src/components/DiffPanelShell.tsx (skeletons)
 //! and `ui/skeleton.tsx`: the loading placeholders shown while a diff or
 //! its next files load.
+//!
+//! Port of upstream/apps/web/src/components/diffs/DiffFileLoadingBoundary.tsx (placeholders).
 
 use gpui_kit::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Styled as _,

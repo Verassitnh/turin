@@ -1,6 +1,6 @@
 //! Port of upstream/apps/server/src/provider/ProviderInstanceRegistry.ts
 //! and ProviderInstanceRegistryMutator.ts.
-//! Also ports upstream/apps/server/src/provider/ProviderInstanceRegistryMutator.ts.
+//! Also: Port of upstream/apps/server/src/provider/ProviderInstanceRegistryMutator.ts.
 //!
 //! The registry is the only owner of live `ProviderInstance`s. Unknown
 //! drivers and decode/create failures become unavailable shadow snapshots

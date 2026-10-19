@@ -1,12 +1,15 @@
 //! Logic of ProviderSettingsForm.tsx, ProviderInstanceCard.tsx and
 //! ProviderModelsSection.tsx (their exported pure helpers), with the upstream
 //! tests that apply to the kept drivers.
-//! Also ports upstream/apps/web/src/modelOrdering.ts.
+//! Also: Port of upstream/apps/web/src/modelOrdering.ts.
 //!
 //! The per-driver settings schemas come from `turin_contracts::settings`
 //! (Codex, Claude); Cursor and OpenCode forms are defined here from their
 //! client packages (`provider-cursor/src/settings.ts`,
 //! `provider-opencode/src/settings.ts`).
+//!
+//! Port of upstream/apps/web/src/components/settings/ProviderModelsSection.tsx (logic).
+//! Port of upstream/apps/web/src/components/settings/ProviderSettingsForm.tsx (logic).
 
 use std::collections::HashSet;
 
@@ -18,6 +21,8 @@ use turin_contracts::settings::{
 };
 use turin_provider_core::server_provider::ServerProviderModel;
 use turin_shared::model::{CustomModelDefinition, read_custom_model_entries};
+
+use crate::model_selection::normalize_custom_model_entries;
 
 use crate::composer::model_ordering::{
     ModelSlugItem, SortModelsOptions, sort_models_for_provider_instance,
@@ -419,11 +424,9 @@ pub fn derive_provider_models_for_display(
         .collect();
     let server_slugs: HashSet<&str> = server_models.iter().map(|m| m.slug.as_str()).collect();
     let mut models = server_models.clone();
-    for entry in custom_models {
-        // A custom entry with a built-in slug only renames that built-in.
-        if server_slugs.contains(entry.slug.as_str()) {
-            continue;
-        }
+    // A custom entry with a built-in slug only renames that built-in; the length and
+    // count caps are `modelSelection.ts`'s, shared with the pickers.
+    for entry in &normalize_custom_model_entries(custom_models, &server_slugs) {
         let capabilities = entry.capabilities.clone().or_else(|| {
             live.iter()
                 .find(|model| model.is_custom && model.slug.as_str() == entry.slug)

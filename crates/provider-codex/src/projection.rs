@@ -9,6 +9,8 @@
 //! Subagent threads and their child turns project through `subagent`.
 //! Not ported yet: fork, goal, background-task, and MCP app capture.
 //! MCP and dynamic-tool calls project as `dynamic_tool` items.
+//!
+//! Port of upstream/apps/server/src/orchestration-v2/Adapters/ProviderTextDeltaCoalescer.ts (coalescer (the Claude adapter emits each delta; see Deviations)).
 use crate::{
     adapter::CodexEvent,
     codex_turn_token_usage::CodexTurnTokenUsageState,

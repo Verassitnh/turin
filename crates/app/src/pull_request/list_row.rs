@@ -10,6 +10,8 @@
 //! Not ported: the `content-visibility` skip (GPUI lists virtualize instead), and the
 //! container-query label slots, which are decided from the width the page hands in
 //! (`meta_width`).
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestListRow.tsx.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

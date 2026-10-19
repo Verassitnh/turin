@@ -2,6 +2,9 @@
 //! plus the pure state machine from useInlineActionConfirm.ts and the item model from
 //! pullRequestLinkContextMenu.ts. React hooks, DOM events, timers, clipboard, host menu,
 //! and toast handling are skipped.
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/pullRequestLinkContextMenu.ts.
+//! Port of upstream/apps/web/src/components/pullRequest/useInlineActionConfirm.ts (state machine).
 
 use turin_contracts::js_trim;
 use turin_contracts::pull_request::{

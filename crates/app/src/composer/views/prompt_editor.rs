@@ -1426,6 +1426,7 @@ impl PromptEditor {
                 range,
                 color: with_alpha(theme.info, 0.30).into(),
                 through_line_end: index < to.block,
+                probe: None,
             });
         }
         let caret =

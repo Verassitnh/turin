@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-cursor/src/server/credentialStore.ts`.
+//! Port of upstream/packages/provider-cursor/src/server/credentialStore.ts.
 //!
 //! The SDK owns the credential format; persistence uses the environment's
 //! secret store. A legacy auth file is migrated once, then deleted.

@@ -5,6 +5,8 @@
 //! composition is in progress). An external `value` is shown only while the
 //! field is not focused, so a settings push cannot clobber an in-progress edit.
 //! The chrome is [`super::text_input_frame`].
+//!
+//! Port of upstream/apps/web/src/components/ui/draft-input.tsx.
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommitOnBlur {

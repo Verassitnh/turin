@@ -7,6 +7,8 @@
 //! subscription lifecycle and its retry. Kept: sequence filtering, snapshot
 //! replacement, the `synchronizing`/`live`/`cached`/`deleted` statuses,
 //! deletion, and the partial-timeline (progressive history) event handling.
+//!
+//! Port of upstream/packages/client-runtime/src/state/threads.ts (state machine of `makeEnvironmentThreadState`).
 
 use std::sync::Arc;
 

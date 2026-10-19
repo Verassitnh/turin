@@ -3,6 +3,8 @@
 //! Upstream calls `setTimeout`/`clearTimeout` directly (display timing for React hooks, outside
 //! an Effect runtime). Turin has no ambient timer, so the two calls go through [`Timers`]; the
 //! GPUI side implements it with its executor's timer. The state machine is unchanged.
+//!
+//! Port of upstream/apps/web/src/hooks/useDelayedStatus.ts.
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};

@@ -1,5 +1,5 @@
 //! Port of upstream/apps/server/src/persistence/PullRequestReviewGuides.ts
-//! Also ports upstream/apps/server/src/persistence/Migrations/061_PullRequestReviewGuides.ts.
+//! Also: Port of upstream/apps/server/src/persistence/Migrations/061_PullRequestReviewGuides.ts.
 //!
 //! `guide_json` stays a JSON value. Typed guide contracts are ported separately.
 

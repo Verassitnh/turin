@@ -8,6 +8,10 @@
 //! and the provider sign-in flows that run in a terminal (the Account row
 //! only starts / ends sign-in through the source), the project-scope enable
 //! override UI, and the HSV accent color picker (preset swatches + hex field).
+//!
+//! Port of upstream/apps/web/src/components/settings/ProviderSettingsPanel.tsx.
+//! Port of upstream/apps/web/src/components/settings/ProviderInstanceCard.tsx.
+//! Port of upstream/apps/web/src/components/settings/UsageProviderSettings.tsx.
 
 use std::rc::Rc;
 

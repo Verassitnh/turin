@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-cursor/src/server/CursorAccountReader.ts`.
+//! Port of upstream/packages/provider-cursor/src/server/CursorAccountReader.ts.
 //!
 //! Reads one range of Cursor account usage from the dashboard API. Tests can
 //! substitute the HTTP client and Keychain backend.

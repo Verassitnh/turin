@@ -332,5 +332,6 @@ fn the_live_palette_lists_no_command_it_cannot_run() {
         !ids.contains(&"action:new-thread-without-project"),
         "{ids:?}"
     );
-    assert!(!ids.contains(&"find-current-thread"), "{ids:?}");
+    // The find bar is live, so the palette keeps its row.
+    assert!(ids.contains(&"find-current-thread"), "{ids:?}");
 }

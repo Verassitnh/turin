@@ -23,6 +23,7 @@ mod server_owner;
 mod snapshot;
 mod sse;
 mod urlutil;
+mod usage;
 mod usage_limits;
 mod v1_client;
 mod v2_client;
@@ -70,6 +71,10 @@ pub use snapshot::{
     build_open_code2_snapshot,
 };
 pub use sse::{EventStream, SILENT_STREAM_TIMEOUT, SseFrame, decode_sse};
+pub use usage::{
+    MessageFallback, OpenCodeUsageReadResult, open_code_usage_reader, open_code_usage_reader_for,
+    parse_open_code_message, read_open_code_usage, resolve_open_code_data_dirs, rowid_pages,
+};
 pub use usage_limits::{GoUsageInput, OPENCODE_GO_USAGE_URL, read_open_code_go_usage_limits};
 pub use v1_client::{Health, OPENCODE_HEALTH_TIMEOUT, PermissionReply, QuestionReply, V1Client};
 pub use v2_client::{

@@ -3,6 +3,8 @@
 //! Upstream's functions are structurally typed (`Pick<…>`); here they read
 //! through [`SortableThread`], which [`EnvironmentThreadShell`] implements
 //! and tests implement on small fixtures.
+//!
+//! Port of upstream/apps/web/src/lib/threadSort.ts (re-export shim).
 // A faithful port keeps upstream's whole API (rule 3); callers that are
 // not ported yet (T14 reducers, the chat header menu, settings) use the rest.
 #![allow(dead_code)]

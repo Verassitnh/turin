@@ -4,6 +4,8 @@
 //! (pending-question submit, plan follow-up Refine/Implement, Stop, or the
 //! send button) with the exact labels, status text and tooltips upstream
 //! renders. The view paints the result.
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerPrimaryActions.tsx (decision logic).
 
 use crate::composer::dispatch::{
     ActiveTurnComposerAction, ComposerDispatchMode, ResolveComposerDispatchModeInput,

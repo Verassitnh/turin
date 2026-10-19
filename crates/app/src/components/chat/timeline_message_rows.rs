@@ -3,8 +3,10 @@
 //! `RevertUserMessageButton`, `AssistantTimelineRow`, `AssistantMessageMeta`,
 //! `AssistantMetaTimelineRow`, `AssistantCopyButton` and
 //! `ProposedPlanTimelineRow` (with ProposedPlanCard.tsx).
-//! Also ports upstream/apps/web/src/proposedPlan.ts
+//! Also: Port of upstream/apps/web/src/proposedPlan.ts
 //! (`buildCollapsedProposedPlanPreviewMarkdown`; the rest is `composer::proposed_plan`).
+//!
+//! Port of upstream/apps/web/src/components/chat/ProposedPlanCard.tsx.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -362,6 +364,7 @@ fn collapsible_user_message_body(message: &ChatMessage, cx: &RowCx) -> AnyElemen
         .line_breaks(true)
         .full_foreground(true)
         .skills(cx.snapshot.skills.clone())
+        .find(cx.markdown_find(&message.id))
         .document_order(cx.order + 1);
     let body = div()
         .relative()
@@ -454,6 +457,7 @@ pub fn assistant_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
             ChatMarkdown::new(("assistant-md", cx.order), text.clone())
                 .line_breaks(line_breaks)
                 .streaming(message.streaming)
+                .find(cx.markdown_find(&message.id))
                 .document_order(cx.order + 1)
                 .assistant_selection_source(message.id.clone()),
         )
@@ -895,7 +899,11 @@ fn proposed_plan_card(plan_id: &str, markdown: &str, cx: &RowCx) -> AnyElement {
                 .mt(rems(1.))
                 .relative()
                 .when(is_collapsed, |this| this.max_h(rems(26.)).overflow_hidden())
-                .child(ChatMarkdown::new(("plan-md", cx.order), text).document_order(cx.order + 1))
+                .child(
+                    ChatMarkdown::new(("plan-md", cx.order), text)
+                        .find(cx.markdown_find(plan_id))
+                        .document_order(cx.order + 1),
+                )
                 .when(is_collapsed, |this| {
                     // `bg-linear-to-t from-card/95 via-card/80 to-transparent`.
                     this.child(

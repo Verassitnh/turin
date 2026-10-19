@@ -7,6 +7,8 @@
 //! draft-thread sessions (thread launch is replaced by hooks), localStorage
 //! persistence (the persisted shape will be added with the settings task) and
 //! sticky model selection.
+//!
+//! Port of upstream/apps/web/src/composerDraftStore.ts (per-thread slice).
 
 use std::collections::HashMap;
 use std::sync::Arc;

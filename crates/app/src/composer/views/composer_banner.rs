@@ -5,6 +5,8 @@
 //! [`banner_surface`](crate::components::chat::composer_pending_panels::banner_surface).
 //! The row is a flex strip instead of upstream's three-column grid; the icon
 //! column is `--composer-banner-icon-column` (`6`, 1.5rem, at `sm:`).
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerBanner.tsx (row parts).
 
 use std::rc::Rc;
 

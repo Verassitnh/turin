@@ -4,6 +4,8 @@
 //!
 //! The scope machinery plugs in through [`SettingsRow::inheritance`] and
 //! [`SettingsRow::inert`] (see `scope.rs` and `setting_inheritance.rs`).
+//!
+//! Port of upstream/apps/web/src/components/settings/SettingsGroup.tsx.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{

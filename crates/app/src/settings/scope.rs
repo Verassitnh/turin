@@ -15,6 +15,10 @@
 //! holds that environment only. The scope lives in the view (upstream keeps it
 //! in the URL search). `useMemberProjectFiles` (t3.json layers) is cut with
 //! `t3ProjectFile`.
+//!
+//! Port of upstream/apps/web/src/components/settings/SettingsScopeSentence.tsx.
+//! Port of upstream/apps/web/src/components/settings/SettingsScopeNotice.tsx.
+//! Port of upstream/apps/web/src/components/settings/useScopedSettings.ts.
 
 use std::rc::Rc;
 

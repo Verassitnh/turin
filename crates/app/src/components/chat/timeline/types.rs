@@ -9,6 +9,8 @@
 //! request panels consume, in upstream's shapes. T14 builds it from the real
 //! reducers (`deriveTimelineEntriesFromVisibleTurnItems` and friends); until
 //! then `super::mock_source` builds it from fixtures.
+//!
+//! Port of upstream/apps/web/src/types.ts (timeline-facing types).
 
 use super::turn_item::{
     CheckpointFileSummary, ProjectedTurnItem, ProviderApprovalOption, ProviderRequestKind,

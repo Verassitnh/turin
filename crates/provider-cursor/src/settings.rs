@@ -1,6 +1,6 @@
 //! Cursor instance settings.
 //!
-//! Port of `upstream/packages/provider-cursor/src/settings.ts`. The fields are
+//! Port of upstream/packages/provider-cursor/src/settings.ts. The fields are
 //! the browser-safe settings schema. The V2 SDK ignores `binaryPath` and
 //! `apiEndpoint`; the ACP adapter uses `binaryPath` as the `cursor-agent`
 //! program when it is set.

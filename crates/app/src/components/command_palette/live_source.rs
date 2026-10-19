@@ -41,12 +41,12 @@ impl LivePaletteBackend {
     }
 }
 
-/// The mock snapshot advertises every capability. Two palette commands have no live
-/// implementation (see PORTING.md, "Palette: New thread without a project / Find in thread"), so
-/// they are left out rather than listed as dead rows.
+/// The mock snapshot advertises every capability. "New thread without a project" has no
+/// live implementation (see PORTING.md, "Palette: New thread without a project"), so it is
+/// left out rather than listed as a dead row. "Find in current thread" stays: the chat view
+/// mounts the find bar (`thread_find_provider`).
 pub(crate) fn hide_unported_commands(mut snapshot: PaletteSnapshot) -> PaletteSnapshot {
     snapshot.scratch_thread_available = false;
-    snapshot.supports_thread_find = false;
     snapshot
 }
 

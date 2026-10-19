@@ -7,6 +7,9 @@
 //! is); the auth write scope check (one process: the snapshot's `can_write` stands in for
 //! `AuthSourceControlWriteScope`); toasts for failed posts (commands return immediately and the
 //! source reports failures through the snapshot's `action_error`).
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestComposer.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestCommentForm.tsx.
 
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;

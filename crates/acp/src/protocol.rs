@@ -1,5 +1,5 @@
 //! Port of upstream/packages/effect-acp/src/protocol.ts
-//! Also ports upstream/packages/effect-acp/src/_internal/shared.ts.
+//! Also: Port of upstream/packages/effect-acp/src/_internal/shared.ts.
 //!
 //! Newline-delimited JSON-RPC. Client→agent calls and extension calls use
 //! separate id counters so they cannot collide. Inbound requests are answered

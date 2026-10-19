@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/v2/adapter.ts`.
+//! Port of upstream/packages/provider-opencode/src/server/v2/adapter.ts.
 //!
 //! OpenCode 2 has no per-prompt `system` field. Per-turn instructions are
 //! `PUT /api/experimental/session/{id}/instructions/entries/t3-code`. A prompt

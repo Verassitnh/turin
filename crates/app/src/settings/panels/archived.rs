@@ -1,7 +1,7 @@
 //! Port of `ArchivedThreadsPanel` (SettingsPanels.tsx) for the single local
 //! environment. The thread context menu (Unarchive / Delete on right click)
 //! opens under the row instead of at the pointer (PORTING.md Deviations).
-//! Also ports upstream/apps/web/src/lib/archivedThreadsState.ts.
+//! Also: Port of upstream/apps/web/src/lib/archivedThreadsState.ts.
 
 use std::rc::Rc;
 

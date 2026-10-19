@@ -14,6 +14,8 @@
 //! `chat_thread_sidebar_width`, `t3code:preview-panel-width`); the settings
 //! task owns persistence. The width animation (`--panel-animation-duration`)
 //! defaults to 0 upstream and is not ported.
+//!
+//! Port of upstream/apps/web/src/hooks/useResizeDrag.ts (drag bookkeeping).
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -121,6 +123,8 @@ actions!(
         QuitShortcut,
         /// `thread.undo` (mod+z).
         UndoLatestThread,
+        /// `chat.find` (mod+f).
+        FindInThread,
     ]
 );
 
@@ -135,6 +139,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-b", ToggleThreadDetails, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-u", OpenUsage, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-z", UndoLatestThread, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-f", FindInThread, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-q", QuitShortcut, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
@@ -499,27 +504,38 @@ impl AppSidebarLayout {
             cx,
         );
         self.set_main_content(Some(host.read(cx).page_view()), cx);
-        let layout = cx.entity().downgrade();
         let host_for_sub = host.clone();
-        let subscription = cx.subscribe_in(&host, window, move |_, _, event, _, cx| {
-            if matches!(event, PullRequestsRouteEvent::OpenPanel) {
-                layout
-                    .update(cx, |this, cx| {
-                        if let Some(route) = &this.pull_requests {
-                            this.set_right_panel_content(
-                                Some(route.host.read(cx).panel_view()),
-                                cx,
-                            );
-                        }
-                    })
-                    .ok();
-            }
+        // The subscriber already holds `this` (the layout is leased for the callback), so the
+        // handler must not re-enter the layout through its own handle: `layout.update(cx, ..)`
+        // here panics with "cannot update AppSidebarLayout while it is already being updated",
+        // which aborts the app on the first row click (SIGABRT in the mouse-up handler).
+        let subscription = cx.subscribe_in(&host, window, |this, _, event, _, cx| {
+            this.on_pull_requests_route_event(event, cx);
         });
         self.pull_requests = Some(PullRequestsRoute {
             host: host_for_sub,
             _subscription: subscription,
         });
         cx.notify();
+    }
+
+    /// `PullRequestsRouteEvent::OpenPanel`: mount the route's detail panel in the right panel.
+    fn on_pull_requests_route_event(
+        &mut self,
+        event: &PullRequestsRouteEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(event, PullRequestsRouteEvent::OpenPanel) {
+            return;
+        }
+        let Some(panel_view) = self
+            .pull_requests
+            .as_ref()
+            .map(|route| route.host.read(cx).panel_view())
+        else {
+            return;
+        };
+        self.set_right_panel_content(Some(panel_view), cx);
     }
 
     pub fn open_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -644,7 +660,9 @@ impl AppSidebarLayout {
             CommandPaletteEvent::NewThreadWithoutProject => {
                 unavailable("New thread without a project", window, cx)
             }
-            CommandPaletteEvent::FindInCurrentThread => unavailable("Find in thread", window, cx),
+            CommandPaletteEvent::FindInCurrentThread => {
+                crate::components::chat::thread_find_action_bus::request_thread_find_open(cx)
+            }
             CommandPaletteEvent::LinkPullRequest => self.open_pull_requests(window, cx),
             CommandPaletteEvent::ShowLinkedPullRequests => {
                 self.open_pull_requests(window, cx);
@@ -664,6 +682,21 @@ impl AppSidebarLayout {
                 self.open_live_settings("projects", window, cx);
             }
             CommandPaletteEvent::ToggleThemeEditor => {
+                // `toggleThemeEditorForTheme`: closes an open editor, else opens a draft
+                // seeded from the theme in use. The settings window hosts the editor.
+                if cx.has_global::<crate::theme::theme_runtime::ThemeRuntime>() {
+                    let snapshot = crate::theme::theme_runtime::snapshot(cx);
+                    crate::theme::theme_runtime::update_editor(cx, |store| {
+                        store.toggle_theme_editor_for_theme(
+                            &snapshot.theme,
+                            snapshot.theme_halves.as_ref(),
+                            snapshot.resolved_theme,
+                        )
+                    });
+                    if crate::theme::theme_runtime::editor_session(cx).is_none() {
+                        return;
+                    }
+                }
                 self.open_live_settings("appearance", window, cx);
             }
         }
@@ -900,6 +933,13 @@ impl AppSidebarLayout {
                 })
                 .collect(),
         })
+    }
+
+    /// `chat.find`: asks the open chat to show its find bar (`requestThreadFindOpen`). The
+    /// chat view mounts one only for a routed thread, so the shortcut does nothing on
+    /// the other pages.
+    fn find_in_thread(&mut self, _: &FindInThread, _: &mut Window, cx: &mut Context<Self>) {
+        crate::components::chat::thread_find_action_bus::request_thread_find_open(cx);
     }
 
     fn toggle_thread_details(
@@ -1578,6 +1618,7 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::toggle_thread_details))
             .on_action(cx.listener(Self::open_usage_action))
             .on_action(cx.listener(Self::undo_latest_thread_action))
+            .on_action(cx.listener(Self::find_in_thread))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_file_picker))
             .on_action(cx.listener(Self::toggle_project_search))

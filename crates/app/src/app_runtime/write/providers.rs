@@ -111,16 +111,6 @@ impl Providers {
                 });
             }
         }
-        // Cursor's account scanner is ported, but its driver does not yet expose
-        // `usage()`. Adapt that existing scanner once, in upstream usage order.
-        if !usage_readers
-            .iter()
-            .any(|reader| reader.driver_kind == "cursor")
-        {
-            usage_readers.push(super::usage::cursor_reader(Path::new(
-                &host.paths.state_dir,
-            ))?);
-        }
         let hydration = ProviderInstanceRegistryHydration::new(drivers, &host)
             .await
             .context("hydrating the provider instance registry")?;

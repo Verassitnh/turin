@@ -1,6 +1,10 @@
 //! The non-row states of the pull request list: group headers (route `PullRequestGroupHeader`),
 //! the loading ghost (PullRequestGhosts.tsx `PullRequestListGhost`), the empty states
 //! (PullRequestListEmptyState.tsx) and the unavailable state (PullRequestsUnavailableState.tsx).
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestGhosts.tsx (list ghost; detail ghosts in detail_layout.rs).
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestListEmptyState.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestsUnavailableState.tsx.
 
 use std::rc::Rc;
 

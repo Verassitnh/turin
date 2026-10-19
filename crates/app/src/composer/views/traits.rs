@@ -1,5 +1,7 @@
 //! Port of TraitsPicker.tsx: the reasoning/speed trigger and its menu. The
 //! decisions live in `composer::provider_state`; this paints them.
+//!
+//! Port of upstream/apps/web/src/components/chat/TraitsPicker.tsx.
 
 use std::sync::Arc;
 

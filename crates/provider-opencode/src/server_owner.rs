@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-opencode/src/server/OpenCodeServerOwner.ts`.
+//! Port of upstream/packages/provider-opencode/src/server/OpenCodeServerOwner.ts.
 //!
 //! One local `opencode serve` per owner. Borrowers share it. The last borrower
 //! starts a 30s idle timer; a new borrower cancels that timer. If the process

@@ -14,11 +14,15 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 use turin_contracts::model::ProviderOptionDescriptor;
+use turin_contracts::settings::UnifiedSettings;
 use turin_provider_core::server_provider::{ServerProvider, ServerProviderState};
 
 use super::controls::{PopupAlign, SelectItem, popup_list, with_popup};
 use super::provider_meta::instance_label;
 use super::view::{SettingsView, Which};
+use crate::composer::live_catalog::provider_entries;
+use crate::model_selection::{get_app_model_options_for_instance, read_instance_custom_models};
+use crate::settings_logic::use_settings::merge_environment_settings;
 use crate::theme::tokens::{RADIUS_MD, TEXT_SM};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Icon, IconName};
@@ -41,23 +45,52 @@ pub fn provider_is_selectable(provider: &ServerProvider) -> bool {
         && provider.status != ServerProviderState::Disabled
 }
 
-pub fn model_options(providers: &[ServerProvider]) -> Vec<ModelOption> {
+/// The models each selectable instance offers, through `modelSelection.ts`
+/// (`getAppModelOptionsForInstance`): hidden models drop out, the user's order
+/// applies, settings-authored custom models join, and the selected model stays
+/// listed (unavailable) when a dynamic catalogue lost it.
+pub fn model_options(
+    settings: &UnifiedSettings,
+    providers: &[ServerProvider],
+    selected: Option<(&str, &str)>,
+) -> Vec<ModelOption> {
     providers
         .iter()
         .filter(|provider| provider_is_selectable(provider))
         .flat_map(|provider| {
-            provider.models.iter().map(move |model| ModelOption {
-                instance_id: provider.instance_id.as_str().to_owned(),
-                instance_label: instance_label(provider),
-                driver: provider.driver.as_str().to_owned(),
-                slug: model.slug.as_str().to_owned(),
-                name: model.name.as_str().to_owned(),
-                descriptors: model
-                    .capabilities
-                    .as_ref()
-                    .and_then(|capabilities| capabilities.option_descriptors.clone())
-                    .unwrap_or_default(),
-            })
+            let entry = provider_entries(std::slice::from_ref(provider)).remove(0);
+            let selected_model = selected
+                .filter(|(instance_id, _)| *instance_id == entry.instance_id)
+                .map(|(_, model)| model);
+            let custom =
+                read_instance_custom_models(settings, &entry.instance_id, &entry.driver_kind);
+            let label = instance_label(provider);
+            get_app_model_options_for_instance(settings, &entry, selected_model)
+                .into_iter()
+                .map(|option| {
+                    let capabilities = provider
+                        .models
+                        .iter()
+                        .find(|model| model.slug.as_str() == option.slug)
+                        .and_then(|model| model.capabilities.clone())
+                        .or_else(|| {
+                            custom
+                                .iter()
+                                .find(|definition| definition.slug == option.slug)
+                                .and_then(|definition| definition.capabilities.clone())
+                        });
+                    ModelOption {
+                        instance_id: provider.instance_id.as_str().to_owned(),
+                        instance_label: label.clone(),
+                        driver: provider.driver.as_str().to_owned(),
+                        slug: option.slug,
+                        name: option.name,
+                        descriptors: capabilities
+                            .and_then(|capabilities| capabilities.option_descriptors)
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -146,8 +179,16 @@ impl SettingsView {
         on_change: impl Fn(&mut Self, Value, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement {
         let theme = cx.app_theme().clone();
-        let options = model_options(providers);
+        let vm = self.vm(cx);
+        let settings = merge_environment_settings(vm.server.clone(), vm.client.clone());
         let current = selection_fields(selection).or_else(|| resolve_default_selection(providers));
+        let options = model_options(
+            &settings,
+            providers,
+            current
+                .as_ref()
+                .map(|(instance_id, model)| (instance_id.as_str(), model.as_str())),
+        );
         let Some((instance_id, model)) = current else {
             return div()
                 .text_size(TEXT_SM.size)

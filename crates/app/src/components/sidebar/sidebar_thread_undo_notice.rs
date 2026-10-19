@@ -1,4 +1,6 @@
 //! Port of upstream `SidebarThreadUndoNotice.tsx`.
+//!
+//! Port of upstream/apps/web/src/components/sidebar/SidebarThreadUndoNotice.tsx.
 
 use gpui_kit::{App, IntoElement, ParentElement, RenderOnce, Styled, Window, div};
 use turin_shared::keybindings::is_mac_platform;

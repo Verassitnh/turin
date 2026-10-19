@@ -5,6 +5,8 @@
 //! struct. The allocation methods are infallible here: upstream's
 //! `IdAllocatorV2AllocationError` only wrapped `Random` failures, which cannot
 //! happen with `uuid::Uuid::new_v4` (see PORTING.md Deviations).
+//!
+//! Port of upstream/packages/provider-core/src/server/randomUuid.ts.
 
 use turin_contracts::{
     CheckpointId, CheckpointScopeId, CommandId, ContextHandoffId, ContextTransferId, EventId,

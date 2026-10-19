@@ -10,6 +10,9 @@
 //! GitHub media signing: no asset service in the view layer, so a media link renders as a link),
 //! `onFocusCapture` expanding a clamped body (no focus inside a read-only body), and the
 //! reaction's optimistic rollback toast (commands return immediately).
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestReactions.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestMarkdown.tsx.
 
 use std::collections::HashMap;
 use std::rc::Rc;

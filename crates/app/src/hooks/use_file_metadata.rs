@@ -8,6 +8,8 @@
 //! most 512 characters. `AuthFilesystemReadScope` is auth and not ported (one
 //! process, no sessions), and the React context
 //! (`FileMetadataThreadProvider`) becomes the `thread_ref` argument.
+//!
+//! Port of upstream/apps/web/src/hooks/FileMetadataThreadProvider.tsx (context becomes the `thread_ref` argument).
 // The file chips that read this arrive with the chat views.
 #![allow(dead_code)]
 

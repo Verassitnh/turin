@@ -11,6 +11,8 @@
 //! part of `wrap`.
 //!
 //! [`ClientStateCore`]: crate::state::client_state::ClientStateCore
+//!
+//! Port of upstream/packages/client-runtime/src/state/threadCommands.ts (`optimistic.wrap` command set).
 
 use std::future::Future;
 use std::sync::Arc;

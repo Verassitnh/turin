@@ -1,4 +1,4 @@
-//! Port of `upstream/packages/provider-cursor/src/server/CursorUsageAccounts.ts`.
+//! Port of upstream/packages/provider-cursor/src/server/CursorUsageAccounts.ts.
 //!
 //! Cursor's account API is slow, so reads answer from cache and mark themselves
 //! `refreshing` while a background refresh runs.

@@ -1,7 +1,7 @@
 //! Port of upstream/packages/shared/src/markdownPipeline.ts,
 //! markdownGithubAlerts.ts and markdownListIndentation.ts.
-//! Also ports upstream/packages/shared/src/markdownListIndentation.ts.
-//! Also ports upstream/packages/shared/src/markdownGithubAlerts.ts.
+//! Also: Port of upstream/packages/shared/src/markdownListIndentation.ts.
+//! Also: Port of upstream/packages/shared/src/markdownGithubAlerts.ts.
 //!
 //! Upstream runs remark (`remark-gfm`, `remark-breaks` when `lineBreaks`)
 //! plus its own plugins, then rehype, then React components. Turin parses
@@ -916,6 +916,14 @@ mod tests {
     fn line_breaks_mode_keeps_newlines() {
         let doc = parse_chat_markdown("one \ntwo", true);
         assert_eq!(para(&doc).text, "one\ntwo");
+    }
+
+    #[test]
+    fn keeps_thread_links_as_links_for_the_thread_link_chip() {
+        let doc = parse_chat_markdown("see [Auth work](t3-thread://v1/thread-1) now", false);
+        let inlines = para(&doc);
+        assert_eq!(inlines.text, "see Auth work now");
+        assert_eq!(inlines.links, vec!["t3-thread://v1/thread-1".to_string()]);
     }
 
     #[test]

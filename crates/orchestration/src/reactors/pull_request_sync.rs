@@ -4,6 +4,8 @@
 //! (T07 and the git port). What it decides without the host lives here: what a
 //! host summary contributes to a stored snapshot, when two snapshots differ,
 //! when two stacks differ, and whether a link is due for another read.
+//!
+//! Port of upstream/apps/server/src/orchestration-v2/PullRequestSyncReactor.ts (pure parts; sweep in pull_request_sync/sweep.rs).
 
 use std::collections::{HashMap, HashSet};
 

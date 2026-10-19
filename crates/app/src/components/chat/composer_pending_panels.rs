@@ -8,6 +8,9 @@
 //! element state (upstream keeps them in the composer draft store); the card reads its selection
 //! and progress through `derive_pending_user_input_progress`. The approval "more options" menu
 //! is an inline disclosure, and the 1–9 option shortcuts are not bound yet.
+//!
+//! Port of upstream/apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx.
+//! Port of upstream/apps/web/src/components/chat/ComposerPendingApprovalActions.tsx.
 
 use std::collections::HashMap;
 use std::sync::Arc;

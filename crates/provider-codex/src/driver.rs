@@ -6,6 +6,8 @@
 //! snapshot starts pending; `refresh` connects a `codex app-server`, reads the
 //! account and model list, and reports installed/auth/status. Usage limits,
 //! skills, slash commands, and text generation are not ported yet (PORTING.md).
+//!
+//! Port of upstream/apps/server/src/provider/Drivers/CodexDriver.ts.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -47,6 +49,7 @@ use turin_provider_core::snapshot_probe::{
     build_server_provider,
 };
 use turin_provider_core::text_generation::ProviderTextGeneration;
+use turin_provider_core::usage::ProviderUsageReader;
 use turin_provider_core::usage_limits::make_unavailable_usage_limits;
 use turin_shared::cli_args::tokenize_cli_args;
 use turin_text_generation::codex_text_generation::{
@@ -68,6 +71,7 @@ use crate::{
     codex_provider::{now_ms, probe},
     codex_skills::parse_codex_skills_list_response,
     codex_snapshot::SnapshotCell,
+    codex_usage::codex_usage_reader,
     codex_usage_limits::{
         CodexRateLimitSnapshot, CodexResetCreditsSummary, codex_rate_limits_to_limits,
         codex_usage_probe_failed_limits,
@@ -94,6 +98,8 @@ pub struct CodexDriver {
     /// Maps an image attachment to its file for text generation. Without it
     /// image attachments are skipped.
     attachment_path: Option<AttachmentPathResolver>,
+    /// The rollout files the usage page reads (`codexUsage.ts`).
+    usage: ProviderUsageReader,
 }
 
 impl CodexDriver {
@@ -104,6 +110,7 @@ impl CodexDriver {
             managed_host: None,
             model_catalog: None,
             attachment_path: None,
+            usage: codex_usage_reader(),
         }
     }
 
@@ -143,6 +150,10 @@ impl ProviderDriver for CodexDriver {
 
     fn metadata(&self) -> &ProviderDriverMetadata {
         &self.metadata
+    }
+
+    fn usage(&self) -> Option<&ProviderUsageReader> {
+        Some(&self.usage)
     }
 
     fn default_config(&self) -> Value {
@@ -889,6 +900,17 @@ impl ManagedServerProvider for CodexSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exposes_the_rollout_usage_reader_for_the_usage_page() {
+        assert!(matches!(
+            CodexDriver::new().usage(),
+            Some(ProviderUsageReader::Transcripts {
+                provider: turin_contracts::usage::UsageProviderKind::Codex,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn plan_labels_follow_upstream_switch() {

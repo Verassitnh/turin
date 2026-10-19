@@ -2,11 +2,13 @@
 //! the logic half of TraitsPicker.tsx and `providerModels.ts`
 //! (`getProviderModelCapabilities`, `resolveSelectableModel`,
 //! `getProviderModels`, `resolveSelectableProvider`, `getDefaultServerModel`).
-//! Also ports upstream/apps/web/src/providerModels.ts.
+//! Also: Port of upstream/apps/web/src/providerModels.ts.
 //!
 //! Everything is data-driven by the model's option descriptors; the views in
 //! `views/` render what [`traits_section`] and [`build_traits_trigger_display`]
 //! decide.
+//!
+//! Port of upstream/apps/web/src/components/chat/composerProviderState.tsx.
 
 use turin_contracts::model::{DEFAULT_MODEL, default_model_by_provider};
 

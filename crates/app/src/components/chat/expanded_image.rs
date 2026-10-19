@@ -4,6 +4,9 @@
 //! Blob URLs are an in-process table (`blob:turin/…`) so a revoked thumbnail
 //! stops resolving, the same way `URL.revokeObjectURL` makes `fetch` fail.
 //! Video bytes have no player here: the dialog shows the unavailable frame.
+//!
+//! Port of upstream/apps/web/src/components/chat/ExpandedImageDialog.tsx.
+//! Port of upstream/apps/web/src/components/chat/ZoomableImage.tsx.
 
 use std::sync::{Arc, LazyLock, Mutex};
 

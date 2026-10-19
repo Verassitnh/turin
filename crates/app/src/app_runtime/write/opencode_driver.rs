@@ -41,14 +41,17 @@ use turin_provider_core::text_generation::{
     ProviderTextGeneration, ReviewGuideGenerationInput, ReviewGuideGenerationResult,
     ThreadTitleGenerationInput, ThreadTitleGenerationResult,
 };
+use turin_provider_core::usage::ProviderUsageReader;
 use turin_provider_opencode::{
     OpenCodeAdapter, OpenCodeSettings, OpenCodeSnapshotInput, ProbeOutcome,
-    build_open_code_snapshot,
+    build_open_code_snapshot, open_code_usage_reader,
 };
 
 pub struct OpenCodeDriver {
     kind: ProviderDriverKind,
     metadata: ProviderDriverMetadata,
+    /// The SQLite and legacy JSON history the usage page scans (`usage.ts`).
+    usage: ProviderUsageReader,
 }
 
 impl OpenCodeDriver {
@@ -56,6 +59,7 @@ impl OpenCodeDriver {
         Self {
             kind: ProviderDriverKind::new("opencode").expect("opencode driver slug"),
             metadata: ProviderDriverMetadata::new("OpenCode"),
+            usage: open_code_usage_reader(),
         }
     }
 }
@@ -104,6 +108,10 @@ impl ProviderDriver for OpenCodeDriver {
 
     fn metadata(&self) -> &ProviderDriverMetadata {
         &self.metadata
+    }
+
+    fn usage(&self) -> Option<&ProviderUsageReader> {
+        Some(&self.usage)
     }
 
     fn default_config(&self) -> Value {
@@ -261,6 +269,17 @@ impl ProviderTextGeneration for OpenCodeText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exposes_the_opencode_history_reader_for_the_usage_page() {
+        assert!(matches!(
+            OpenCodeDriver::new().usage(),
+            Some(ProviderUsageReader::Scan {
+                provider: turin_contracts::usage::UsageProviderKind::Opencode,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn config_round_trips_with_upstream_defaults() {

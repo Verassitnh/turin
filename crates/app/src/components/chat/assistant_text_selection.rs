@@ -5,6 +5,8 @@
 //! upstream, so a saved citation keeps its meaning across JS and Rust. The DOM half
 //! (`captureAssistantTextSelection`, `findAssistantCitationSourceAnchor`,
 //! `resolveAssistantCitationRange`) reads a live document and is not ported here.
+//!
+//! Port of upstream/apps/web/src/lib/assistantTextSelection.ts (pure text half).
 
 use turin_contracts::assistant_citations::ASSISTANT_CITATION_CONTEXT_LENGTH;
 use turin_contracts::base_schemas::js_trim;

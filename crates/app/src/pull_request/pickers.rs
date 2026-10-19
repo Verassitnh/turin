@@ -12,6 +12,9 @@
 //! Not ported: the combobox's arrow-key highlight and type-ahead (rows are pressed), the
 //! per-pick success / failure toasts (the source reports failures through the snapshot), and
 //! the truncated-list footer's exact wrapping.
+//!
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestReviewerPicker.tsx.
+//! Port of upstream/apps/web/src/components/pullRequest/PullRequestLabelPicker.tsx.
 
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;

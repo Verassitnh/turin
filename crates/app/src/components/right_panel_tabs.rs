@@ -120,6 +120,14 @@ impl RenderOnce for RightPanelTabs {
         let theme = cx.app_theme().clone();
         let surface = window.use_keyed_state("right-panel-surface", cx, |_, _| Surface::Diff);
         let active = *surface.read(cx);
+        let live_pr_target = match &self.live {
+            Some(LiveDiffTarget {
+                client,
+                bus,
+                thread: Some(thread),
+            }) => Some((client.clone(), bus.clone(), thread.clone())),
+            _ => None,
+        };
         let diff_panel = match self.live {
             Some(LiveDiffTarget {
                 client,
@@ -157,6 +165,50 @@ impl RenderOnce for RightPanelTabs {
                 DiffPanel::new(source, window, cx)
             })),
         };
+        // The thread's linked pull requests, over the live pull request store.
+        // Built when the tab is first shown: the store reads the pull request list on creation.
+        let pull_requests = match &live_pr_target {
+            Some((client, bus, thread)) if active == Surface::PullRequests => {
+                let store = window
+                    .use_keyed_state("thread-pull-request-store", cx, |_, cx| {
+                        crate::pull_request::live_source::start(
+                            bus.clone(),
+                            client.read(cx).handle().clone(),
+                            cx,
+                        )
+                    })
+                    .read(cx)
+                    .clone();
+                let state = client.read(cx).state().clone();
+                let linking = crate::pull_request::thread_surface::environment_linking(&state);
+                let project = state
+                    .shell_view
+                    .as_ref()
+                    .and_then(|view| view.project_of_thread(thread))
+                    .and_then(|project| project.source.as_ref())
+                    .and_then(|source| source.repository_identity.clone().flatten())
+                    .and_then(|identity| {
+                        crate::pull_request::thread_surface::link_dialog_project(&identity)
+                    });
+                let surface = window.use_keyed_state(
+                    format!("thread-pull-requests:{}", thread.as_str()),
+                    cx,
+                    |window, cx| {
+                        crate::pull_request::thread_surface::ThreadPullRequestsSurface::new(
+                            store,
+                            thread.clone(),
+                            linking.clone(),
+                            project.clone(),
+                            window,
+                            cx,
+                        )
+                    },
+                );
+                surface.update(cx, |surface, _| surface.set_linking(linking, project));
+                Some(surface)
+            }
+            _ => None,
+        };
         let select = |target: Surface| {
             let surface = surface.clone();
             move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
@@ -171,10 +223,10 @@ impl RenderOnce for RightPanelTabs {
         let body = match (active, diff_panel) {
             (Surface::Diff, Some(panel)) => div().flex().flex_col().flex_1().min_h_0().child(panel),
             (Surface::Diff, None) => empty_state("Open a thread to see its changes.", cx),
-            (Surface::PullRequests, _) => empty_state(
-                "A thread's pull requests are listed on the Pull requests page.",
-                cx,
-            ),
+            (Surface::PullRequests, _) => match pull_requests {
+                Some(surface) => div().flex().flex_col().flex_1().min_h_0().child(surface),
+                None => empty_state("Open a thread to see its pull requests.", cx),
+            },
         };
         div()
             .flex()

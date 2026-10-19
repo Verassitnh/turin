@@ -68,6 +68,7 @@ pub mod stack_popover;
 pub mod summary_tab;
 pub mod thread_links;
 pub mod thread_panel;
+pub mod thread_surface;
 pub mod timeline_tab;
 pub mod toast;
 pub mod view_model;

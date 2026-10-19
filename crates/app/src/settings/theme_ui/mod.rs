@@ -6,7 +6,10 @@
 #![allow(dead_code)]
 
 pub mod icons;
+pub mod theme_color_picker;
+pub mod theme_editor_host;
 pub mod theme_editor_panel;
+pub mod theme_editor_panel_view;
 pub mod theme_import_dialog;
 pub mod theme_preview_circles;
 pub mod theme_search_section;

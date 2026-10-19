@@ -649,6 +649,21 @@ impl AppSidebarLayout {
                 self.open_live_settings("projects", window, cx);
             }
             CommandPaletteEvent::ToggleThemeEditor => {
+                // `toggleThemeEditorForTheme`: closes an open editor, else opens a draft
+                // seeded from the theme in use. The settings window hosts the editor.
+                if cx.has_global::<crate::theme::theme_runtime::ThemeRuntime>() {
+                    let snapshot = crate::theme::theme_runtime::snapshot(cx);
+                    crate::theme::theme_runtime::update_editor(cx, |store| {
+                        store.toggle_theme_editor_for_theme(
+                            &snapshot.theme,
+                            snapshot.theme_halves.as_ref(),
+                            snapshot.resolved_theme,
+                        )
+                    });
+                    if crate::theme::theme_runtime::editor_session(cx).is_none() {
+                        return;
+                    }
+                }
                 self.open_live_settings("appearance", window, cx);
             }
         }

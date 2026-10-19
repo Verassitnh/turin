@@ -2,8 +2,12 @@
 //! (the built-in theme library), ThemePreviewCircles.tsx, ThemeWireframe.tsx
 //! and the typography rows.
 //!
-//! Not ported (PORTING.md Deviations): custom themes (Create/Add theme, the
-//! theme editor and import dialog), the light/dark theme mix (`themeHalves`),
+//! "Create theme", the custom theme cards (Edit, Duplicate) and the built-in cards'
+//! Duplicate open the theme editor (`theme_ui::theme_editor_host`, mounted by the
+//! settings window).
+//!
+//! Not ported (PORTING.md Deviations): the import dialog ("Add theme") and community
+//! theme search, removing a custom theme, the light/dark theme mix (`themeHalves`),
 //! the live composer / diff / terminal font previews (static samples here) and
 //! the terminal font row (terminal is cut).
 //!
@@ -24,9 +28,11 @@ use super::super::search::searchable_setting;
 use super::super::slider::value_badge;
 use super::super::view::{SettingsView, Which};
 use crate::theme::color::{color, with_alpha};
+use crate::theme::theme_editor_store::ThemeEditorSessionInput;
 use crate::theme::theme_palette::{
     get_theme_colors_for_mode, get_theme_definition, get_theme_modes,
 };
+use crate::theme::theme_palette_library::get_custom_themes;
 use crate::theme::theme_palettes::{
     BUILT_IN_THEMES, ThemeAppearance, ThemeColors, ThemeDefinition,
 };
@@ -34,9 +40,10 @@ use crate::theme::theme_preview::{
     ThemePreviewColors, mix_theme_preview_base, standard_theme_preview_colors,
     theme_preview_render_spec,
 };
+use crate::theme::theme_runtime::{self, ThemeRuntime};
 use crate::theme::tokens::{self, RADIUS_LG, RADIUS_XL, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
-use crate::ui::{Icon, IconName};
+use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 
 /// The seven roles `ThemeCardPreviewColors` carries.
 #[derive(Clone)]
@@ -92,12 +99,15 @@ struct ThemeCard {
     id: Option<SharedString>,
     label: SharedString,
     previews: Vec<(ThemeAppearance, PreviewColors)>,
+    /// A saved theme: it can be edited as well as duplicated.
+    custom: bool,
 }
 
 fn card_of(theme: &ThemeDefinition) -> ThemeCard {
     ThemeCard {
         id: Some(theme.id.clone()),
         label: theme.label.clone(),
+        custom: false,
         previews: get_theme_modes(theme)
             .into_iter()
             .map(|mode| {
@@ -117,9 +127,15 @@ fn theme_cards() -> Vec<ThemeCard> {
             .into_iter()
             .map(|mode| (mode, standard_preview(mode)))
             .collect(),
+        custom: false,
     }];
     // Maintainer themes in upstream's order: T3 Chat, Grove, Ocean, Ember, Iris.
     cards.extend(BUILT_IN_THEMES.iter().map(card_of));
+    // Then the saved themes, as `customThemeCollections` follows the maintainer ones.
+    cards.extend(get_custom_themes().iter().map(|theme| ThemeCard {
+        custom: true,
+        ..card_of(theme)
+    }));
     cards
 }
 
@@ -346,6 +362,43 @@ fn preview_circle(colors: &PreviewColors, mode: ThemeAppearance, theme: &AppThem
         .into_any_element()
 }
 
+/// `openThemeEditor`: a draft in the appearance on screen. Nothing happens where the theme
+/// runtime is not installed (the demos).
+fn open_theme_editor(
+    editing_theme_id: Option<String>,
+    seed_theme_id: Option<String>,
+    seed_name: Option<String>,
+    cx: &mut gpui_kit::App,
+) {
+    if !cx.has_global::<ThemeRuntime>() {
+        return;
+    }
+    let initial_appearance = theme_runtime::snapshot(cx).resolved_theme;
+    theme_runtime::update_editor(cx, |store| {
+        store.open_theme_editor(ThemeEditorSessionInput {
+            editing_theme_id,
+            seed_theme_id,
+            seed_name,
+            initial_appearance,
+        })
+    });
+}
+
+/// "Create theme" starts from whatever is on screen for the appearance being edited, so
+/// tuning the theme you already use never means rebuilding it.
+fn create_theme(cx: &mut gpui_kit::App) {
+    if !cx.has_global::<ThemeRuntime>() {
+        return;
+    }
+    let snapshot = theme_runtime::snapshot(cx);
+    let owner = snapshot
+        .theme_halves
+        .as_ref()
+        .and_then(|halves| halves.get(snapshot.resolved_theme).map(str::to_owned))
+        .or_else(|| get_theme_definition(&snapshot.theme).map(|theme| theme.id.to_string()));
+    open_theme_editor(None, owner, None, cx);
+}
+
 impl SettingsView {
     pub(super) fn render_appearance(
         &mut self,
@@ -459,6 +512,50 @@ impl SettingsView {
                     .collect();
                 let active = false;
                 let id = card.id.clone();
+                // Duplicate for every card, Edit for a saved theme. The card's own click
+                // would pick the theme, so a press here stops there.
+                let card_key = card.id.as_deref().unwrap_or("default").to_owned();
+                let mut card_actions = Vec::new();
+                if card.custom {
+                    let (edit_id, edit_label) = (card.id.clone(), card.label.clone());
+                    card_actions.push(
+                        Button::new(SharedString::from(format!("theme-edit-{card_key}")))
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconXs)
+                            .icon(IconName::Pencil)
+                            .tooltip(Tooltip::new(format!("Edit {edit_label}")))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                open_theme_editor(
+                                    edit_id.as_ref().map(ToString::to_string),
+                                    None,
+                                    None,
+                                    cx,
+                                );
+                            })
+                            .into_any_element(),
+                    );
+                }
+                {
+                    let (duplicate_id, duplicate_label) = (card.id.clone(), card.label.clone());
+                    card_actions.push(
+                        Button::new(SharedString::from(format!("theme-duplicate-{card_key}")))
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconXs)
+                            .icon(IconName::Copy)
+                            .tooltip(Tooltip::new(format!("Duplicate {duplicate_label}")))
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                open_theme_editor(
+                                    None,
+                                    duplicate_id.as_ref().map(ToString::to_string),
+                                    Some(format!("{duplicate_label} copy")),
+                                    cx,
+                                );
+                            })
+                            .into_any_element(),
+                    );
+                }
                 let use_label = card.label;
                 let current_mode = mode.clone();
                 let use_card = cx.listener(move |this, _: &gpui_kit::ClickEvent, _, cx| {
@@ -568,6 +665,14 @@ impl SettingsView {
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.foreground)
                                     .child(use_label),
+                            )
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.))
+                                    .children(card_actions),
                             ),
                     )
             }));
@@ -584,9 +689,19 @@ impl SettingsView {
                     .flex()
                     .min_h_8()
                     .items_center()
+                    .justify_between()
+                    .gap_3()
                     .px_0()
                     .pt_2()
-                    .child(heading(searchable_setting("theme").1)),
+                    .child(heading(searchable_setting("theme").1))
+                    .child(
+                        Button::new("create-theme")
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Xs)
+                            .icon(IconName::Palette)
+                            .label("Create theme")
+                            .on_click(|_, _, cx| create_theme(cx)),
+                    ),
             )
             .child(grid)
             .into_any_element()

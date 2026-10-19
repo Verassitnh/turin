@@ -125,6 +125,8 @@ actions!(
         UndoLatestThread,
         /// `chat.find` (mod+f).
         FindInThread,
+        /// mod+l: cite the assistant selection in the composer (Turin; upstream's "Cite" button).
+        CiteSelection,
     ]
 );
 
@@ -140,6 +142,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-u", OpenUsage, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-z", UndoLatestThread, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-f", FindInThread, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-l", CiteSelection, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-q", QuitShortcut, Some(KEY_CONTEXT)),
     ]);
     thread_sidebar::bind_keys(cx, KEY_CONTEXT);
@@ -1023,6 +1026,13 @@ impl AppSidebarLayout {
         crate::components::chat::thread_find_action_bus::request_thread_find_open(cx);
     }
 
+    fn cite_selection(&mut self, _: &CiteSelection, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::components::chat::assistant_selection_state::cite_assistant_selection;
+        if !cite_assistant_selection(window, cx) {
+            cx.propagate();
+        }
+    }
+
     fn toggle_thread_details(
         &mut self,
         _: &ToggleThreadDetails,
@@ -1721,6 +1731,7 @@ impl Render for AppSidebarLayout {
             .on_action(cx.listener(Self::open_usage_action))
             .on_action(cx.listener(Self::undo_latest_thread_action))
             .on_action(cx.listener(Self::find_in_thread))
+            .on_action(cx.listener(Self::cite_selection))
             .on_action(cx.listener(Self::toggle_command_palette))
             .on_action(cx.listener(Self::toggle_file_picker))
             .on_action(cx.listener(Self::toggle_project_search))

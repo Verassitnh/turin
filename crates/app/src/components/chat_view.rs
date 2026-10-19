@@ -13,6 +13,7 @@ use gpui_kit::{
     SharedString, Styled as _, Window, div, px, rems,
 };
 
+use super::chat::assistant_selection_state::set_citation_composer;
 use super::chat::chat_canvas::{ChatCanvas, ChatCanvasMeasurements};
 use super::chat::chat_canvas_layout::ChatCanvasDetailsCard;
 use super::chat::chat_git_host::ChatGitHost;
@@ -393,11 +394,8 @@ impl ChatView {
                 bottom: layout.y + layout.height,
             })
         });
-        let selection_toolbar = if live_target.is_some() {
-            live_selection_toolbar(composer.clone(), canvas_width, canvas_height, window, cx)
-        } else {
-            selection_toolbar_demo()
-        };
+        // mod+L cites the assistant selection into this composer.
+        set_citation_composer(live_target.is_some().then(|| composer.downgrade()), cx);
         let live_lineage_panel = live_target.as_ref().and_then(|live| {
             if !self.thread_details_open {
                 return None;
@@ -528,8 +526,7 @@ impl ChatView {
                     .children(details_card)
                     // `ThreadFind`: over the card's corner, fading in as it slides out.
                     .children(thread_find)
-                    .child(chat_media_layer(timeline.clone(), window, cx))
-                    .children(selection_toolbar),
+                    .child(chat_media_layer(timeline.clone(), window, cx)),
             )
             .into_any_element()
     }
@@ -607,75 +604,6 @@ pub fn subagent_bar_demo() -> Option<SubagentBarData> {
         }),
         parent_thread_id: Some("thread-parent".into()),
     })
-}
-
-/// `TURIN_CHAT_DEMO=selection-toolbar`: the cite button over a made-up selection, until a GPUI
-/// text selection in the assistant markdown reports captures.
-fn live_selection_toolbar(
-    composer: gpui_kit::Entity<crate::composer::views::chat_composer::ChatComposer>,
-    canvas_width: f64,
-    canvas_height: f64,
-    _window: &mut gpui_kit::Window,
-    cx: &mut gpui_kit::App,
-) -> Option<gpui_kit::AnyElement> {
-    use super::chat::assistant_selection_state::{
-        assistant_citation_from_capture, assistant_selection_capture, clear_assistant_selection,
-        selection_toolbar_point,
-    };
-    use super::chat::assistant_selection_toolbar::AssistantSelectionToolbar;
-    use crate::state::models::parse_scoped_thread_key;
-
-    let capture = assistant_selection_capture(cx).lock().ok()?.clone();
-    if capture.selected_text.is_empty() {
-        return None;
-    }
-    let position = selection_toolbar_point(&capture, canvas_width, canvas_height)?;
-    let (environment_id, thread_id) = parse_scoped_thread_key(composer.read(cx).thread_key())?;
-    let citation =
-        assistant_citation_from_capture(&capture, environment_id.as_str(), thread_id.as_str())?;
-    let composer = composer.clone();
-    let composer_focus = composer.read(cx).focus_handle(cx);
-    Some(
-        AssistantSelectionToolbar {
-            citation_text: capture.selected_text.clone().into(),
-            position,
-            on_cite: std::rc::Rc::new(move |window, cx| {
-                composer.update(cx, |composer, cx| {
-                    composer.insert_assistant_citation_from_selection(citation.clone(), window, cx);
-                });
-                clear_assistant_selection(cx);
-                window.focus(&composer_focus, cx);
-                true
-            }),
-            on_dismiss: std::rc::Rc::new(|_, cx| clear_assistant_selection(cx)),
-            on_clear_selection: std::rc::Rc::new(|_, cx| clear_assistant_selection(cx)),
-        }
-        .into_any_element(),
-    )
-}
-
-fn selection_toolbar_demo() -> Option<gpui_kit::AnyElement> {
-    use super::chat::assistant_selection_toolbar::AssistantSelectionToolbar;
-    use super::chat::selection_actions::SelectionActionPoint;
-    if !std::env::var("TURIN_CHAT_DEMO").is_ok_and(|demo| demo.contains("selection-toolbar")) {
-        return None;
-    }
-    let long =
-        std::env::var("TURIN_CHAT_DEMO").is_ok_and(|demo| demo.contains("selection-too-long"));
-    Some(
-        AssistantSelectionToolbar {
-            citation_text: if long {
-                "word ".repeat(2_000).into()
-            } else {
-                "The timeline keeps following the bottom".into()
-            },
-            position: SelectionActionPoint { x: 640.0, y: 360.0 },
-            on_cite: std::rc::Rc::new(|_, _| true),
-            on_dismiss: std::rc::Rc::new(|_, _| {}),
-            on_clear_selection: std::rc::Rc::new(|_, _| {}),
-        }
-        .into_any_element(),
-    )
 }
 
 /// The alerts above the lane, with their dismissals: the provider status banner remembers the

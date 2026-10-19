@@ -18,7 +18,6 @@ pub mod assistant_citation_source;
 #[allow(dead_code)]
 pub mod assistant_citation_target;
 pub mod assistant_selection_state;
-pub mod assistant_selection_toolbar;
 pub mod changed_files_tree;
 pub mod chat_canvas;
 #[allow(dead_code)]

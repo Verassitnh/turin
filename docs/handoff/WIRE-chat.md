@@ -10,7 +10,7 @@ Step 1 live wiring for the chat column and composer on routed threads (`LiveChat
 - **Page scroll**: `TimelinePageScrollSession` + `ChatComposer::bind_page_scroll`; composer PageUp/Down drives `MessagesTimeline::apply_page_scroll_delta`.
 - **Composer context**: `context_record_count`, `build_context_fragment` (copy), `Layer::ContextDetails` popover; wire→draft import via shared `Rc<RefCell<ComposerDraftContextRecords>>` + `composer_context_draft_from_record`.
 - **Context chip in prompt**: `PromptEditorEvent::OpenContextReference` opens the details layer from the composer.
-- **Citation comments**: composer citation chips → `open_citation_comment` / `request_citation_comment`; live assistant markdown selection → cite toolbar → `insert_assistant_citation_from_selection`.
+- **Citation comments**: composer citation chips → `open_citation_comment` / `request_citation_comment`; live assistant markdown selection → ⌘L (`CiteSelection`, `cite_assistant_selection`) → `insert_assistant_citation_from_selection`.
 - **Pending approvals/questions**: top drawer from timeline snapshot + `TimelineSource::respond_*` (live `LiveSource`); question attachment pickers on drawer cards (`question_attachment_drafts` global store).
 - **Composer message-mode pending answers**: `UserInputResponseCapability::Message` → `ComposerViewModel::pending_answer` + `LiveSource::submit_composer_pending_answer` / `respond_to_pending_input`.
 - **Thread navigation seam**: `thread_navigation::request_open_thread` / `take_thread_open_request` (shell should consume like `diff::take_turn_request`); `LiveSource::open_thread` enqueues.

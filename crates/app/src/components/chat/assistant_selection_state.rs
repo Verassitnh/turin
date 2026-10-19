@@ -1,13 +1,17 @@
-//! Live assistant markdown selection for the cite toolbar.
+//! Live assistant markdown selection, cited into the composer with mod+L.
+//!
+//! Upstream floats a "Cite" button at the end of the selection
+//! (`AssistantSelectionToolbar.tsx`); Turin drops the button and cites on the shortcut.
 
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use gpui_kit::{App, Global, Pixels, Point};
+use gpui_kit::{App, Focusable as _, Global, Pixels, Point, WeakEntity, Window};
 
 use super::assistant_text_selection::create_assistant_text_selector;
-use super::selection_actions::SelectionActionPoint;
-use super::timeline::assistant_citations::AssistantCitation;
+use super::timeline::assistant_citations::{ASSISTANT_CITATION_MAX_TEXT_LENGTH, AssistantCitation};
+use crate::composer::views::chat_composer::ChatComposer;
+use crate::state::models::parse_scoped_thread_key;
 
 #[derive(Clone, Default)]
 pub struct AssistantSelectionCapture {
@@ -73,16 +77,62 @@ pub fn clear_assistant_selection(cx: &mut App) {
     cx.refresh_windows();
 }
 
-pub fn selection_toolbar_point(
-    capture: &AssistantSelectionCapture,
-    viewport_width: f64,
-    viewport_height: f64,
-) -> Option<SelectionActionPoint> {
-    let anchor = capture.anchor?;
-    Some(SelectionActionPoint {
-        x: f64::from(anchor.x).clamp(8.0, viewport_width - 8.0),
-        y: f64::from(anchor.y).clamp(8.0, viewport_height - 8.0),
-    })
+/// `text.length > ASSISTANT_CITATION_MAX_TEXT_LENGTH` (JS length: UTF-16 code units).
+pub fn assistant_selection_too_long(text: &str) -> bool {
+    text.encode_utf16().count() > ASSISTANT_CITATION_MAX_TEXT_LENGTH
+}
+
+/// The composer of the open live chat: where mod+L puts the citation.
+#[derive(Default)]
+struct CitationComposer(Option<WeakEntity<ChatComposer>>);
+
+impl Global for CitationComposer {}
+
+/// The chat column reports its composer on every render: `None` off a live chat. Unchanged
+/// targets skip `set_global`, which would notify the global's observers.
+pub fn set_citation_composer(composer: Option<WeakEntity<ChatComposer>>, cx: &mut App) {
+    let current = cx
+        .try_global::<CitationComposer>()
+        .and_then(|target| target.0.as_ref())
+        .map(|target| target.entity_id());
+    if current != composer.as_ref().map(|composer| composer.entity_id()) {
+        cx.set_global(CitationComposer(composer));
+    }
+}
+
+/// mod+L: cites the captured selection into the open chat's composer and focuses it. Does
+/// nothing (`false`) without a selection, a live composer, or with a selection over the limit.
+pub fn cite_assistant_selection(window: &mut Window, cx: &mut App) -> bool {
+    let Some(composer) = cx
+        .try_global::<CitationComposer>()
+        .and_then(|target| target.0.as_ref())
+        .and_then(WeakEntity::upgrade)
+    else {
+        return false;
+    };
+    let capture = match assistant_selection_capture(cx).lock() {
+        Ok(capture) => capture.clone(),
+        Err(_) => return false,
+    };
+    if capture.selected_text.is_empty() || assistant_selection_too_long(&capture.selected_text) {
+        return false;
+    }
+    let Some((environment_id, thread_id)) = parse_scoped_thread_key(composer.read(cx).thread_key())
+    else {
+        return false;
+    };
+    let Some(citation) =
+        assistant_citation_from_capture(&capture, environment_id.as_str(), thread_id.as_str())
+    else {
+        return false;
+    };
+    composer.update(cx, |composer, cx| {
+        composer.insert_assistant_citation_from_selection(citation, window, cx);
+    });
+    clear_assistant_selection(cx);
+    let focus = composer.read(cx).focus_handle(cx);
+    window.focus(&focus, cx);
+    true
 }
 
 pub fn assistant_citation_from_capture(
@@ -115,4 +165,20 @@ pub fn assistant_citation_from_capture(
         prefix: selector.prefix,
         suffix: selector.suffix,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_limit_counts_utf16_code_units_like_js_length() {
+        let limit = "a".repeat(ASSISTANT_CITATION_MAX_TEXT_LENGTH);
+        assert!(!assistant_selection_too_long(&limit));
+        assert!(assistant_selection_too_long(&format!("{limit}a")));
+        // One astral character is two UTF-16 units.
+        let almost = "a".repeat(ASSISTANT_CITATION_MAX_TEXT_LENGTH - 1);
+        assert!(!assistant_selection_too_long(&almost));
+        assert!(assistant_selection_too_long(&format!("{almost}😀")));
+    }
 }

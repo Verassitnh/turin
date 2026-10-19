@@ -561,9 +561,13 @@ fn advance(
     };
     if !progress.is_last_question {
         let next = progress.question_index + 1;
-        edit_session(state, source.as_ref(), &prompt.request_id, cx, |index, _| {
-            *index = next
-        });
+        edit_session(
+            state,
+            source.as_ref(),
+            &prompt.request_id,
+            cx,
+            |index, _| *index = next,
+        );
         return;
     }
     // Every question must resolve before the answers go out.

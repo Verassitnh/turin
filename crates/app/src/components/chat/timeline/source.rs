@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use gpui_kit::{App, AppContext as _, Context, Entity};
 
-use crate::components::chat::pending_user_input::PendingUserInputDraftAnswer;
 use super::fixtures::{FixtureThread, startup_thread, with_pending_question};
 use super::session_logic::{TimelineEntriesInput, derive_timeline_entries_from_visible_turn_items};
 use super::turn_item::{ProviderApprovalDecision, TurnItemPayload};
 use super::types::{RunStatus, ThreadTimelineSnapshot};
+use crate::components::chat::pending_user_input::PendingUserInputDraftAnswer;
 
 /// User responses the view sends back to whatever owns the thread.
 /// Delivered with the saved relative path, or the failure message.

@@ -1057,12 +1057,7 @@ impl TimelineSource for LiveSource {
         let (thread_id, request_id) = (self.thread_id.clone(), request_id.to_owned());
         let task = self.bus.task(cx, move |commands| async move {
             commands
-                .respond_to_request(
-                    &thread_id,
-                    &request_id,
-                    Some(decision_wire(decision)),
-                    None,
-                )
+                .respond_to_request(&thread_id, &request_id, Some(decision_wire(decision)), None)
                 .await
         });
         cx.spawn(async move |cx| {

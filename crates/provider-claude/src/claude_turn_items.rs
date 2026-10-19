@@ -561,8 +561,13 @@ pub fn user_input_questions(input: &Value) -> Vec<Value> {
 /// What a raised request asks the user.
 pub enum RequestBody<'a> {
     /// `request_kind` is a `request_kind(..)` value.
-    Approval { request_kind: &'a str, prompt: &'a str },
-    UserInput { questions: &'a [Value] },
+    Approval {
+        request_kind: &'a str,
+        prompt: &'a str,
+    },
+    UserInput {
+        questions: &'a [Value],
+    },
 }
 
 pub struct RequestArtifacts {
@@ -607,7 +612,10 @@ pub fn request_artifacts(
     });
     if let Some(map) = item.as_object_mut() {
         match body {
-            RequestBody::Approval { request_kind, prompt } => {
+            RequestBody::Approval {
+                request_kind,
+                prompt,
+            } => {
                 map.insert("type".into(), json!("approval_request"));
                 map.insert("requestKind".into(), json!(request_kind));
                 map.insert("prompt".into(), json!(prompt));

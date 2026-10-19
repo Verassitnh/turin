@@ -37,7 +37,6 @@ use crate::{
     claude_skill_dispatch::dispatch_content_blocks, claude_skills::user_invocable_skill_names,
 };
 use async_trait::async_trait;
-use turin_claude_protocol::InboundControl;
 use futures::stream;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -51,6 +50,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use turin_claude_protocol::InboundControl;
 use turin_contracts::{
     PositiveInt, ProviderSessionId, RunId, RuntimeRequestId, ThreadId, TrimmedNonEmptyString,
     UtcDateTime,

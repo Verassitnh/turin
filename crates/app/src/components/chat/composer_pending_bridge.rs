@@ -272,9 +272,7 @@ mod tests {
             approvals: vec![],
             user_inputs: vec![input(capability)],
         };
-        assert!(
-            message_mode_pending_input(&requests(UserInputResponseCapability::Live)).is_some()
-        );
+        assert!(message_mode_pending_input(&requests(UserInputResponseCapability::Live)).is_some());
         assert!(
             message_mode_pending_input(&requests(UserInputResponseCapability::Message)).is_some()
         );

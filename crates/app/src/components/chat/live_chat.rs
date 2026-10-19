@@ -422,7 +422,17 @@ impl LiveSource {
             .detail
             .as_ref()
             .map(|detail| detail.pending_requests.clone());
-        let mut snapshot = snapshot_from_projection(projection, pending.as_deref(), workspace_root);
+        let attachments_dir = self
+            .bus
+            .commands()
+            .ok()
+            .map(|commands| commands.runtime().attachments_dir.clone());
+        let mut snapshot = snapshot_from_projection(
+            projection,
+            pending.as_deref(),
+            workspace_root,
+            attachments_dir.as_deref(),
+        );
         snapshot.history = history_controls(&entry.state.history);
         self.timeline
             .update(cx, |store, cx| {

@@ -285,8 +285,34 @@ fn run_status(value: OrchestrationV2RunStatus) -> RunStatus {
     }
 }
 
+/// Upstream's `ACTIVITY_RUN_STATUSES` (threadExecution.ts): a queued run is
+/// waiting its turn, not active.
+pub fn run_is_active(status: OrchestrationV2RunStatus) -> bool {
+    matches!(
+        status,
+        OrchestrationV2RunStatus::Preparing
+            | OrchestrationV2RunStatus::Starting
+            | OrchestrationV2RunStatus::Running
+            | OrchestrationV2RunStatus::Waiting
+    )
+}
+
+/// The thread's active run: the latest by ordinal among the active ones,
+/// whatever queued or finished runs follow it (`findLast` in
+/// `dispatchThreadMessage`).
+pub fn active_run(
+    runs: &[Arc<turin_contracts::orchestration_v2::OrchestrationV2Run>],
+) -> Option<&Arc<turin_contracts::orchestration_v2::OrchestrationV2Run>> {
+    runs.iter()
+        .filter(|run| run_is_active(run.status))
+        .max_by_key(|run| run.ordinal)
+}
+
+/// `deriveThreadActivityRun`: the run that owns live provider work, else the
+/// newest run once the thread is idle. A newer queued run must not make an
+/// older executing run look settled.
 fn latest_run(runs: &[Arc<OrchestrationV2Run>]) -> Option<TimelineLatestRun> {
-    let run = runs.iter().max_by_key(|run| run.ordinal)?;
+    let run = active_run(runs).or_else(|| runs.iter().max_by_key(|run| run.ordinal))?;
     Some(TimelineLatestRun {
         run_id: run.id.to_string(),
         status: run_status(run.status),
@@ -427,7 +453,7 @@ pub fn snapshot_from_projection(
     let running = latest_run.as_ref().filter(|run| {
         matches!(
             run.status,
-            RunStatus::Running | RunStatus::Starting | RunStatus::Waiting
+            RunStatus::Preparing | RunStatus::Running | RunStatus::Starting | RunStatus::Waiting
         )
     });
     ThreadTimelineSnapshot {
@@ -483,6 +509,55 @@ mod tests {
             TurnItemPayload::Error { ref failure, retry: None }
                 if failure.class == ProviderFailureClass::UsageLimit
         ));
+    }
+
+    fn run(id: &str, ordinal: u64, status: &str) -> Arc<OrchestrationV2Run> {
+        Arc::new(
+            serde_json::from_value(json!({
+                "id": id,
+                "threadId": "thread-v2",
+                "ordinal": ordinal,
+                "providerInstanceId": "codex",
+                "modelSelection": { "instanceId": "codex", "model": "gpt-5.4" },
+                "providerThreadId": null,
+                "userMessageId": "message-1",
+                "rootNodeId": null,
+                "activeAttemptId": null,
+                "status": status,
+                "requestedAt": "2026-06-20T00:00:00.000Z",
+                "startedAt": null,
+                "completedAt": null,
+                "checkpointId": null,
+                "contextHandoffId": null,
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_newer_queued_run_does_not_make_the_running_run_look_settled() {
+        let runs = vec![run("run-1", 1, "running"), run("run-2", 2, "queued")];
+        let latest = latest_run(&runs).unwrap();
+        assert_eq!(latest.run_id, "run-1");
+        assert_eq!(latest.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn an_idle_thread_reports_its_newest_run() {
+        let runs = vec![run("run-1", 1, "completed"), run("run-2", 2, "cancelled")];
+        assert_eq!(latest_run(&runs).unwrap().run_id, "run-2");
+    }
+
+    #[test]
+    fn queued_runs_are_not_active() {
+        assert!(active_run(&[run("run-1", 1, "queued")]).is_none());
+        assert_eq!(
+            active_run(&[run("run-1", 1, "running"), run("run-2", 2, "queued")])
+                .unwrap()
+                .id
+                .as_str(),
+            "run-1"
+        );
     }
 
     #[test]

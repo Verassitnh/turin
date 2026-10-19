@@ -298,6 +298,14 @@ pub enum RunStatus {
     RolledBack,
 }
 
+/// `MessagesTimelineHistoryControls` (the "Load earlier turns" row).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimelineHistoryControls {
+    pub has_more_history: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
 /// `TimelineLatestRun`: `Pick<ThreadRunSummary, "runId" | "status" | "startedAt" | "completedAt">`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimelineLatestRun {
@@ -342,6 +350,8 @@ pub struct PendingUserInput {
 /// `MessagesTimelineProps` in upstream/apps/web/src/components/chat.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThreadTimelineSnapshot {
+    /// `historyControls`: set while earlier turns remain (or a load failed).
+    pub history: Option<TimelineHistoryControls>,
     pub thread_id: String,
     pub timeline_entries: std::sync::Arc<Vec<TimelineEntry>>,
     pub latest_run: Option<TimelineLatestRun>,

@@ -27,9 +27,10 @@ use super::composer_pending_bridge::{
     PendingSubmitPlan, apply_composer_prompt_to_session, message_mode_pending_input,
     pending_answer_for_message_input, sync_pending_input_session,
 };
-use super::timeline::live_projection::{decision_wire, snapshot_from_projection};
+use super::timeline::live_projection::{active_run, decision_wire, snapshot_from_projection};
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
 use super::timeline::turn_item::ProviderApprovalDecision;
+use super::timeline::types::TimelineHistoryControls;
 use crate::app_runtime::write::bus::CommandBus;
 use crate::app_runtime::write::commands::{CommandError, Delivery, SendMessage};
 use crate::composer::command_items::PathKind;
@@ -46,9 +47,7 @@ use crate::state::local_environment_id;
 use crate::state::models::scoped_thread_key;
 use crate::state::store::{ClientStateHandle, ClientStore};
 use crate::state::thread_projection::ThreadProjection;
-use turin_contracts::orchestration_v2::{
-    OrchestrationV2ConversationMessageRole, OrchestrationV2RunStatus,
-};
+use turin_contracts::orchestration_v2::OrchestrationV2ConversationMessageRole;
 
 /// How long a send may run before it is reported as failed.
 const SEND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -202,29 +201,6 @@ fn attachment_names(
         .collect()
 }
 
-/// Upstream's `ACTIVITY_RUN_STATUSES` (threadExecution.ts): a queued run is
-/// waiting its turn, not active.
-fn run_is_active(status: OrchestrationV2RunStatus) -> bool {
-    matches!(
-        status,
-        OrchestrationV2RunStatus::Preparing
-            | OrchestrationV2RunStatus::Starting
-            | OrchestrationV2RunStatus::Running
-            | OrchestrationV2RunStatus::Waiting
-    )
-}
-
-/// The thread's active run: the latest by ordinal among the active ones,
-/// whatever queued or finished runs follow it (`findLast` in
-/// `dispatchThreadMessage`).
-fn active_run(
-    runs: &[Arc<turin_contracts::orchestration_v2::OrchestrationV2Run>],
-) -> Option<&Arc<turin_contracts::orchestration_v2::OrchestrationV2Run>> {
-    runs.iter()
-        .filter(|run| run_is_active(run.status))
-        .max_by_key(|run| run.ordinal)
-}
-
 fn composer_runtime_mode(mode: turin_contracts::provider_policy::RuntimeMode) -> RuntimeMode {
     RuntimeMode::from_wire(
         &serde_json::to_value(mode)
@@ -233,6 +209,36 @@ fn composer_runtime_mode(mode: turin_contracts::provider_policy::RuntimeMode) ->
             .unwrap_or_default(),
     )
     .unwrap_or_default()
+}
+
+/// `threadHistoryControls`: shown while older turns remain or a load failed.
+fn history_controls(
+    history: &crate::state::thread_history_merge::ThreadHistoryMeta,
+) -> Option<TimelineHistoryControls> {
+    crate::state::thread_history_merge::should_show_load_earlier_control(history).then(|| {
+        TimelineHistoryControls {
+            has_more_history: history.has_more_history,
+            loading: history.loading,
+            error: history.error.clone(),
+        }
+    })
+}
+
+/// The model the standalone `/compact` turn runs on: the composer's choice,
+/// else the thread's.
+fn compact_model_selection(
+    chosen: Option<(String, String)>,
+    options: Option<&[OptionSelection]>,
+    thread_instance: &str,
+    thread_model: &str,
+) -> Value {
+    let (instance_id, model) =
+        chosen.unwrap_or_else(|| (thread_instance.to_owned(), thread_model.to_owned()));
+    let mut selection = json!({"instanceId": instance_id, "model": model});
+    if let Some(options) = options {
+        selection["options"] = Value::Array(options.iter().map(option_json).collect());
+    }
+    selection
 }
 
 fn option_json(selection: &OptionSelection) -> Value {
@@ -260,7 +266,8 @@ impl LiveSource {
             .detail
             .as_ref()
             .map(|detail| detail.pending_requests.clone());
-        let snapshot = snapshot_from_projection(projection, pending.as_deref(), workspace_root);
+        let mut snapshot = snapshot_from_projection(projection, pending.as_deref(), workspace_root);
+        snapshot.history = history_controls(&entry.state.history);
         self.timeline
             .update(cx, |store, cx| {
                 if **store.snapshot() != snapshot {
@@ -594,8 +601,50 @@ impl ComposerSource for LiveSource {
 
     fn toggle_keep_full_history(&self, _cx: &mut App) {}
 
+    /// `onCompactContext`: sends the standalone `/compact` command as a turn.
     fn compact_context(&self, cx: &mut App) {
-        self.not_wired("Compact context", cx);
+        if self.overrides.borrow().sending {
+            return;
+        }
+        let state = self.handle.snapshot();
+        let Some(data) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.state.data.clone())
+        else {
+            return;
+        };
+        if active_run(&data.runs).is_some() {
+            push_error(
+                cx,
+                "Failed to compact context",
+                "Wait for the current turn to finish.",
+            );
+            return;
+        }
+        let selection = compact_model_selection(
+            self.overrides.borrow().model.clone(),
+            self.overrides.borrow().model_options.as_deref(),
+            data.thread.model_selection.instance_id.as_ref(),
+            data.thread.model_selection.model.as_ref(),
+        );
+        let thread_id = self.thread_id.clone();
+        self.run_command(
+            "Failed to compact context",
+            cx,
+            move |commands| async move {
+                commands
+                    .send_message(SendMessage {
+                        thread_id,
+                        text: "/compact".to_owned(),
+                        attachments: Vec::new(),
+                        model_selection: Some(selection),
+                        delivery: Delivery::StartImmediately,
+                        title_seed: None,
+                    })
+                    .await
+                    .map(|_| ())
+            },
+        );
     }
 
     fn dismiss_banner(&self, id: &str, _cx: &mut App) {
@@ -1042,6 +1091,10 @@ impl TimelineSource for LiveSource {
         self.not_wired("Reverting to a turn", cx);
     }
 
+    fn load_earlier_history(&self, _cx: &mut App) {
+        self.handle.load_earlier(self.thread_id.clone());
+    }
+
     fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, cx: &mut App) {
         crate::diff::request_open_turn_diff(run_id, file_path, cx);
     }
@@ -1118,14 +1171,56 @@ mod tests {
     }
 
     #[test]
+    fn history_row_shows_while_older_turns_remain_or_a_load_failed() {
+        use crate::state::thread_history_merge::ThreadHistoryMeta;
+        assert_eq!(history_controls(&ThreadHistoryMeta::default()), None);
+        let more = history_controls(&ThreadHistoryMeta {
+            has_more_history: true,
+            loading: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(more.has_more_history && more.loading && more.error.is_none());
+        let failed = history_controls(&ThreadHistoryMeta {
+            error: Some("Could not load earlier activity.".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!failed.has_more_history);
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("Could not load earlier activity.")
+        );
+    }
+
+    #[test]
+    fn compact_runs_on_the_composer_model_else_the_thread_model() {
+        assert_eq!(
+            compact_model_selection(None, None, "codex", "gpt-5.4"),
+            json!({"instanceId": "codex", "model": "gpt-5.4"})
+        );
+        assert_eq!(
+            compact_model_selection(
+                Some(("claudeAgent".into(), "sonnet".into())),
+                None,
+                "codex",
+                "gpt-5.4"
+            ),
+            json!({"instanceId": "claudeAgent", "model": "sonnet"})
+        );
+    }
+
+    #[test]
     fn composer_settings_follow_the_saved_client_settings() {
-        let mut saved = ClientSettings::default();
-        saved.send_shortcut = turin_contracts::settings::SendShortcut::ModEnter;
-        saved.follow_up_behavior = turin_contracts::settings::FollowUpBehavior::Queue;
-        saved.context_window_meter_enabled = false;
-        saved.plan_mode_enabled = false;
-        saved.composer_rich_text_enabled = false;
-        saved.show_skills_in_slash_menu = false;
+        let saved = ClientSettings {
+            send_shortcut: turin_contracts::settings::SendShortcut::ModEnter,
+            follow_up_behavior: turin_contracts::settings::FollowUpBehavior::Queue,
+            context_window_meter_enabled: false,
+            plan_mode_enabled: false,
+            composer_rich_text_enabled: false,
+            show_skills_in_slash_menu: false,
+            ..ClientSettings::default()
+        };
         let settings = crate::composer::view_model::ComposerSettings::from_client(&saved);
         assert_eq!(settings.send_shortcut, SendShortcut::ModEnter);
         assert_eq!(settings.follow_up_behavior, ActiveTurnComposerAction::Queue);

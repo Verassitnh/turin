@@ -51,6 +51,8 @@ pub trait TimelineSource: 'static {
     fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, cx: &mut App);
     /// `onOpenThread`: navigate to another thread (subagents, created threads).
     fn open_thread(&self, thread_id: &str, cx: &mut App);
+    /// `historyControls.onLoadEarlier`: fetch the next older page of turns.
+    fn load_earlier_history(&self, _cx: &mut App) {}
     /// `AuthFilesystemWriteScope` for the thread's environment: whether the plan card may
     /// save into the workspace.
     fn can_write_workspace_files(&self) -> bool {

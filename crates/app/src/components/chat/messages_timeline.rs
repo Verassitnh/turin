@@ -19,9 +19,11 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FollowMode, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, Styled as _, Subscription, Task, Window, div, list, px, rems,
+    AnyElement, App, Context, Entity, FollowMode, InteractiveElement as _, IntoElement,
+    ListAlignment, ListState, ParentElement as _, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, list, px, rems,
 };
 
 use super::assistant_citation_source::citation_highlight_opacity;
@@ -36,7 +38,7 @@ use super::timeline::messages_timeline_logic::{
     compute_stable_messages_timeline_rows, derive_messages_timeline_rows_with_state,
 };
 use super::timeline::source::{ThreadTimelineStore, TimelineSource};
-use super::timeline::types::ThreadTimelineSnapshot;
+use super::timeline::types::{ThreadTimelineSnapshot, TimelineHistoryControls};
 use super::timeline_message_rows::{
     assistant_meta_row, assistant_row, proposed_plan_row, user_row,
 };
@@ -47,7 +49,7 @@ use super::timeline_work_rows::{
 use super::timestamp_format::TimestampFormat;
 use super::work_log::{WorkLogLayout, work_log_block};
 use crate::theme::color::with_alpha;
-use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, TEXT_SM};
+use crate::theme::tokens::{CHAT_CONTENT_MAX_WIDTH, TEXT_SM, TEXT_XS};
 use crate::theme::{ActiveAppTheme, AppTheme};
 
 /// `estimatedItemSize`-like overdraw: rows within this distance of the
@@ -127,6 +129,8 @@ pub struct MessagesTimeline {
     ui: Arc<TimelineUiState>,
     timestamp_format: TimestampFormat,
     ticker: Option<Task<()>>,
+    /// The "Load earlier turns" row shown in the list header.
+    history: Option<TimelineHistoryControls>,
     citation: AssistantCitationController,
     pulse: Option<(String, Instant)>,
     pulse_task: Option<Task<()>>,
@@ -150,6 +154,7 @@ impl MessagesTimeline {
             ui: Arc::new(TimelineUiState::default()),
             timestamp_format: TimestampFormat::default(),
             ticker: None,
+            history: None,
             citation: AssistantCitationController::default(),
             pulse: None,
             pulse_task: None,
@@ -350,6 +355,11 @@ impl MessagesTimeline {
     fn recompute(&mut self, cx: &mut Context<Self>) {
         let started = std::time::Instant::now();
         let snapshot = self.store.read(cx).snapshot().clone();
+        if self.history != snapshot.history {
+            self.history = snapshot.history.clone();
+            // Re-measure the header: its height follows the history row.
+            self.list.splice(0..1, 1);
+        }
         let input = self.rows_input(&snapshot);
         let projection = derive_messages_timeline_rows_with_state(input, self.projection.as_ref());
         self.stable = compute_stable_messages_timeline_rows(projection.rows.clone(), &self.stable);
@@ -405,10 +415,85 @@ impl MessagesTimeline {
         }));
     }
 
+    /// The list header: the spacer, plus `TimelineHistoryControl` while earlier
+    /// turns remain (or a load failed).
+    fn render_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(history) = self.history.clone() else {
+            return div().h(rems(1.)).into_any_element();
+        };
+        let theme = cx.app_theme().clone();
+        let source = self.store.read(cx).source();
+        let mut lane = div()
+            .flex()
+            .flex_col()
+            .gap(rems(0.375))
+            .pb(rems(0.5))
+            .w_full()
+            .min_w_0();
+        if history.has_more_history {
+            let label = if history.loading {
+                "Loading earlier turns\u{2026}"
+            } else {
+                "Load earlier turns"
+            };
+            let loading = history.loading;
+            let muted = with_alpha(theme.muted_foreground, 0.6);
+            let hover = theme.foreground;
+            lane = lane.child(
+                div()
+                    .id("load-earlier-turns")
+                    .w_full()
+                    .py(rems(0.375))
+                    .flex()
+                    .justify_center()
+                    .text_size(TEXT_XS.size)
+                    .text_color(muted)
+                    .when(!loading, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(move |style| style.text_color(hover))
+                            .on_click(move |_, _, cx| {
+                                if let Some(source) = source.as_ref() {
+                                    source.load_earlier_history(cx);
+                                }
+                            })
+                    })
+                    .child(label),
+            );
+        }
+        if let Some(error) = history.error.clone() {
+            lane = lane.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .text_size(TEXT_XS.size)
+                    .text_color(theme.muted_foreground)
+                    .child(error),
+            );
+        }
+        div()
+            .w_full()
+            .px(rems(3.))
+            .child(
+                div()
+                    .mx_auto()
+                    .w_full()
+                    .min_w_0()
+                    .max_w(CHAT_CONTENT_MAX_WIDTH)
+                    .pt(rems(1.))
+                    .child(lane),
+            )
+            .into_any_element()
+    }
+
     fn render_item(&mut self, ix: usize, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let row_count = self.rows.len();
         // `TIMELINE_LIST_HEADER` / footer: `h-3 sm:h-4`.
-        if ix == 0 || ix > row_count {
+        if ix == 0 {
+            return self.render_header(cx);
+        }
+        if ix > row_count {
             return div().h(rems(1.)).into_any_element();
         }
         let row = self.rows[ix - 1].clone();

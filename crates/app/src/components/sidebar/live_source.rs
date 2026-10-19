@@ -376,13 +376,14 @@ mod tests {
     #[test]
     fn the_snapshot_carries_the_saved_client_settings() {
         let state = ClientStateCore::new(local_environment_id()).snapshot();
-        let mut saved = ClientSettings::default();
-        saved.confirm_thread_delete = false;
-        saved.confirm_thread_archive = true;
-        saved.sidebar_working_shelf_enabled = true;
-        saved.timestamp_format = turin_contracts::settings::TimestampFormat::TwentyFourHour;
-        saved.sidebar_project_sort_order =
-            turin_contracts::settings::SidebarProjectSortOrder::Manual;
+        let saved = ClientSettings {
+            confirm_thread_delete: false,
+            confirm_thread_archive: true,
+            sidebar_working_shelf_enabled: true,
+            timestamp_format: turin_contracts::settings::TimestampFormat::TwentyFourHour,
+            sidebar_project_sort_order: turin_contracts::settings::SidebarProjectSortOrder::Manual,
+            ..ClientSettings::default()
+        };
         let ui = LocalUi {
             settings: SidebarSettings::from_client(&saved),
             grouping: select_project_grouping_settings(&saved),

@@ -734,10 +734,17 @@ impl ChatComposer {
             return;
         }
         self.restored_nonce = restore.nonce;
-        if self.has_sendable_content(cx) {
+        if restore.merge {
+            let merged = crate::composer::view_model::merge_restored_prompt(
+                &self.prompt(cx),
+                &restore.prompt,
+            );
+            self.replace_prompt(&merged, window, cx);
+        } else if self.has_sendable_content(cx) {
             return;
+        } else {
+            self.replace_prompt(&restore.prompt, window, cx);
         }
-        self.replace_prompt(&restore.prompt, window, cx);
         let key = self.thread_key.clone();
         self.drafts.add_images(
             &key,

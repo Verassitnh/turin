@@ -271,9 +271,22 @@ pub struct PendingAnswer {
 #[derive(Debug, Clone)]
 pub struct DraftRestore {
     pub nonce: u64,
+    /// Append to whatever is already in the composer instead of yielding to it
+    /// (rewinding to a message returns its prompt even over a typed draft).
+    pub merge: bool,
     pub prompt: String,
     pub images: Vec<ComposerImageAttachment>,
     pub files: Vec<ComposerFileAttachment>,
+}
+
+/// A restored prompt put after what the user already typed, separated by a
+/// blank line (`onRevertToTurnCount`'s `nextPrompt`).
+pub fn merge_restored_prompt(typed: &str, restored: &str) -> String {
+    match (restored.trim().is_empty(), typed.trim().is_empty()) {
+        (true, _) => typed.to_owned(),
+        (false, true) => restored.to_owned(),
+        (false, false) => format!("{}\n\n{typed}", restored.trim_end()),
+    }
 }
 
 /// What `ChatComposerProps` carries into the composer.

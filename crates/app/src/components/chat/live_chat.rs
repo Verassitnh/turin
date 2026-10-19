@@ -541,12 +541,10 @@ fn restore_into_drafts(
         .get_composer_draft(thread_key)
         .map(|draft| draft.prompt)
         .unwrap_or_default();
-    let next = match (prompt.trim().is_empty(), typed.trim().is_empty()) {
-        (true, _) => typed,
-        (false, true) => prompt,
-        (false, false) => format!("{}\n\n{typed}", prompt.trim_end()),
-    };
-    drafts.set_prompt(thread_key, &next);
+    drafts.set_prompt(
+        thread_key,
+        &crate::composer::view_model::merge_restored_prompt(&typed, &prompt),
+    );
     drafts.add_images(thread_key, images, AddAttachmentsOptions::default());
     drafts.add_files(thread_key, files, AddAttachmentsOptions::default());
 }
@@ -952,21 +950,37 @@ impl LiveSource {
         cx.spawn(async move |cx| {
             let outcome = task.await;
             cx.update(|cx| {
-                if let Some(source) = source.upgrade() {
+                let source = source.upgrade();
+                if let Some(source) = &source {
                     source.update_overrides(cx, |overrides| overrides.reverting = false);
                 }
                 match outcome {
-                    Ok(()) => restore_failed_send(
-                        &thread_key,
-                        (
+                    Ok(()) => {
+                        let prompt =
                             crate::composer::prompt_history::recallable_composer_prompt(
                                 &message_text,
+                            );
+                        match source {
+                            // The open composer takes the prompt through its
+                            // editor; writing only the draft store would leave
+                            // the editor stale.
+                            Some(source) => source.update_overrides(cx, |overrides| {
+                                overrides.restore_nonce += 1;
+                                overrides.restore = Some(DraftRestore {
+                                    nonce: overrides.restore_nonce,
+                                    merge: true,
+                                    prompt,
+                                    images: Vec::new(),
+                                    files: Vec::new(),
+                                });
+                            }),
+                            None => restore_failed_send(
+                                &thread_key,
+                                (prompt, Vec::new(), Vec::new()),
+                                cx,
                             ),
-                            Vec::new(),
-                            Vec::new(),
-                        ),
-                        cx,
-                    ),
+                        }
+                    }
                     Err(error) => push_error(cx, TITLE, &error.message),
                 }
             });
@@ -1667,6 +1681,7 @@ impl LiveSource {
                         overrides.restore_nonce += 1;
                         overrides.restore = Some(DraftRestore {
                             nonce: overrides.restore_nonce,
+                            merge: false,
                             prompt: restore.0,
                             images: restore.1,
                             files: restore.2,
@@ -1893,6 +1908,15 @@ mod tests {
         let draft = other.get_composer_draft("local:t1").unwrap();
         assert_eq!(draft.prompt, "unsent\n\ntyped since");
         assert_eq!(draft.images.len(), 1);
+    }
+
+    #[test]
+    fn a_reverted_prompt_goes_after_what_was_typed_and_never_replaces_it() {
+        use crate::composer::view_model::merge_restored_prompt;
+        assert_eq!(merge_restored_prompt("", "first"), "first");
+        assert_eq!(merge_restored_prompt("typed", ""), "typed");
+        assert_eq!(merge_restored_prompt("typed", "first\n"), "first\n\ntyped");
+        assert_eq!(merge_restored_prompt("  ", "first"), "first");
     }
 
     #[test]

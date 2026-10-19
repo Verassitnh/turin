@@ -91,6 +91,8 @@ pub struct ChatComposer {
     pub(super) menu: super::menu::MenuState,
     pub(super) banner_stack_expanded: bool,
     pub(super) queue_expanded: bool,
+    /// Images being prepared off the UI thread; they hold attachment slots.
+    pub(super) pending_image_compressions: usize,
     pub(super) stash_highlight: Option<String>,
     pub(super) editing_run_id: Option<String>,
     /// The last `DraftRestore` applied.
@@ -176,6 +178,7 @@ impl ChatComposer {
             menu: Default::default(),
             banner_stack_expanded: false,
             queue_expanded: true,
+            pending_image_compressions: 0,
             stash_highlight: None,
             editing_run_id: None,
             restored_nonce: 0,
@@ -303,7 +306,11 @@ impl ChatComposer {
                 vec![0u8; 2048],
             ));
             self.thread_key = "local:thread-1".into();
-            self.add_picked_files(files, window, cx);
+            self.add_picked_files(
+                crate::composer::attachment_intake::Intake::from_loaded(files),
+                window,
+                cx,
+            );
         }
         if scenario == "stash" {
             for text in [
@@ -715,6 +722,7 @@ impl ChatComposer {
                 use gpui_kit::ClipboardEntry;
                 let mut loaded: Vec<(PickedFile, Vec<u8>)> = Vec::new();
                 let mut plain = String::new();
+                let mut errors: Vec<String> = Vec::new();
                 for entry in item.entries() {
                     match entry {
                         ClipboardEntry::Image(image) => {
@@ -738,24 +746,29 @@ impl ChatComposer {
                             ));
                         }
                         ClipboardEntry::ExternalPaths(paths) => {
-                            loaded.extend(
-                                paths
-                                    .paths()
-                                    .iter()
-                                    .cloned()
-                                    .filter_map(super::actions::read_picked_file),
+                            let intake = crate::composer::attachment_intake::load_paths(
+                                paths.paths().iter().cloned(),
                             );
+                            loaded.extend(intake.loaded);
+                            errors.extend(intake.errors);
                         }
                         ClipboardEntry::String(string) => plain.push_str(string.text()),
                     }
                 }
                 let files: Vec<PickedFile> = loaded.iter().map(|(file, _)| file.clone()).collect();
-                if loaded.is_empty() || !should_handle_composer_attachment_paste(&files, &plain) {
+                // Files that could not be read still get their error shown.
+                let handled = if loaded.is_empty() {
+                    !errors.is_empty() && plain.is_empty()
+                } else {
+                    should_handle_composer_attachment_paste(&files, &plain)
+                };
+                if !handled {
                     return false;
                 }
+                let intake = crate::composer::attachment_intake::Intake { loaded, errors };
                 let weak = paste_weak.clone();
                 window.defer(cx, move |window, cx| {
-                    weak.update(cx, |this, cx| this.add_picked_files(loaded, window, cx))
+                    weak.update(cx, |this, cx| this.add_picked_files(intake, window, cx))
                         .ok();
                 });
                 true
@@ -1199,13 +1212,10 @@ impl Render for ChatComposer {
             .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| style.bg(cx.app_theme().accent))
             .on_drop(
                 cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
-                    let loaded: Vec<_> = paths
-                        .paths()
-                        .iter()
-                        .cloned()
-                        .filter_map(super::actions::read_picked_file)
-                        .collect();
-                    this.add_picked_files(loaded, window, cx);
+                    let intake = crate::composer::attachment_intake::load_paths(
+                        paths.paths().iter().cloned(),
+                    );
+                    this.add_picked_files(intake, window, cx);
                 }),
             )
             .w_full()

@@ -19,25 +19,19 @@ use crate::theme::tokens::{
 };
 use crate::theme::{ActiveAppTheme, AppTheme};
 
-/// `dialog-backdrop`: `--background` at 60% (64% in dark), blurred 4px.
+/// Dialog scrim: a flat dark overlay (no blur, no glass).
 pub fn dialog_backdrop(theme: &AppTheme) -> Hsla {
-    with_alpha(theme.background, if theme.is_dark() { 0.64 } else { 0.60 }).into()
+    with_alpha(tw::BLACK, if theme.is_dark() { 0.6 } else { 0.4 }).into()
 }
 
-/// `dialog-glass`: `--background` at `--glass-opacity` (80%) over a 12px
-/// backdrop blur. GPUI has no blur, so unblurred content behind an 80% fill
-/// stays legible and fights the text; the fill is raised to 94% instead.
+/// Opaque popup surface (user request: no translucent surfaces).
 pub fn dialog_glass_background(theme: &AppTheme) -> Hsla {
-    with_alpha(theme.background, 0.94).into()
+    theme.background
 }
 
 /// `dialog-glass` border: `--contrast-foreground` at 10%, white at 8% in dark.
 pub fn dialog_glass_border(theme: &AppTheme) -> Hsla {
-    if theme.is_dark() {
-        with_alpha(tw::WHITE, 0.08).into()
-    } else {
-        with_alpha(theme.foreground, 0.10).into()
-    }
+    theme.border
 }
 
 /// `CommandDialogPopup`: `dialog-glass rounded-2xl border`, `max-w-xl`

@@ -77,16 +77,13 @@ impl From<String> for Tooltip {
     }
 }
 
-/// `dropdown-glass`: popover at 18% over popover at `--glass-opacity` (80%),
-/// with a foreground/10% hairline. GPUI has no backdrop blur, so the glass
-/// is a translucent fill only.
+/// Dropdown surface: solid popover fill with a solid border (no glass).
 pub fn dropdown_glass_background(theme: &AppTheme) -> gpui_kit::Hsla {
-    let glass = with_alpha(theme.popover, 0.8);
-    color_mix(MixSpace::Srgb, theme.popover, 0.18, glass).into()
+    theme.popover
 }
 
 pub fn dropdown_glass_border(theme: &AppTheme) -> gpui_kit::Hsla {
-    with_alpha(theme.foreground, 0.10).into()
+    theme.border
 }
 
 struct TooltipView(Tooltip);

@@ -23,7 +23,7 @@ use gpui_kit::{
 use super::icon::{Icon, IconName};
 use super::tooltip::Tooltip;
 use crate::components::drag_region::no_drag;
-use crate::theme::color::with_alpha;
+use crate::theme::color::{MixSpace, color_mix, with_alpha};
 use crate::theme::tokens::{self, RADIUS_MD, RADIUS_SM, TEXT_BASE, TEXT_SM, TEXT_XS, TextSize, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
 
@@ -174,6 +174,11 @@ fn a(color: impl Into<gpui_kit::Rgba>, alpha: f32) -> Hsla {
     with_alpha(color, alpha).into()
 }
 
+/// `color` at `fraction`, flattened over `base` so the fill is opaque.
+fn flat(color: Hsla, fraction: f32, base: Hsla) -> Hsla {
+    color_mix(MixSpace::Srgb, color, fraction, base).into()
+}
+
 impl ButtonVariant {
     pub(crate) fn colors(self, theme: &AppTheme) -> VariantColors {
         let dark = theme.is_dark();
@@ -201,7 +206,7 @@ impl ButtonVariant {
         };
         // Outline fills: bg-popover (dark bg-input/32), shadow-xs/5 and a 1px lip.
         let outline_bg = if dark {
-            a(theme.input, 0.32)
+            flat(theme.input, 0.32, theme.background)
         } else {
             theme.popover
         };
@@ -251,8 +256,8 @@ impl ButtonVariant {
                 ..base
             },
             Self::Glass => VariantColors {
-                bg: Some(a(theme.background, 0.8)),
-                border: a(theme.border, 0.6),
+                bg: Some(theme.background),
+                border: theme.border,
                 icon: Some(theme.muted_foreground),
                 border_hover: Some(theme.border),
                 shadow: tokens::shadow_sm(0.1),
@@ -268,9 +273,9 @@ impl ButtonVariant {
                 border: theme.input,
                 icon: Some(theme.muted_foreground),
                 bg_hover: Some(if dark {
-                    a(theme.input, 0.64)
+                    flat(theme.input, 0.64, theme.background)
                 } else {
-                    a(theme.accent, 0.5)
+                    flat(theme.accent, 0.5, theme.background)
                 }),
                 shadow: outline_shadow(),
                 lip: true,

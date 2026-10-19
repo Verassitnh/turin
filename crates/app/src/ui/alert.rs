@@ -105,10 +105,10 @@ pub fn alert_icon_color(variant: AlertVariant, theme: &AppTheme) -> Hsla {
 /// `alert-glass`: the background at `--glass-opacity` (80%), over which the variant's color is
 /// mixed at 4%.
 fn glass_fill(tint: Option<Hsla>, theme: &AppTheme) -> Hsla {
-    let base = with_alpha(theme.background, 0.8);
+    let base = theme.background;
     match tint {
         Some(tint) => color_mix(MixSpace::Srgb, tint, 0.04, base).into(),
-        None => base.into(),
+        None => base,
     }
 }
 

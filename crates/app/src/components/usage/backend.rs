@@ -157,6 +157,13 @@ pub trait UsageBackend {
     /// `usageByWindowAtom(window)`: every environment's status for one window.
     fn usage_environments(&self, window: &UsageSummaryInput) -> Vec<EnvironmentUsageStatus>;
 
+    /// Starts the first read of `window`, as reading `usageByWindowAtom` does
+    /// upstream. `None` when the window is already read or being read; the
+    /// task resolves once the answer is in `usage_environments`.
+    fn load_usage(&self, _window: &UsageSummaryInput, _cx: &mut App) -> Option<Task<()>> {
+        None
+    }
+
     /// `refreshUsage`: rescan the given environments for `input`.
     fn refresh_usage(
         &self,

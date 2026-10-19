@@ -868,6 +868,14 @@ impl Render for UsagePage {
         let showing_limits = metric == UsagePageMetric::Limits;
         let hidden = self.hidden_providers();
 
+        // Reading a window starts its scan, as reading the usage atom does upstream.
+        if let Some(load) = self.backend.load_usage(&self.window_input, cx) {
+            cx.spawn(async move |this, cx| {
+                load.await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
         let environments = self.backend.usage_environments(&self.window_input);
         let view = compute_usage_view(
             environments,

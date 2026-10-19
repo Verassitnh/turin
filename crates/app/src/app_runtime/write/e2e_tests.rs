@@ -779,6 +779,71 @@ async fn staged_uploads_are_claimed_into_the_thread_with_the_message() {
     assert_eq!(std::fs::read(image_path).expect("read"), png);
 }
 
+// Deleting a thread queues `attachment.cleanup`; the executor removes the files
+// the thread's messages carried (they used to stay on disk forever).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deleting_a_thread_removes_its_attachment_files() {
+    use turin_orchestration::pipeline::attachment_store::resolve_attachment_path;
+    use turin_orchestration::pipeline::orchestrator_port::{
+        OrchestratorPort as _, RecordField, RecordFilter,
+    };
+
+    let harness = harness().await;
+    let thread = project_and_thread(&harness).await;
+    let image = harness
+        .commands
+        .stage_attachment(
+            true,
+            "shot.png",
+            "image/png",
+            vec![0x89, b'P', b'N', b'G', 1],
+        )
+        .await
+        .expect("stage image");
+    harness
+        .commands
+        .send_message(SendMessage {
+            thread_id: thread.clone(),
+            text: "Look at this".into(),
+            attachments: vec![image],
+            model_selection: None,
+            delivery: Delivery::StartImmediately,
+            title_seed: None,
+            source_plan_id: None,
+        })
+        .await
+        .expect("send with attachment");
+    let records = harness
+        .commands
+        .runtime()
+        .orchestrator
+        .get_thread_records(&thread, &[RecordField::Messages], &RecordFilter::default())
+        .await
+        .expect("records");
+    let attachment = records
+        .messages
+        .iter()
+        .find(|message| message.text == "Look at this")
+        .and_then(|message| message.attachments.first().cloned())
+        .expect("the message carries the attachment");
+    let dir = harness.commands.runtime().attachments_dir.clone();
+    let path = resolve_attachment_path(&dir, &attachment).expect("path");
+    assert!(path.exists(), "{} is stored", path.display());
+
+    harness
+        .commands
+        .thread_command("thread.delete", &thread, json!({}))
+        .await
+        .expect("delete");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while path.exists() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the cleanup effect removes the file");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_first_message_gets_a_generated_title() {
     use turin_orchestration::pipeline::orchestrator_port::{

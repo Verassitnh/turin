@@ -411,6 +411,10 @@ impl WriteRuntime {
                 providers.settings.clone(),
                 instances.clone(),
             )),
+            resource_cleanup:
+                turin_orchestration::pipeline::resource_cleanup_service::ResourceCleanupService::new(
+                    attachments_dir.clone(),
+                ),
             rollback: Arc::new(super::rollback::build(super::rollback::RollbackSources {
                 orchestrator: orchestrator.clone(),
                 projections: Arc::clone(&projection),

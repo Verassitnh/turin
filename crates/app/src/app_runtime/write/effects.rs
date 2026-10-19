@@ -36,6 +36,7 @@ use turin_orchestration::core::steer_follow_up::after_steer;
 use turin_orchestration::pipeline::effect_outbox::{
     Effect, EffectRequest, SessionTransition, ThreadTitleKind,
 };
+use turin_orchestration::pipeline::resource_cleanup_service::ResourceCleanupService;
 use turin_orchestration::pipeline::thread_title_regeneration_service::{
     ThreadTitleRegenerationService, TitleRegenerationInput, TitleRegenerationKind,
 };
@@ -66,6 +67,7 @@ pub struct TurinEffectExecutor {
     pub settings: Arc<HostSettings>,
     pub text_generation: Arc<TextGeneration>,
     pub rollback: Arc<CheckpointRollbackService>,
+    pub resource_cleanup: ResourceCleanupService,
 }
 
 fn settle_outcome(
@@ -309,8 +311,13 @@ impl TurinEffectExecutor {
             }
             // Turin has no terminal drawer or preview feature (PORTING.md cut list).
             EffectRequest::TerminalCleanup {} | EffectRequest::PreviewCleanup {} => Ok(()),
-            // Attachment files are kept until the cleanup service is wired.
-            EffectRequest::AttachmentCleanup { .. } => Ok(()),
+            // `resourceCleanup.cleanupAttachments`: the deleted thread's files.
+            EffectRequest::AttachmentCleanup { attachment_ids } => {
+                self.resource_cleanup
+                    .cleanup_attachments(attachment_ids)
+                    .await?;
+                Ok(())
+            }
             EffectRequest::ThreadTitleGenerate { kind } => {
                 ThreadTitleRegenerationService::new(
                     &self.threads,

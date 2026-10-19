@@ -100,7 +100,7 @@ notify.workspace = true
 objc2 = "0.6"
 raw-window-handle = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
-objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSData", "NSDictionary", "NSString"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

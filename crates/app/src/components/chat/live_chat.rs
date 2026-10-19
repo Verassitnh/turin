@@ -67,6 +67,8 @@ struct Overrides {
     editing_run: Option<String>,
     /// A send is in flight (a second submit is refused until it settles).
     sending: bool,
+    /// A revert to an earlier turn is in flight (`isRevertingCheckpoint`).
+    reverting: bool,
     restore: Option<DraftRestore>,
     restore_nonce: u64,
     path_entries: Vec<PathEntry>,
@@ -209,6 +211,65 @@ pub fn push_error(cx: &mut App, title: &str, description: &str) {
     }
 }
 
+/// The "Edit from here?" dialog: `on_choice(restore_files)` runs for either
+/// revert button, Cancel only closes.
+fn open_revert_dialog(on_choice: impl Fn(bool, &mut App) + 'static, cx: &mut App) {
+    use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+    use gpui_kit::{IntoElement as _, ParentElement as _, Styled as _};
+    let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) else {
+        return;
+    };
+    let on_choice = std::rc::Rc::new(on_choice);
+    window
+        .update(cx, move |_, window, cx| {
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let choose = |id: &'static str,
+                              label: &'static str,
+                              variant: Option<ButtonVariant>,
+                              restore_files: Option<bool>| {
+                    let on_choice = on_choice.clone();
+                    let button = Button::new(id).label(label);
+                    let button = match variant {
+                        Some(variant) => button.with_variant(variant),
+                        None => button.outline(),
+                    };
+                    button.on_click(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        if let Some(restore_files) = restore_files {
+                            on_choice(restore_files, cx);
+                        }
+                    })
+                };
+                alert
+                    .title("Edit from here?".into_any_element())
+                    .description(
+                        "Rewind chat to before this message. Your prompt returns to the composer."
+                            .into_any_element(),
+                    )
+                    .footer(
+                        gpui_kit::div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(choose("revert-cancel", "Cancel", None, None))
+                            .child(choose(
+                                "revert-files",
+                                "Revert files too",
+                                Some(ButtonVariant::Danger),
+                                Some(true),
+                            ))
+                            .child(choose(
+                                "revert-keep",
+                                "Revert and keep changes",
+                                Some(ButtonVariant::Primary),
+                                Some(false),
+                            )),
+                    )
+            });
+        })
+        .ok();
+}
+
 impl LiveChat {
     pub fn new(
         thread_id: ThreadId,
@@ -293,6 +354,56 @@ impl LiveChat {
                     let state = client.read(cx).state().clone();
                     source.refresh(&state, cx);
                     source.load_favorites(cx);
+                    true
+                });
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // A favourite starred in Settings reaches this composer at once: the
+        // settings service announces every change (`streamChanges`).
+        let weak = source.me.clone();
+        cx.spawn(async move |_, cx| {
+            // The runtime may still be starting; wait for it a while.
+            let mut changes = None;
+            for _ in 0..40 {
+                // `Err`: the view is gone. `Ok(None)`: the runtime is not up yet.
+                let found = cx.update(|_| {
+                    let source = weak.upgrade().ok_or(())?;
+                    Ok(source
+                        .bus
+                        .commands()
+                        .ok()
+                        .map(|commands| commands.runtime().server_settings.subscribe()))
+                });
+                match found {
+                    Ok(Some(subscription)) => {
+                        changes = Some(subscription);
+                        break;
+                    }
+                    Ok(None) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(500))
+                            .await;
+                    }
+                    Err(()) => return,
+                }
+            }
+            let Some(mut changes) = changes else {
+                return;
+            };
+            while let Some(settings) = changes.recv().await {
+                let alive = cx.update(|cx| {
+                    let Some(source) = weak.upgrade() else {
+                        return false;
+                    };
+                    let favorites = favorite_keys(settings);
+                    if SavedModelFavorites::current(cx) != favorites {
+                        SavedModelFavorites::store(favorites, cx);
+                        source.republish(cx);
+                    }
                     true
                 });
                 if !alive {
@@ -469,6 +580,12 @@ impl LiveSource {
             attachments_dir.as_deref(),
         );
         snapshot.history = history_controls(&entry.state.history);
+        snapshot.supports_conversation_rollback =
+            super::live_resume::supports_conversation_rollback(
+                &self.bus.providers().borrow(),
+                projection,
+            );
+        snapshot.is_reverting_checkpoint = self.overrides.borrow().reverting;
         self.timeline
             .update(cx, |store, cx| {
                 if **store.snapshot() != snapshot {
@@ -552,6 +669,7 @@ impl LiveSource {
                 SessionPhase::Ready
             },
             can_interrupt: running,
+            can_resume: !running && super::live_resume::resume_plan(projection).can_resume(),
             runtime_mode: overrides
                 .runtime_mode
                 .unwrap_or_else(|| composer_runtime_mode(thread.runtime_mode)),
@@ -615,6 +733,7 @@ impl LiveSource {
                 let state = self.handle.snapshot();
                 super::live_wiring::usage_limit_recovery_banner(&state, &self.thread_id)
                     .into_iter()
+                    .chain(super::live_resume::goal_banner(projection, running))
                     .collect()
             },
             environment_id: local_environment_id().to_string(),
@@ -778,6 +897,83 @@ impl LiveSource {
         .detach();
     }
 
+    /// `sendStandaloneCommand`: a slash command (`/compact`, `/goal resume`)
+    /// that runs as its own turn on the composer's model.
+    fn send_standalone_command(&self, text: &'static str, title: &'static str, cx: &mut App) {
+        if self.overrides.borrow().sending {
+            return;
+        }
+        let state = self.handle.snapshot();
+        let Some(data) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.state.data.clone())
+        else {
+            return;
+        };
+        if active_run(&data.runs).is_some() {
+            push_error(cx, title, "Wait for the current turn to finish.");
+            return;
+        }
+        let selection = compact_model_selection(
+            self.overrides.borrow().model.clone(),
+            self.overrides.borrow().model_options.as_deref(),
+            data.thread.model_selection.instance_id.as_ref(),
+            data.thread.model_selection.model.as_ref(),
+        );
+        let thread_id = self.thread_id.clone();
+        self.run_command(title, cx, move |commands| async move {
+            commands
+                .send_message(SendMessage {
+                    thread_id,
+                    text: text.to_owned(),
+                    attachments: Vec::new(),
+                    model_selection: Some(selection),
+                    delivery: Delivery::StartImmediately,
+                    title_seed: None,
+                    source_plan_id: None,
+                })
+                .await
+                .map(|_| ())
+        });
+    }
+
+    /// Dispatches the rollback and puts the message's prompt back in the draft.
+    fn rewind(&self, turn_count: u64, message_text: String, restore_files: bool, cx: &mut App) {
+        const TITLE: &str = "Failed to revert thread state";
+        self.update_overrides(cx, |overrides| overrides.reverting = true);
+        let thread_id = self.thread_id.clone();
+        let task = self.bus.task(cx, move |commands| async move {
+            commands
+                .revert_to_turn_count(&thread_id, turn_count, restore_files)
+                .await
+        });
+        let source = self.me.clone();
+        let thread_key = scoped_thread_key(&local_environment_id(), &self.thread_id);
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            cx.update(|cx| {
+                if let Some(source) = source.upgrade() {
+                    source.update_overrides(cx, |overrides| overrides.reverting = false);
+                }
+                match outcome {
+                    Ok(()) => restore_failed_send(
+                        &thread_key,
+                        (
+                            crate::composer::prompt_history::recallable_composer_prompt(
+                                &message_text,
+                            ),
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        cx,
+                    ),
+                    Err(error) => push_error(cx, TITLE, &error.message),
+                }
+            });
+        })
+        .detach();
+    }
+
     fn not_wired(&self, what: &str, cx: &mut App) {
         push_error(cx, what, "This is not available yet.");
     }
@@ -826,8 +1022,54 @@ impl ComposerSource for LiveSource {
         .detach();
     }
 
+    /// `onResume`: continues the interrupted run, and releases a held queue.
     fn resume(&self, cx: &mut App) {
-        self.not_wired("Resume", cx);
+        const TITLE: &str = "Could not resume thread";
+        if self.overrides.borrow().sending {
+            return;
+        }
+        let state = self.handle.snapshot();
+        let Some(data) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.state.data.clone())
+        else {
+            return;
+        };
+        let plan = super::live_resume::resume_plan(&data);
+        if active_run(&data.runs).is_some() || !plan.can_resume() {
+            return;
+        }
+        let selection = compact_model_selection(
+            self.overrides.borrow().model.clone(),
+            self.overrides.borrow().model_options.as_deref(),
+            data.thread.model_selection.instance_id.as_ref(),
+            data.thread.model_selection.model.as_ref(),
+        );
+        let thread_id = self.thread_id.clone();
+        self.update_overrides(cx, |overrides| overrides.sending = true);
+        let task = self.bus.task(cx, move |commands| async move {
+            commands
+                .resume_thread(
+                    &thread_id,
+                    plan.resumable_run_id.map(|id| id.to_string()),
+                    plan.has_held_queued_runs,
+                    Some(selection),
+                )
+                .await
+        });
+        let source = self.me.clone();
+        cx.spawn(async move |cx| {
+            let outcome = task.await;
+            cx.update(|cx| {
+                if let Some(source) = source.upgrade() {
+                    source.update_overrides(cx, |overrides| overrides.sending = false);
+                }
+                if let Err(error) = outcome {
+                    push_error(cx, TITLE, &error.message);
+                }
+            });
+        })
+        .detach();
     }
 
     /// `onImplementPlanInNewThread`: a fresh thread in the same project starts
@@ -1021,49 +1263,7 @@ impl ComposerSource for LiveSource {
 
     /// `onCompactContext`: sends the standalone `/compact` command as a turn.
     fn compact_context(&self, cx: &mut App) {
-        if self.overrides.borrow().sending {
-            return;
-        }
-        let state = self.handle.snapshot();
-        let Some(data) = state
-            .thread(&self.thread_id)
-            .and_then(|entry| entry.state.data.clone())
-        else {
-            return;
-        };
-        if active_run(&data.runs).is_some() {
-            push_error(
-                cx,
-                "Failed to compact context",
-                "Wait for the current turn to finish.",
-            );
-            return;
-        }
-        let selection = compact_model_selection(
-            self.overrides.borrow().model.clone(),
-            self.overrides.borrow().model_options.as_deref(),
-            data.thread.model_selection.instance_id.as_ref(),
-            data.thread.model_selection.model.as_ref(),
-        );
-        let thread_id = self.thread_id.clone();
-        self.run_command(
-            "Failed to compact context",
-            cx,
-            move |commands| async move {
-                commands
-                    .send_message(SendMessage {
-                        thread_id,
-                        text: "/compact".to_owned(),
-                        attachments: Vec::new(),
-                        model_selection: Some(selection),
-                        delivery: Delivery::StartImmediately,
-                        title_seed: None,
-                        source_plan_id: None,
-                    })
-                    .await
-                    .map(|_| ())
-            },
-        );
+        self.send_standalone_command("/compact", "Failed to compact context", cx);
     }
 
     fn dismiss_banner(&self, id: &str, _cx: &mut App) {
@@ -1071,6 +1271,12 @@ impl ComposerSource for LiveSource {
     }
 
     fn banner_action(&self, banner_id: &str, action_id: &str, cx: &mut App) {
+        if banner_id.starts_with(super::live_resume::GOAL_BANNER_PREFIX) {
+            if let Some((text, title)) = super::live_resume::goal_action_command(action_id) {
+                self.send_standalone_command(text, title, cx);
+            }
+            return;
+        }
         if !banner_id.starts_with("usage-limit-recovery:") {
             self.not_wired("Composer banner action", cx);
             return;
@@ -1555,12 +1761,53 @@ impl TimelineSource for LiveSource {
         });
     }
 
-    fn revert_to_turn_count(&self, _turn_count: u64, _message_id: &str, cx: &mut App) {
-        self.not_wired("Reverting to a turn", cx);
+    /// `onRevertToTurnCount`: "Edit from here" asks whether files revert too,
+    /// rolls the thread back to before the message, and returns its prompt to
+    /// the composer.
+    fn revert_to_turn_count(&self, turn_count: u64, message_id: &str, cx: &mut App) {
+        const TITLE: &str = "Failed to revert thread state";
+        let state = self.handle.snapshot();
+        let Some(data) = state
+            .thread(&self.thread_id)
+            .and_then(|entry| entry.state.data.clone())
+        else {
+            return;
+        };
+        let supports_rollback = super::live_resume::supports_conversation_rollback(
+            &self.bus.providers().borrow(),
+            &data,
+        );
+        let busy = {
+            let overrides = self.overrides.borrow();
+            overrides.sending || overrides.reverting
+        };
+        let text =
+            match super::live_resume::revert_request(&data, message_id, supports_rollback, busy) {
+                Ok(text) => text,
+                Err(super::live_resume::RevertRefusal::NotAUserMessage) => return,
+                Err(super::live_resume::RevertRefusal::Blocked(message)) => {
+                    push_error(cx, TITLE, message);
+                    return;
+                }
+            };
+        let source = self.me.clone();
+        open_revert_dialog(
+            move |restore_files, cx| {
+                if let Some(source) = source.upgrade() {
+                    source.rewind(turn_count, text.clone(), restore_files, cx);
+                }
+            },
+            cx,
+        );
     }
 
     fn load_earlier_history(&self, _cx: &mut App) {
         self.handle.load_earlier(self.thread_id.clone());
+    }
+
+    fn load_earlier_history_through(&self, entry_id: &str, _cx: &mut App) {
+        self.handle
+            .load_earlier_through(self.thread_id.clone(), entry_id.to_owned());
     }
 
     fn open_turn_diff(&self, run_id: &str, file_path: Option<&str>, cx: &mut App) {

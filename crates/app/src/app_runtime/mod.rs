@@ -229,6 +229,14 @@ pub async fn run(
             let commands = write::commands::Commands::new(Arc::clone(&runtime));
             tokio::spawn(write::smoke::run_if_requested(commands.clone()));
             write::providers::spawn_status_feed(&runtime.providers, bus.clone());
+            // Threads without a project are offered once the Scratch folder is known.
+            let scratch = commands.clone();
+            let scratch_sender = sender.clone();
+            tokio::spawn(async move {
+                scratch_sender.send(ClientStateEvent::ScratchWorkspaceRoot(
+                    scratch.scratch_root().await,
+                ));
+            });
             bus.install(commands);
             Some(runtime)
         }

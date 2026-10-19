@@ -141,6 +141,25 @@ impl EarlierHistoryRequests {
     }
 }
 
+/// The thread find's history effect: whether to ask for an earlier page now. It asks
+/// when [`needs_earlier_history`] holds and this cursor was not already requested for
+/// this match, so a page that does not reach the match is followed by another, and a
+/// pending or failed load is never doubled.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_earlier_history_request(
+    requests: &mut EarlierHistoryRequests,
+    match_key: &str,
+    first_entry_id: Option<&str>,
+    list_ready: bool,
+    row_loaded: bool,
+    match_entry_loaded: bool,
+    controls: Option<EarlierHistoryControls>,
+) -> bool {
+    // The key resets the dedupe even when this call does not request.
+    let fresh = requests.request(Some(match_key), earlier_history_cursor(first_entry_id));
+    needs_earlier_history(true, list_ready, row_loaded, match_entry_loaded, controls) && fresh
+}
+
 /// The cursor a history request is keyed by: the first loaded entry id, or `"first"`.
 pub fn earlier_history_cursor(first_entry_id: Option<&str>) -> &str {
     first_entry_id.unwrap_or("first")
@@ -149,6 +168,68 @@ pub fn earlier_history_cursor(first_entry_id: Option<&str>) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn more_history() -> Option<EarlierHistoryControls> {
+        Some(EarlierHistoryControls {
+            has_more_history: true,
+            loading: false,
+            error: false,
+        })
+    }
+
+    #[test]
+    fn a_match_in_unloaded_history_pages_once_per_cursor() {
+        let mut requests = EarlierHistoryRequests::default();
+        let mut plan = |key: &str, first: Option<&str>, controls| {
+            plan_earlier_history_request(&mut requests, key, first, true, false, false, controls)
+        };
+        // The first look asks for a page; a re-render with the same rows does not.
+        assert!(plan("1:q:old:0", Some("m5"), more_history()));
+        assert!(!plan("1:q:old:0", Some("m5"), more_history()));
+        // The page arrived but did not reach the match: ask for the next one.
+        assert!(plan("1:q:old:0", Some("m3"), more_history()));
+        // Another match starts over.
+        assert!(plan("2:q:older:0", Some("m3"), more_history()));
+    }
+
+    #[test]
+    fn nothing_is_paged_for_a_loaded_match_or_while_history_is_busy() {
+        let mut requests = EarlierHistoryRequests::default();
+        let mut plan = |row_loaded, entry_loaded, controls| {
+            let key = format!("{row_loaded}{entry_loaded}");
+            plan_earlier_history_request(
+                &mut requests,
+                &key,
+                Some("m1"),
+                true,
+                row_loaded,
+                entry_loaded,
+                controls,
+            )
+        };
+        assert!(!plan(true, true, more_history()));
+        // A match hidden inside a folded turn is loaded, only without a row.
+        assert!(!plan(false, true, more_history()));
+        let busy = Some(EarlierHistoryControls {
+            has_more_history: true,
+            loading: true,
+            error: false,
+        });
+        assert!(!plan(false, false, busy));
+        let failed = Some(EarlierHistoryControls {
+            has_more_history: true,
+            loading: false,
+            error: true,
+        });
+        assert!(!plan(false, false, failed));
+        let at_start = Some(EarlierHistoryControls {
+            has_more_history: false,
+            loading: false,
+            error: false,
+        });
+        assert!(!plan(false, false, at_start));
+        assert!(!plan(false, false, None));
+    }
 
     #[test]
     fn match_key_changes_with_every_navigation_input() {

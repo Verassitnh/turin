@@ -311,11 +311,13 @@ impl AppSidebarLayout {
                     ChatGitBackends {
                         branch: Rc::new(LiveBranchBackend::new(live.bus.clone(), git.clone())),
                         git: Rc::new(git),
+                        runtime: Some(live.bus.handle().clone()),
                     }
                 }
                 None => ChatGitBackends {
                     git: Rc::new(MockGitActionsBackend::new()),
                     branch: Rc::new(MockBranchBackend::new()),
+                    runtime: None,
                 },
             };
             ChatGitHost::new(backends)
@@ -663,6 +665,9 @@ impl AppSidebarLayout {
             }
             CommandPaletteEvent::NewThreadInProject { .. }
             | CommandPaletteEvent::NewThreadFromContext => unavailable("New thread", window, cx),
+            CommandPaletteEvent::NewThreadWithoutProject if self.live.is_some() => {
+                self.create_scratch_thread(window, cx)
+            }
             CommandPaletteEvent::NewThreadWithoutProject => {
                 unavailable("New thread without a project", window, cx)
             }
@@ -879,6 +884,40 @@ impl AppSidebarLayout {
                 })
                 .await
         });
+        self.open_created_thread(task, window, cx);
+    }
+
+    /// `openScratch` then a new thread: finds or creates the Scratch project
+    /// ("No project") and starts a thread in it, in a folder of its own.
+    fn create_scratch_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(live) = self.live.clone() else {
+            return;
+        };
+        let task = live.bus.task(cx, move |commands| async move {
+            let project_id = commands.ensure_scratch_project().await?;
+            let defaults = commands.new_thread_defaults(&project_id).await?;
+            commands
+                .create_thread(CreateThread {
+                    project_id,
+                    title: "New thread".into(),
+                    model_selection: defaults.model_selection,
+                    runtime_mode: defaults.runtime_mode,
+                    interaction_mode: "default".into(),
+                })
+                .await
+        });
+        self.open_created_thread(task, window, cx);
+    }
+
+    /// Opens the thread a creation task made, or says why it could not be made.
+    fn open_created_thread(
+        &mut self,
+        task: gpui_kit::Task<
+            Result<turin_contracts::ThreadId, crate::app_runtime::write::commands::CommandError>,
+        >,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn_in(window, async move |this, cx| {
             let outcome = task.await;
             this.update_in(cx, |this, window, cx| match outcome {
@@ -1265,13 +1304,34 @@ impl AppSidebarLayout {
         cx.quit();
     }
 
+    /// Cmd+Q pressed outside the shell (the settings window): the same
+    /// hold-to-quit / confirm-quit path as the shell's own binding. The main
+    /// window is brought forward so its hint shows and its modifier release
+    /// cancels the hold.
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.activate_window();
+        self.run_quit_shortcut(
+            QuitHoldKeyPhase::KeyDown,
+            QuitHoldKey::Character('q'),
+            false,
+            window,
+            cx,
+        );
+    }
+
+    /// Cmd+W through the app-level handler: the main window's bounds are
+    /// written before it closes, as the shell's own handler does.
+    pub fn close_main_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.flush_bounds(window, cx);
+        window.remove_window();
+    }
+
     fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.open_live_settings("general", window, cx);
     }
 
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
-        self.flush_bounds(window, cx);
-        window.remove_window();
+        self.close_main_window(window, cx);
     }
 
     fn on_open_command_palette(

@@ -37,6 +37,9 @@ pub struct ClientState {
     pub shell: EnvironmentShellState,
     /// Present once a shell snapshot arrived.
     pub shell_view: Option<ShellView>,
+    /// The Scratch folder (`ServerConfig.scratchWorkspaceRoot`); threads without
+    /// a project are offered only when the environment has one.
+    pub scratch_workspace_root: Option<String>,
     pub threads: Arc<HashMap<ThreadId, Arc<ThreadEntry>>>,
 }
 
@@ -113,6 +116,7 @@ impl ClientStateCore {
             environment_id: environment_id.clone(),
             shell: shell.clone(),
             shell_view: None,
+            scratch_workspace_root: None,
             threads: Arc::new(HashMap::new()),
         });
         Self {
@@ -296,6 +300,7 @@ impl ClientStateCore {
             environment_id: self.environment_id.clone(),
             shell,
             shell_view,
+            scratch_workspace_root: self.scratch_workspace_root.clone(),
             threads: Arc::new(threads),
         });
         Arc::clone(&self.published)
@@ -461,6 +466,11 @@ mod tests {
             "/workspace/project/".into()
         ))));
         assert!(core.publish().shell_view.as_ref().unwrap().projects[0].is_scratch);
+        // The palette offers threads without a project from the published root.
+        assert_eq!(
+            core.publish().scratch_workspace_root.as_deref(),
+            Some("/workspace/project/")
+        );
     }
 
     #[test]

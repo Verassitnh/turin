@@ -100,7 +100,13 @@ pub enum ClientStateRequest {
     /// for [`THREAD_SNAPSHOT_IDLE_TTL`] so back navigation is instant.
     CloseThread(ThreadId),
     /// Fetch the page of history before `cursor` (`OrchestrationV2ThreadHistoryPage`).
-    LoadEarlier { thread_id: ThreadId, cursor: String },
+    /// `through_entry_id` (`throughEntryId`, a find match) widens the page until it
+    /// reaches that entry.
+    LoadEarlier {
+        thread_id: ThreadId,
+        cursor: String,
+        through_entry_id: Option<String>,
+    },
 }
 
 /// Recent thread snapshots stay for back navigation after their last consumer leaves.

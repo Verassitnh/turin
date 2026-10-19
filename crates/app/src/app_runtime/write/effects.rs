@@ -18,6 +18,9 @@ use turin_contracts::orchestration_v2::{
     OrchestrationV2BackgroundWorkSettleSubagent, OrchestrationV2InternalCommand,
     OrchestrationV2ServerCommand,
 };
+use turin_orchestration::core::checkpoint_rollback_service::{
+    CheckpointRollbackService, ExecuteInput as RollbackInput, ROLLBACK_FAILED_MESSAGE,
+};
 use turin_orchestration::core::orchestrator::services::TurnStartInput;
 use turin_orchestration::core::provider_session_manager::ProviderSessionManager;
 use turin_orchestration::core::provider_turn_control_service::{
@@ -62,6 +65,7 @@ pub struct TurinEffectExecutor {
     pub projects: Arc<StoredProjects>,
     pub settings: Arc<HostSettings>,
     pub text_generation: Arc<TextGeneration>,
+    pub rollback: Arc<CheckpointRollbackService>,
 }
 
 fn settle_outcome(
@@ -85,6 +89,25 @@ fn settle_outcome(
 }
 
 impl TurinEffectExecutor {
+    /// `checkpoint.rollback.fail`: the thread records why rollback `effect` failed for good.
+    async fn record_rollback_failure(
+        &self,
+        effect: &Effect,
+        thread_id: turin_contracts::ThreadId,
+    ) -> Result<(), BoxError> {
+        self.threads
+            .dispatch(OrchestrationV2ServerCommand::Internal(
+                OrchestrationV2InternalCommand::CheckpointRollbackFail {
+                    command_id: CommandId::new(format!("{}:rollback-failed", effect.command_id))?,
+                    thread_id,
+                    request_id: effect.command_id.clone(),
+                    message: turin_contracts::TrimmedNonEmptyString::new(ROLLBACK_FAILED_MESSAGE)?,
+                },
+            ))
+            .await?;
+        Ok(())
+    }
+
     async fn run(&self, effect: &Effect, will_retry: bool) -> Result<(), BoxError> {
         let thread_id = effect.thread_id.clone();
         match &effect.request {
@@ -299,11 +322,9 @@ impl TurinEffectExecutor {
                     thread_id,
                     request_id: effect.command_id.clone(),
                     kind: match kind {
-                        ThreadTitleKind::Initial { message_id } => {
-                            TitleRegenerationKind::Initial {
-                                message_id: message_id.clone(),
-                            }
-                        }
+                        ThreadTitleKind::Initial { message_id } => TitleRegenerationKind::Initial {
+                            message_id: message_id.clone(),
+                        },
                         ThreadTitleKind::Regenerate => TitleRegenerationKind::Regenerate,
                     },
                 })
@@ -315,8 +336,35 @@ impl TurinEffectExecutor {
                     .execute_continue_effect(&thread_id, source_run_id, will_retry)
                     .await
             }
-            EffectRequest::ProviderThreadRollback { .. } => {
-                Err("provider-thread.rollback is not wired: CheckpointRollbackService is not ported (T13c item 2)".into())
+            EffectRequest::ProviderThreadRollback {
+                restore_files,
+                provider_thread_id,
+                checkpoint_id,
+                scope_id,
+            } => {
+                let outcome = self
+                    .rollback
+                    .execute(RollbackInput {
+                        thread_id: thread_id.clone(),
+                        provider_thread_id: provider_thread_id.clone(),
+                        checkpoint_id: checkpoint_id.clone(),
+                        scope_id: scope_id.clone(),
+                        restore_files: *restore_files,
+                    })
+                    .await;
+                let Err(error) = outcome else {
+                    return Ok(());
+                };
+                // The last failed attempt tells waiting clients it failed,
+                // instead of leaving them to time out. Clients get a fixed
+                // message; the cause stays in the log.
+                tracing::warn!(effect_id = %effect.id, %error, cause = ?error.cause, "rollback failed");
+                if !will_retry
+                    && let Err(record_error) = self.record_rollback_failure(effect, thread_id).await
+                {
+                    tracing::warn!(effect_id = %effect.id, %record_error, "failed to record rollback failure");
+                }
+                Err(Box::new(error))
             }
         }
     }

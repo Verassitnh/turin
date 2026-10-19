@@ -160,6 +160,16 @@ impl ShellView {
             .map(|index| &self.projects[*index])
     }
 
+    /// The project a thread belongs to (its icon heads the chat header).
+    pub fn project_of_thread(&self, thread_id: &ThreadId) -> Option<&Arc<EnvironmentProject>> {
+        let thread = self.thread(thread_id).or_else(|| {
+            self.archived_threads
+                .iter()
+                .find(|row| &row.id == thread_id)
+        })?;
+        self.project(&thread.project_id)
+    }
+
     /// `environmentThreadRefsByProjectAtom` values, as shells in list order.
     pub fn threads_for_project(&self, project_id: &ProjectId) -> Vec<Arc<EnvironmentThreadShell>> {
         self.threads
@@ -549,6 +559,27 @@ mod tests {
             child_thread_inputs_title(&[child(false), child(false)]),
             "2 subagents need input"
         );
+    }
+
+    #[test]
+    fn a_thread_finds_its_own_project() {
+        let environment = EnvironmentId::new("local").unwrap();
+        let root = shell("root", json!({}));
+        let archived = shell("old", json!({ "archivedAt": "2026-06-21T00:00:00.000Z" }));
+        let orphan = shell("orphan", json!({ "projectId": "gone" }));
+        let view = ShellViewBuilder::new().build(
+            &environment,
+            &snapshot(vec![root, archived, orphan]),
+            None,
+        );
+        let project_of = |id: &str| {
+            view.project_of_thread(&ThreadId::new(id).unwrap())
+                .map(|project| project.id.to_string())
+        };
+        assert_eq!(project_of("root").as_deref(), Some("project-v2"));
+        assert_eq!(project_of("old").as_deref(), Some("project-v2"));
+        assert_eq!(project_of("orphan"), None);
+        assert_eq!(project_of("missing"), None);
     }
 
     #[test]

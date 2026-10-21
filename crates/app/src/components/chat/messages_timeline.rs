@@ -146,6 +146,13 @@ impl RowCx {
         self.snapshot.workspace_root.as_deref()
     }
 
+    pub fn cwd(&self) -> Option<&str> {
+        self.snapshot
+            .cwd
+            .as_deref()
+            .or(self.snapshot.workspace_root.as_deref())
+    }
+
     pub fn latest_run_id(&self) -> Option<&str> {
         self.snapshot
             .latest_run

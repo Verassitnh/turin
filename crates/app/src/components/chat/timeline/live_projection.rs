@@ -864,6 +864,12 @@ pub fn snapshot_from_projection(
         latest_run,
         pending_approvals: pending.map(pending_approvals).unwrap_or_default(),
         pending_user_inputs: pending.map(pending_user_inputs).unwrap_or_default(),
+        cwd: projection
+            .thread
+            .worktree_path
+            .as_ref()
+            .map(|path| path.as_str().to_owned())
+            .or_else(|| workspace_root.clone()),
         workspace_root,
         ..Default::default()
     }

@@ -13,14 +13,16 @@ use crate::theme::color::solid_over;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px, relative, rems,
+    AnyElement, App, ElementId, FontWeight, Global, Hsla, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement as _, Pixels, RenderOnce, SharedString, SharedUri,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, div, img, px,
+    relative, rems,
 };
 
 use super::code_highlight::{cached_highlight, highlight_code, plain_highlight};
@@ -37,6 +39,7 @@ use super::markdown_pipeline::{
     parse_chat_markdown,
 };
 use crate::components::chat::chat_media;
+use crate::components::chat::expanded_image::{ExpandedImageItem, ExpandedImagePreview};
 use crate::components::chat::markdown_thread_link::{
     ResolvedThreadLink, open_thread_link, resolve_thread_links,
 };
@@ -55,6 +58,7 @@ use crate::theme::tokens::{RADIUS_LG, tw};
 use crate::theme::{ActiveAppTheme, AppTheme};
 use crate::ui::{Button, ButtonSize, ButtonVariant, Icon, IconName, Tooltip};
 use turin_shared::inline_skills::InlineSkill;
+use turin_shared::file_links::split_file_path_position;
 use turin_shared::thread_links::parse_thread_link_href;
 
 const MAX_DOCUMENT_CACHE_ENTRIES: usize = 2000;
@@ -147,6 +151,8 @@ pub struct ChatMarkdown {
     skills: Vec<InlineSkill>,
     assistant_message_id: Option<SharedString>,
     find: Option<MarkdownFind>,
+    /// The thread's checkout: relative file links and images resolve against it.
+    cwd: Option<SharedString>,
 }
 
 impl ChatMarkdown {
@@ -162,7 +168,13 @@ impl ChatMarkdown {
             skills: Vec::new(),
             assistant_message_id: None,
             find: None,
+            cwd: None,
         }
+    }
+
+    pub fn cwd(mut self, cwd: Option<impl Into<SharedString>>) -> Self {
+        self.cwd = cwd.map(Into::into);
+        self
     }
 
     /// Paints the find bar's matches (`threadFindHighlights`).
@@ -241,6 +253,7 @@ struct Md<'a> {
     find_next: Cell<u64>,
     assistant_message_id: Option<&'a str>,
     assistant_message_text: Option<&'a str>,
+    cwd: Option<&'a SharedString>,
 }
 
 /// Inherited text properties (`color`, `font-size`, `line-height`).
@@ -258,6 +271,47 @@ struct Inherit {
 }
 
 impl Md<'_> {
+    /// A markdown image (`![alt](src)`): local files and http(s) urls embed,
+    /// clicking opens the image viewer.
+    fn image(&self, alt: &str, url: &str) -> Option<AnyElement> {
+        let source = resolve_markdown_image_source(url, self.cwd.map(|cwd| cwd.as_ref()))?;
+        let (leaf, _) = self.next_leaf();
+        let name = if alt.is_empty() {
+            url.rsplit('/').next().unwrap_or(url).to_owned()
+        } else {
+            alt.to_owned()
+        };
+        let muted = self.theme.muted_foreground;
+        let fallback = name.clone();
+        let picture = match &source {
+            MarkdownImageSource::Path(path) => img(path.clone()),
+            MarkdownImageSource::Url(url) => img(SharedUri::from(url.clone())),
+        };
+        Some(
+            div()
+                .id(leaf)
+                .mt(self.rem(0.5))
+                .max_w_full()
+                .overflow_hidden()
+                .rounded(RADIUS_LG)
+                .cursor(gpui_kit::CursorStyle::PointingHand)
+                .on_click(move |_, _, cx| open_markdown_image_preview(&source, &name, cx))
+                .child(
+                    picture
+                        .max_w_full()
+                        .max_h(px(480.))
+                        .object_fit(ObjectFit::Contain)
+                        .with_fallback(move || {
+                            div()
+                                .text_color(muted)
+                                .child(format!("[image: {fallback}]"))
+                                .into_any_element()
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn rem(&self, value: f32) -> Pixels {
         self.rem * value
     }
@@ -562,15 +616,19 @@ impl Md<'_> {
         let (id, order) = self.next_leaf();
         let content = self.flow_text(inlines, inherit);
         let highlights = self.find_highlights(&content.text);
+        let cwd = self.cwd.cloned();
         let mut flow = InlineFlow::new(id, content, white_space)
             .highlights(highlights)
             .strut(self.fonts.sans.clone(), inherit.size, inherit.line_height)
             .document_order(order)
             .selection_color(self.selection)
-            .on_link(Rc::new(|url, _, cx| {
+            .on_link(Rc::new(move |url, _, cx| {
                 if let Some(citation) = parse_assistant_citation_href(url) {
                     chat_media::open_quote(citation, cx);
-                } else if !open_thread_link(url, cx) {
+                } else if open_thread_link(url, cx) {
+                } else if let Some(path) = parse_markdown_file_link(url) {
+                    open_markdown_file_link(&path, cwd.as_deref(), cx);
+                } else {
                     cx.open_url(url);
                 }
             }));
@@ -641,7 +699,15 @@ impl Md<'_> {
                     element: div()
                         .w_full()
                         .min_w_0()
-                        .child(self.inline_flow(inlines, inherit, WhiteSpace::Normal))
+                        .when(!inlines.text.trim().is_empty(), |this| {
+                            this.child(self.inline_flow(inlines, inherit, WhiteSpace::Normal))
+                        })
+                        .children(
+                            inlines
+                                .images
+                                .iter()
+                                .filter_map(|(_, alt, url)| self.image(alt, url)),
+                        )
                         .into_any_element(),
                     margin_top: margin,
                     margin_bottom: margin,
@@ -1773,6 +1839,7 @@ impl RenderOnce for ChatMarkdown {
                 .assistant_message_id
                 .as_ref()
                 .map(|_| self.text.as_ref()),
+            cwd: self.cwd.as_ref(),
         };
         let _ = md.streaming;
         let inherit = Inherit {
@@ -1796,6 +1863,131 @@ impl RenderOnce for ChatMarkdown {
             .text_color(base_color)
             .child(content.element)
     }
+}
+
+/// Where a markdown image's pixels come from.
+#[derive(Clone, Debug, PartialEq)]
+enum MarkdownImageSource {
+    Path(PathBuf),
+    Url(String),
+}
+
+/// `![alt](src)`: http(s) urls load remotely; `file://`, absolute and
+/// checkout-relative paths load from disk. Anything else does not embed.
+fn resolve_markdown_image_source(url: &str, cwd: Option<&str>) -> Option<MarkdownImageSource> {
+    let url = url.trim();
+    let url = url
+        .strip_prefix('<')
+        .and_then(|url| url.strip_suffix('>'))
+        .unwrap_or(url);
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Some(MarkdownImageSource::Url(url.to_owned()));
+    }
+    let path = match url.strip_prefix("file://") {
+        Some(rest) => percent_decode(rest.strip_prefix("localhost").unwrap_or(rest)),
+        None if url.contains("://") || lower.starts_with("data:") => return None,
+        None => url.to_owned(),
+    };
+    let path = path.split(['?', '#']).next().unwrap_or(&path);
+    if path.is_empty() {
+        return None;
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return Some(MarkdownImageSource::Path(
+            std::env::var_os("HOME").map(PathBuf::from)?.join(rest),
+        ));
+    }
+    if path.starts_with('/') {
+        return Some(MarkdownImageSource::Path(PathBuf::from(path)));
+    }
+    Some(MarkdownImageSource::Path(
+        PathBuf::from(cwd?).join(path.trim_start_matches("./")),
+    ))
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut ix = 0;
+    while ix < bytes.len() {
+        if bytes[ix] == b'%'
+            && let Some(byte) = text
+                .get(ix + 1..ix + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            out.push(byte);
+            ix += 3;
+        } else {
+            out.push(bytes[ix]);
+            ix += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn open_markdown_image_preview(source: &MarkdownImageSource, name: &str, cx: &mut App) {
+    let (src, bytes) = match source {
+        MarkdownImageSource::Path(path) => (
+            path.to_string_lossy().into_owned(),
+            std::fs::read(path).ok().map(Arc::new),
+        ),
+        MarkdownImageSource::Url(url) => {
+            cx.open_url(url);
+            return;
+        }
+    };
+    chat_media::open_preview(
+        ExpandedImagePreview {
+            images: vec![ExpandedImageItem {
+                src: Some(src),
+                name: name.to_owned(),
+                video: false,
+                original_url: None,
+                bytes,
+                mime_type: None,
+                actions_source: None,
+            }],
+            index: 0,
+        },
+        cx,
+    );
+}
+
+/// The tokio runtime file links open editors on (installed with the first chat).
+pub struct MarkdownFileLinkRuntime(pub tokio::runtime::Handle);
+
+impl Global for MarkdownFileLinkRuntime {}
+
+/// A file link opens in the preferred editor (at its `:line`), resolved against
+/// the thread's checkout; with no editor the system's default app opens it.
+fn open_markdown_file_link(path: &str, cwd: Option<&str>, cx: &mut App) {
+    let target = match cwd {
+        Some(cwd) => crate::diff::diff_file_actions::resolve_path_link_target(path, cwd),
+        None => path.to_owned(),
+    };
+    let fallback = format!(
+        "file://{}",
+        split_file_path_position(&target, "")
+            .path
+            .replace(' ', "%20")
+    );
+    let Some(runtime) = cx.try_global::<MarkdownFileLinkRuntime>().map(|r| r.0.clone()) else {
+        cx.open_url(&fallback);
+        return;
+    };
+    let opened = crate::hooks::open_in_editor::EditorLauncherService::global().spawn_open(
+        &runtime,
+        target,
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        if let Err(message) = opened.await {
+            tracing::warn!(%message, "could not open the file link in an editor");
+            cx.update(|cx| cx.open_url(&fallback));
+        }
+    })
+    .detach();
 }
 
 #[cfg(test)]

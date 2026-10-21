@@ -366,7 +366,8 @@ fn collapsible_user_message_body(message: &ChatMessage, cx: &RowCx) -> AnyElemen
         .full_foreground(true)
         .skills(cx.snapshot.skills.clone())
         .find(cx.markdown_find(&message.id))
-        .document_order(cx.order + 1);
+        .document_order(cx.order + 1)
+        .cwd(cx.cwd().map(str::to_owned));
     let body = div()
         .relative()
         .when(is_collapsed, |this| this.max_h(rems(11.)).overflow_hidden())
@@ -460,6 +461,7 @@ pub fn assistant_row(row: &MessagesTimelineRow, cx: &RowCx) -> AnyElement {
                 .streaming(message.streaming)
                 .find(cx.markdown_find(&message.id))
                 .document_order(cx.order + 1)
+                .cwd(cx.cwd().map(str::to_owned))
                 .assistant_selection_source(message.id.clone()),
         )
         .when_some(
@@ -903,7 +905,8 @@ fn proposed_plan_card(plan_id: &str, markdown: &str, cx: &RowCx) -> AnyElement {
                 .child(
                     ChatMarkdown::new(("plan-md", cx.order), text)
                         .find(cx.markdown_find(plan_id))
-                        .document_order(cx.order + 1),
+                        .document_order(cx.order + 1)
+                        .cwd(cx.cwd().map(str::to_owned)),
                 )
                 .when(is_collapsed, |this| {
                     // `bg-linear-to-t from-card/95 via-card/80 to-transparent`.

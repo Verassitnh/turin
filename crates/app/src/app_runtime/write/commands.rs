@@ -329,6 +329,14 @@ impl Commands {
             .await
             .map_err(|error| CommandError::from_error(&error))?
             .map(|folder| folder.to_string_lossy().into_owned());
+        // Claims stay serialized until the thread exists, so two new threads
+        // never take the same checkout.
+        static POOL_CLAIM: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _claim = POOL_CLAIM.lock().await;
+        let worktree_path = match worktree_path {
+            Some(path) => Some(path),
+            None => self.claim_pool_worktree(&input.project_id).await?,
+        };
         self.dispatch(json!({
             "type": "thread.create",
             "createdBy": "user",
@@ -345,6 +353,63 @@ impl Commands {
         }))
         .await?;
         Ok(thread_id)
+    }
+
+    /// A worktree pool project (its folder holds checkouts rather than being
+    /// one) hands a new thread the first checkout no live thread works in.
+    async fn claim_pool_worktree(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<String>, CommandError> {
+        let project = self
+            .runtime
+            .stores
+            .projects
+            .get(project_id.clone(), false)
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        let Some(project) = project else {
+            return Ok(None);
+        };
+        let root = std::path::PathBuf::from(&project.workspace_root);
+        let members = tokio::task::spawn_blocking(move || super::worktree_pool::pool_members(&root))
+            .await
+            .unwrap_or_default();
+        if members.is_empty() {
+            return Ok(None);
+        }
+        let project_key = project_id.as_str().to_owned();
+        let held = self
+            .runtime
+            .stores
+            .db
+            .read(move |conn| {
+                let sql = "SELECT json_extract(payload_json, '$.worktreePath')
+                     FROM orchestration_v2_projection_threads
+                     WHERE project_id = ?1 AND archived_at IS NULL AND deleted_at IS NULL
+                     AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
+                     AND COALESCE(json_extract(payload_json, '$.settledOverride'), '') != 'settled'";
+                let label = "runtime.worktreePoolHeld";
+                let mut statement = conn
+                    .prepare(sql)
+                    .map_err(|error| turin_persistence::PersistenceError::sql(label, &error))?;
+                let rows = statement
+                    .query_map([project_key.as_str()], |row| row.get::<_, String>(0))
+                    .map_err(|error| turin_persistence::PersistenceError::sql(label, &error))?;
+                Ok(rows
+                    .filter_map(Result::ok)
+                    .map(|path| path.trim_end_matches('/').to_owned())
+                    .collect::<std::collections::HashSet<String>>())
+            })
+            .await
+            .map_err(|error| CommandError::from_error(&error))?;
+        match super::worktree_pool::first_free(&members, &held) {
+            Some(free) => Ok(Some(free.to_string_lossy().into_owned())),
+            None => Err(CommandError::new(format!(
+                "Every worktree in {} is in use. Settle a thread to free one.",
+                project.workspace_root
+            ))),
+        }
     }
 
     /// `message.dispatch` from the composer.

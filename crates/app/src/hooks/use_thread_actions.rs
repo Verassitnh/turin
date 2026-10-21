@@ -596,9 +596,19 @@ impl<C: ThreadCommands, H: ThreadActionHost> ThreadActions<C, H> {
         let local_api = self.host.local_api_available();
 
         let mut can_delete_worktree = false;
+        // A worktree pool's checkouts belong to the folder, not the thread.
+        let pool_member = |project: &EnvironmentProject| {
+            orphaned_worktree_path.as_deref().is_some_and(|path| {
+                std::path::Path::new(path).parent()
+                    == Some(std::path::Path::new(
+                        project.workspace_root.trim_end_matches('/'),
+                    ))
+            })
+        };
         let worktree_offerable = orphaned_worktree_path.is_some()
             && project.as_ref().is_some_and(|project| {
                 !is_scratch_project(&project.workspace_root, scratch_root.as_deref())
+                    && !pool_member(project)
             })
             && local_api;
         if worktree_offerable {

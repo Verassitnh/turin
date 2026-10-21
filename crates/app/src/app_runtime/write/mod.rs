@@ -19,3 +19,4 @@ pub mod smoke;
 pub mod source_control;
 pub mod text_generation;
 pub mod thread_commands;
+pub mod worktree_pool;

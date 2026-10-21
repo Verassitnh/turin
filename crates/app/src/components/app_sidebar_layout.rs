@@ -489,6 +489,35 @@ impl AppSidebarLayout {
         if self.pull_requests.is_some() {
             return;
         }
+        self.open_pull_requests_with(validate_pull_requests_search(&Map::new()), window, cx);
+    }
+
+    /// A pull request link (the thread panel's PR row): the pull requests page with that pull
+    /// request open in its detail panel. Anything this cannot read opens in the browser.
+    fn open_pull_request_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(link) = turin_shared::change_request_url::parse_change_request_url(url) else {
+            cx.open_url(url);
+            return;
+        };
+        let mut raw = Map::new();
+        raw.insert("involvement".into(), "all".into());
+        raw.insert("state".into(), "all".into());
+        raw.insert("repository".into(), link.repository.into());
+        raw.insert("number".into(), link.number.into());
+        raw.insert(
+            "selectedHost".into(),
+            link.authority.unwrap_or(link.host).into(),
+        );
+        self.pull_requests = None;
+        self.open_pull_requests_with(validate_pull_requests_search(&raw), window, cx);
+    }
+
+    fn open_pull_requests_with(
+        &mut self,
+        search: crate::pull_request::pull_requests_route_search::PullRequestsSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(live) = self.live.clone() else {
             window.push_notification(
                 Notification::info("Pull requests are not available yet."),
@@ -497,7 +526,6 @@ impl AppSidebarLayout {
             return;
         };
         self.usage = None;
-        let search = validate_pull_requests_search(&Map::new());
         let prefs = LocalPreferenceStorage(self.pr_preferences.clone());
         let sidebar = self.sidebar.clone();
         let open_thread = Arc::new(move |thread_id: &ThreadId, cx: &mut App| {
@@ -1556,6 +1584,11 @@ impl Render for AppSidebarLayout {
         // "Open diff" on a turn's changed files card shows the right panel.
         if crate::diff::take_open_panel_request(cx) {
             self.right_panel_open = true;
+        }
+        if let Some(url) =
+            crate::components::chat::thread_navigation::take_pull_request_open_request(cx)
+        {
+            self.open_pull_request_url(&url, window, cx);
         }
         if let Some(thread_id) =
             crate::components::chat::thread_navigation::take_thread_open_request(cx)

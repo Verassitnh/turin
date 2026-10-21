@@ -750,14 +750,15 @@ impl BranchToolbarBranchSelector {
             tooltip_title: title.unwrap_or_default(),
             url: url.clone(),
         };
-        let git_backend = self.git_backend.clone();
         let _ = cx;
         Some(
             ThreadDetailsPrRow::new(
                 "branch-pr-row",
                 number,
                 label,
-                std::rc::Rc::new(move |_, _, cx| git_backend.open_link(url.clone(), cx)),
+                std::rc::Rc::new(move |_, _, cx| {
+                    crate::components::chat::thread_navigation::request_open_pull_request(&url, cx)
+                }),
             )
             .pr_state(Some(match state {
                 PullRequestBadgeState::Merged => turin_contracts::git::GitPullRequestState::Merged,

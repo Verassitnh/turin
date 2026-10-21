@@ -6,6 +6,7 @@ use gpui_kit::{App, Global};
 #[derive(Default)]
 struct ThreadOpenRequests {
     thread_id: Option<String>,
+    pull_request_url: Option<String>,
 }
 
 impl Global for ThreadOpenRequests {}
@@ -17,4 +18,16 @@ pub fn request_open_thread(thread_id: &str, cx: &mut App) {
 
 pub fn take_thread_open_request(cx: &mut App) -> Option<String> {
     cx.default_global::<ThreadOpenRequests>().thread_id.take()
+}
+
+/// Opens a pull request url in the pull requests view (the shell falls back to the browser).
+pub fn request_open_pull_request(url: &str, cx: &mut App) {
+    cx.default_global::<ThreadOpenRequests>().pull_request_url = Some(url.to_owned());
+    cx.refresh_windows();
+}
+
+pub fn take_pull_request_open_request(cx: &mut App) -> Option<String> {
+    cx.default_global::<ThreadOpenRequests>()
+        .pull_request_url
+        .take()
 }

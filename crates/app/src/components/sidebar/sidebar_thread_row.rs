@@ -346,8 +346,13 @@ impl Sidebar {
             })
             && thread.settled_override != Some(SettledOverride::Settled);
         let is_selected = self.selection.contains(&key);
+        // A press on an action button arms a sweep; only a started sweep hides
+        // hover actions, or the button would vanish before its click lands.
         let is_hovered = !input.ghost
-            && self.sweep.is_none()
+            && self
+                .sweep
+                .as_ref()
+                .is_none_or(|sweep| !sweep.sensor.is_dragging())
             && self.hovered_row.as_deref() == Some(key.as_str());
         let snooze_menu_open = self.snooze_menu_for.as_deref() == Some(key.as_str());
         let show_actions = is_hovered || snooze_menu_open;

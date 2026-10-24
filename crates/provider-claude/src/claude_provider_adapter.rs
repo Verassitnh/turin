@@ -35,8 +35,9 @@ use crate::{
     claude_workflow_progress::parse_claude_workflow_run_handles,
 };
 use crate::{
-    claude_skill_dispatch::dispatch_content_blocks, claude_skills::user_invocable_skill_names,
+    claude_skills::user_invocable_skill_names, claude_user_message::claude_user_content_blocks,
 };
+use turin_claude_protocol::UserPriority;
 use async_trait::async_trait;
 use futures::stream;
 use parking_lot::Mutex;
@@ -1068,7 +1069,14 @@ impl ClaudeActor {
                 .claude
                 .as_mut()
                 .ok_or_else(|| protocol_error("Claude session is not running"))?;
-            match dispatch_content_blocks(&text, &skill_names) {
+            let blocks = claude_user_content_blocks(
+                &text,
+                &input.message.attachments,
+                self.attachments_dir.as_deref(),
+                &skill_names,
+            )
+            .map_err(protocol_error)?;
+            match blocks {
                 Some(blocks) => session.send_blocks(blocks, Some(prompt_uuid.clone()), None),
                 None => session.send_prompt(text, Some(prompt_uuid.clone()), None),
             }
@@ -1211,11 +1219,23 @@ impl ClaudeActor {
             &input.message.text,
             compiled.prompt_effort.as_deref(),
         );
-        self.claude
+        let blocks = claude_user_content_blocks(
+            &text,
+            &input.message.attachments,
+            self.attachments_dir.as_deref(),
+            &std::collections::HashSet::new(),
+        )
+        .map_err(protocol_error)?;
+        let session = self
+            .claude
             .as_mut()
-            .ok_or_else(|| protocol_error("Claude session is not running"))?
-            .steer(text, Some(uuid::Uuid::new_v4().to_string()))
-            .map_err(|e| protocol_error(e.to_string()))?;
+            .ok_or_else(|| protocol_error("Claude session is not running"))?;
+        let uuid = Some(uuid::Uuid::new_v4().to_string());
+        match blocks {
+            Some(blocks) => session.send_blocks(blocks, uuid, Some(UserPriority::Now)),
+            None => session.steer(text, uuid),
+        }
+        .map_err(|e| protocol_error(e.to_string()))?;
         active.steered = true;
         Ok(())
     }

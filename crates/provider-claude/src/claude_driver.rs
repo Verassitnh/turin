@@ -4,8 +4,8 @@
 //! The driver owns the process-wide services (`ClaudeSharedServices`): the
 //! remote model manifest, the latest-version cache, and the reset-credit
 //! coordinator. Each instance reads the catalog from the manifest service at
-//! create time and shares the rest. The attachments directory comes from
-//! `$TURIN_HOME`, and the runtime instruction text from provider-core.
+//! create time and shares the rest. The attachments directory is the host's
+//! attachment store, and the runtime instruction text comes from provider-core.
 use crate::{
     claude_home::make_claude_continuation_group_key,
     claude_managed_provider::{ClaudeInstanceProbes, ClaudeManagedProvider, ClaudeSharedServices},
@@ -87,18 +87,6 @@ impl ClaudeDriver {
 
 fn decode(raw: &Value) -> Result<ClaudeSettings, String> {
     serde_json::from_value(raw.clone()).map_err(|error| error.to_string())
-}
-
-/// `$TURIN_HOME` (or `~/.turin`) `/userdata/attachments`. Turin does not yet
-/// have a shared server-config path, so this follows the home convention the
-/// hooks crate uses.
-fn attachments_dir(environment: &BTreeMap<String, String>, home: &str) -> PathBuf {
-    let base = environment
-        .get("TURIN_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(home).join(".turin"));
-    base.join("userdata").join("attachments")
 }
 
 /// Runtime instruction text for Claude's system prompt. Model and effort are
@@ -248,7 +236,8 @@ impl ProviderDriver for ClaudeDriver {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let attachments = attachments_dir(&adapter_environment, &host.home_directory);
+        // The store the message intake writes to, so turns can read the bytes.
+        let attachments = PathBuf::from(&self.services.host.paths.attachments_dir);
 
         let scoped_names: SharedClaudeScopedLimitNames =
             Arc::new(Mutex::new(ClaudeScopedLimitNames::default()));
